@@ -1,5 +1,5 @@
 import React, { useRef, useState } from 'react';
-import { View, Text, StyleSheet, PanResponder, ViewStyle, Dimensions } from 'react-native';
+import { View, Text, TextInput, StyleSheet, PanResponder, ViewStyle, Dimensions } from 'react-native';
 import { COLORS } from '../theme/colors';
 
 interface BottleSliderProps {
@@ -48,14 +48,19 @@ export const BottleSlider: React.FC<BottleSliderProps> = ({
     PanResponder.create({
       onStartShouldSetPanResponder: () => true,
       onMoveShouldSetPanResponder: () => true,
+      onStartShouldSetPanResponderCapture: () => true,
+      onMoveShouldSetPanResponderCapture: () => true,
       onPanResponderGrant: (evt, gestureState) => {
         setIsDragging(true);
         onDragStart?.();
+        // Request parent ScrollView to not intercept this gesture
+        (evt.currentTarget as any)?.requestDisallowInterceptTouchEvent?.(true);
         // Get the touch location relative to the node
         const y = evt.nativeEvent.locationY;
         handleTouch(y);
       },
       onPanResponderMove: (evt, gestureState) => {
+        (evt.currentTarget as any)?.requestDisallowInterceptTouchEvent?.(true);
         const y = evt.nativeEvent.locationY;
         handleTouch(y);
       },
@@ -79,10 +84,21 @@ export const BottleSlider: React.FC<BottleSliderProps> = ({
       <View style={styles.volumeCard}>
         <Text style={styles.volumeLabel}>수유량</Text>
         <View style={styles.volumeNumberContainer}>
-          <Text style={styles.volumeNumber}>{value}</Text>
+          <TextInput
+            style={styles.volumeInput}
+            value={value === 0 ? '' : value.toString()}
+            onChangeText={(text) => {
+              const num = parseInt(text.replace(/[^0-9]/g, '')) || 0;
+              const clamped = Math.min(MAX_ML, num);
+              onChange(clamped);
+            }}
+            keyboardType="number-pad"
+            maxLength={3}
+            selectTextOnFocus
+          />
           <Text style={styles.volumeUnit}>ml</Text>
         </View>
-        <Text style={styles.helperText}>젖병을 위아래로 드래그하여 조절하세요</Text>
+        <Text style={styles.helperText}>드래그하거나 숫자를 직접 터치해 입력하세요</Text>
       </View>
 
       {/* Beautiful Baby Bottle Layout */}
@@ -183,6 +199,14 @@ const styles = StyleSheet.create({
     fontSize: 42,
     fontWeight: 'bold',
     color: COLORS.primary,
+  },
+  volumeInput: {
+    fontSize: 42,
+    fontWeight: 'bold',
+    color: COLORS.primary,
+    textAlign: 'center',
+    minWidth: 80,
+    padding: 0,
   },
   volumeUnit: {
     fontSize: 20,
