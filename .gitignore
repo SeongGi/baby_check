@@ -43,4 +43,6 @@ yarn-error.*
 # built binaries at root
 /*.apk
 /*.aab
+/*.keystore
+
 
