@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import { 
   View, 
   Text, 
@@ -10,20 +10,92 @@ import {
   KeyboardAvoidingView,
   Platform
 } from 'react-native';
-import { BabyProfile } from '../types';
+import * as Clipboard from 'expo-clipboard';
+import { BabyProfile, BabyLogEntry } from '../types';
 import { COLORS } from '../theme/colors';
+import { getLogs } from '../database/storage';
 
 interface ProfileProps {
   profile: BabyProfile;
   onSaveProfile: (profile: BabyProfile) => Promise<boolean>;
+  onImportData: (profile: BabyProfile, logs: BabyLogEntry[]) => Promise<void>;
 }
 
-export const Profile: React.FC<ProfileProps> = ({ profile, onSaveProfile }) => {
+export const Profile: React.FC<ProfileProps> = ({ profile, onSaveProfile, onImportData }) => {
   const [name, setName] = useState(profile.name);
   const [birthDate, setBirthDate] = useState(profile.birthDate);
   const [birthWeight, setBirthWeight] = useState(profile.birthWeight);
   const [targetFormula, setTargetFormula] = useState(profile.targetFormula.toString());
+
+  // Sync inputs if profile values update from parent (e.g. edited from dashboard)
+  useEffect(() => {
+    setName(profile.name);
+    setBirthDate(profile.birthDate);
+    setBirthWeight(profile.birthWeight);
+    setTargetFormula(profile.targetFormula.toString());
+  }, [profile]);
   const [isSaving, setIsSaving] = useState(false);
+
+  const [showImportInput, setShowImportInput] = useState(false);
+  const [importText, setImportText] = useState('');
+
+  const handleExport = async () => {
+    try {
+      const allLogs = await getLogs();
+      const backupData = {
+        version: 1,
+        backupDate: Date.now(),
+        profile,
+        logs: allLogs,
+      };
+      const jsonString = JSON.stringify(backupData);
+      await Clipboard.setStringAsync(jsonString);
+      Alert.alert('내보내기 성공', '데이터가 클립보드에 안전하게 복사되었습니다. 카카오톡이나 메모장에 붙여넣기 하여 백업해 두세요!');
+    } catch (e) {
+      console.error(e);
+      Alert.alert('내보내기 실패', '데이터를 백업하는 중 오류가 발생했습니다.');
+    }
+  };
+
+  const handleImport = async () => {
+    if (!importText.trim()) {
+      Alert.alert('복원 오류', '복원할 텍스트 데이터를 붙여넣어 주세요.');
+      return;
+    }
+
+    try {
+      const parsedData = JSON.parse(importText.trim());
+      if (!parsedData.profile || !Array.isArray(parsedData.logs)) {
+        Alert.alert('복원 실패', '올바르지 않은 백업 데이터 포맷입니다.');
+        return;
+      }
+
+      Alert.alert(
+        '데이터 복원 확인',
+        '기존 기기의 모든 아기 일지와 설정 정보가 삭제되고 백업된 데이터로 복원됩니다. 정말 진행하시겠습니까?',
+        [
+          { text: '취소', style: 'cancel' },
+          { 
+            text: '복원하기', 
+            style: 'destructive',
+            onPress: async () => {
+              try {
+                await onImportData(parsedData.profile, parsedData.logs);
+                Alert.alert('복원 성공', '우리아기 기록이 성공적으로 복원되었습니다.');
+                setShowImportInput(false);
+                setImportText('');
+              } catch (e) {
+                console.error(e);
+                Alert.alert('오류', '데이터 저장 중 문제가 발생했습니다.');
+              }
+            }
+          }
+        ]
+      );
+    } catch (e) {
+      Alert.alert('복원 실패', '텍스트를 데이터 객체로 변환하는 중 오류가 발생했습니다. 정상적인 텍스트인지 다시 확인해 주세요.');
+    }
+  };
 
   const handleSave = async () => {
     // Basic validations
@@ -147,6 +219,42 @@ export const Profile: React.FC<ProfileProps> = ({ profile, onSaveProfile }) => {
           </Text>
         </TouchableOpacity>
 
+        {/* Data Backup & Restore Card */}
+        <View style={styles.backupCard}>
+          <Text style={styles.backupTitle}>📂 데이터 백업 및 복원</Text>
+          <Text style={styles.backupDesc}>우리아기 일지를 복사해서 다른 기기로 옮기거나 안전하게 백업해 둘 수 있습니다.</Text>
+          
+          <View style={styles.backupButtonsRow}>
+            <TouchableOpacity style={styles.backupButton} onPress={handleExport}>
+              <Text style={styles.backupButtonText}>데이터 내보내기 📤</Text>
+            </TouchableOpacity>
+            
+            <TouchableOpacity 
+              style={[styles.backupButton, { backgroundColor: COLORS.secondary }]} 
+              onPress={() => setShowImportInput(!showImportInput)}
+            >
+              <Text style={styles.backupButtonText}>데이터 가져오기 📥</Text>
+            </TouchableOpacity>
+          </View>
+
+          {showImportInput && (
+            <View style={styles.importInputContainer}>
+              <TextInput
+                style={styles.importInput}
+                placeholder="내보내기 한 백업 텍스트를 여기에 붙여넣어 주세요."
+                placeholderTextColor={COLORS.textMuted}
+                value={importText}
+                onChangeText={setImportText}
+                multiline
+                numberOfLines={4}
+              />
+              <TouchableOpacity style={styles.runImportButton} onPress={handleImport}>
+                <Text style={styles.runImportButtonText}>데이터 복원 실행 ⚡</Text>
+              </TouchableOpacity>
+            </View>
+          )}
+        </View>
+
         {/* Info Box */}
         <View style={styles.infoCard}>
           <Text style={styles.infoTitle}>💡 신생아 상식 꿀팁!</Text>
@@ -258,5 +366,87 @@ const styles = StyleSheet.create({
     color: '#666666',
     lineHeight: 18,
     marginBottom: 6,
+  },
+  backupCard: {
+    backgroundColor: COLORS.card,
+    borderRadius: 22,
+    padding: 20,
+    marginBottom: 20,
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 4 },
+    shadowOpacity: 0.04,
+    shadowRadius: 8,
+    elevation: 2,
+    borderWidth: 1,
+    borderColor: COLORS.border,
+  },
+  backupTitle: {
+    fontSize: 15,
+    fontWeight: 'bold',
+    color: COLORS.text,
+    marginBottom: 6,
+  },
+  backupDesc: {
+    fontSize: 12,
+    color: COLORS.textMuted,
+    lineHeight: 18,
+    marginBottom: 16,
+  },
+  backupButtonsRow: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+  },
+  backupButton: {
+    flex: 0.485,
+    backgroundColor: COLORS.primary,
+    borderRadius: 14,
+    paddingVertical: 12,
+    alignItems: 'center',
+    justifyContent: 'center',
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 2 },
+    shadowOpacity: 0.05,
+    shadowRadius: 4,
+    elevation: 1,
+  },
+  backupButtonText: {
+    color: '#FFFFFF',
+    fontSize: 12,
+    fontWeight: 'bold',
+  },
+  importInputContainer: {
+    marginTop: 16,
+    borderTopWidth: 1,
+    borderTopColor: COLORS.border,
+    paddingTop: 16,
+  },
+  importInput: {
+    borderWidth: 1.5,
+    borderColor: COLORS.border,
+    borderRadius: 12,
+    padding: 10,
+    fontSize: 12,
+    color: COLORS.text,
+    backgroundColor: COLORS.background,
+    height: 100,
+    textAlignVertical: 'top',
+    marginBottom: 12,
+  },
+  runImportButton: {
+    backgroundColor: '#34D399',
+    borderRadius: 14,
+    paddingVertical: 12,
+    alignItems: 'center',
+    justifyContent: 'center',
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 2 },
+    shadowOpacity: 0.08,
+    shadowRadius: 4,
+    elevation: 2,
+  },
+  runImportButtonText: {
+    color: '#FFFFFF',
+    fontSize: 13,
+    fontWeight: 'bold',
   },
 });

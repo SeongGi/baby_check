@@ -30,6 +30,8 @@ export const LogFormula: React.FC<LogFormulaProps> = ({ onAddLog, onNavigate }) 
   const [notes, setNotes] = useState('');
   const [isSaving, setIsSaving] = useState(false);
 
+  const [scrollEnabled, setScrollEnabled] = useState(true);
+
   const handleSave = async () => {
     if (amount <= 0) {
       alert('분유 양을 10ml 이상 선택해주세요.');
@@ -64,7 +66,11 @@ export const LogFormula: React.FC<LogFormulaProps> = ({ onAddLog, onNavigate }) 
       style={styles.keyboardView}
       behavior={Platform.OS === 'ios' ? 'padding' : undefined}
     >
-      <ScrollView style={styles.container} contentContainerStyle={styles.contentContainer}>
+      <ScrollView 
+        style={styles.container} 
+        contentContainerStyle={styles.contentContainer}
+        scrollEnabled={scrollEnabled}
+      >
         {/* Header Title */}
         <View style={styles.header}>
           <TouchableOpacity onPress={() => onNavigate('dashboard')} style={styles.backButton}>
@@ -75,7 +81,12 @@ export const LogFormula: React.FC<LogFormulaProps> = ({ onAddLog, onNavigate }) 
         </View>
 
         {/* Custom Draggable Baby Bottle Slider */}
-        <BottleSlider value={amount} onChange={setAmount} />
+        <BottleSlider 
+          value={amount} 
+          onChange={setAmount} 
+          onDragStart={() => setScrollEnabled(false)}
+          onDragEnd={() => setScrollEnabled(true)}
+        />
 
         {/* Temperature Selector */}
         <View style={styles.section}>

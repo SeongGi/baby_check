@@ -135,8 +135,12 @@ export const Dashboard: React.FC<DashboardProps> = ({ logs, profile, onDeleteLog
 
   return (
     <ScrollView style={styles.container} contentContainerStyle={styles.contentContainer}>
-      {/* Baby Greeting Card */}
-      <View style={styles.babyCard}>
+      {/* Baby Greeting Card (Clickable to edit Profile) */}
+      <TouchableOpacity 
+        style={styles.babyCard} 
+        onPress={() => onNavigate('profile')}
+        activeOpacity={0.8}
+      >
         <View style={styles.babyCardHeader}>
           <Text style={styles.babyName}>{profile.name}</Text>
           <View style={styles.ddayBadge}>
@@ -149,7 +153,8 @@ export const Dashboard: React.FC<DashboardProps> = ({ logs, profile, onDeleteLog
         <Text style={styles.babyQuote}>
           {dday <= 30 ? '새근새근 세상에 적응 중이에요 🍼' : '오늘 하루도 쑥쑥 건강하게 자라고 있어요! ❤️'}
         </Text>
-      </View>
+        <Text style={styles.editIndicator}>✏️ 터치하여 수정하기</Text>
+      </TouchableOpacity>
 
       {/* Summary Cards */}
       <View style={styles.summaryContainer}>
@@ -310,6 +315,13 @@ const styles = StyleSheet.create({
     color: COLORS.primary,
     fontWeight: '600',
     fontStyle: 'italic',
+  },
+  editIndicator: {
+    fontSize: 10,
+    color: COLORS.textMuted,
+    textAlign: 'right',
+    marginTop: 4,
+    fontWeight: '600',
   },
   summaryContainer: {
     marginBottom: 20,

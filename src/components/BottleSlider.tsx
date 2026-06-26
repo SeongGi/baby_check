@@ -5,12 +5,19 @@ import { COLORS } from '../theme/colors';
 interface BottleSliderProps {
   value: number; // in ml (0 to 300)
   onChange: (value: number) => void;
+  onDragStart?: () => void;
+  onDragEnd?: () => void;
 }
 
 const BOTTLE_HEIGHT = 320; // height of the draggable bottle body in dp
 const MAX_ML = 300;
 
-export const BottleSlider: React.FC<BottleSliderProps> = ({ value, onChange }) => {
+export const BottleSlider: React.FC<BottleSliderProps> = ({ 
+  value, 
+  onChange,
+  onDragStart,
+  onDragEnd
+}) => {
   const [isDragging, setIsDragging] = useState(false);
   const bottleRef = useRef<View>(null);
 
@@ -43,23 +50,22 @@ export const BottleSlider: React.FC<BottleSliderProps> = ({ value, onChange }) =
       onMoveShouldSetPanResponder: () => true,
       onPanResponderGrant: (evt, gestureState) => {
         setIsDragging(true);
+        onDragStart?.();
         // Get the touch location relative to the node
         const y = evt.nativeEvent.locationY;
         handleTouch(y);
       },
       onPanResponderMove: (evt, gestureState) => {
-        // In move event, locationY is not always relative to the element (can jump if dragging outside)
-        // Better: use gestureState.dy or absolute position if available
-        // Let's use the touch Y coordinate. We can estimate it relative to the bottle element
-        // Since we are dragging, we can check the locationY. On React Native, locationY on move is relative to the element.
         const y = evt.nativeEvent.locationY;
         handleTouch(y);
       },
       onPanResponderRelease: () => {
         setIsDragging(false);
+        onDragEnd?.();
       },
       onPanResponderTerminate: () => {
         setIsDragging(false);
+        onDragEnd?.();
       },
     })
   ).current;

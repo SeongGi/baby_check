@@ -3,27 +3,29 @@ import {
   StyleSheet, 
   Text, 
   View, 
-  SafeAreaView, 
   TouchableOpacity, 
   ActivityIndicator,
   Platform,
-  NativeModules
+  BackHandler
 } from 'react-native';
 import { StatusBar } from 'expo-status-bar';
+import { SafeAreaProvider, useSafeAreaInsets } from 'react-native-safe-area-context';
 import { COLORS } from './src/theme/colors';
 import { BabyLogEntry, BabyProfile } from './src/types';
-import { getLogs, getProfile, addLog, deleteLog, saveProfile } from './src/database/storage';
+import { getLogs, getProfile, addLog, deleteLog, saveProfile, saveLogs } from './src/database/storage';
 import { Dashboard } from './src/screens/Dashboard';
 import { LogFormula } from './src/screens/LogFormula';
 import { LogDiaper } from './src/screens/LogDiaper';
 import { Statistics } from './src/screens/Statistics';
 import { Profile } from './src/screens/Profile';
 
-export default function App() {
+function MainApp() {
   const [logs, setLogs] = useState<BabyLogEntry[]>([]);
   const [profile, setProfile] = useState<BabyProfile | null>(null);
   const [activeScreen, setActiveScreen] = useState<'dashboard' | 'formula' | 'diaper' | 'statistics' | 'profile'>('dashboard');
   const [isLoading, setIsLoading] = useState(true);
+  
+  const insets = useSafeAreaInsets();
 
   // Load initial data
   useEffect(() => {
@@ -42,10 +44,27 @@ export default function App() {
     loadData();
   }, []);
 
+  // Handle hardware back button on Android
+  useEffect(() => {
+    const backAction = () => {
+      if (activeScreen !== 'dashboard') {
+        setActiveScreen('dashboard');
+        return true; // Prevent app exit
+      }
+      return false; // Exit app if already on dashboard
+    };
+
+    const backHandler = BackHandler.addEventListener(
+      'hardwareBackPress',
+      backAction
+    );
+
+    return () => backHandler.remove();
+  }, [activeScreen]);
+
   const handleAddLog = async (newLogData: Omit<BabyLogEntry, 'id'>) => {
     const savedLog = await addLog(newLogData);
     if (savedLog) {
-      // Reload logs from storage to keep in sync and sorted
       const updatedLogs = await getLogs();
       setLogs(updatedLogs);
     }
@@ -66,6 +85,14 @@ export default function App() {
       setProfile(newProfile);
     }
     return success;
+  };
+
+  const handleImportData = async (newProfile: BabyProfile, newLogs: BabyLogEntry[]) => {
+    await saveProfile(newProfile);
+    await saveLogs(newLogs);
+    setProfile(newProfile);
+    setLogs(newLogs);
+    setActiveScreen('dashboard');
   };
 
   if (isLoading || !profile) {
@@ -110,6 +137,7 @@ export default function App() {
           <Profile 
             profile={profile} 
             onSaveProfile={handleSaveProfile} 
+            onImportData={handleImportData}
           />
         );
     }
@@ -117,14 +145,23 @@ export default function App() {
 
   // Only show bottom tabs on main pages (Dashboard, Statistics, Profile)
   const showTabs = activeScreen === 'dashboard' || activeScreen === 'statistics' || activeScreen === 'profile';
+  
+  // Calculate dynamic bottom tab bar spacing
+  const bottomPadding = insets.bottom > 0 ? insets.bottom : 8;
+  const tabBarHeight = 52 + bottomPadding;
 
   return (
-    <SafeAreaView style={styles.container}>
+    <View style={[
+      styles.container, 
+      { 
+        paddingTop: activeScreen === 'formula' || activeScreen === 'diaper' ? insets.top : 0
+      }
+    ]}>
       <StatusBar style="dark" />
       
       {/* Top Bar / App Header */}
       {showTabs && (
-        <View style={styles.header}>
+        <View style={[styles.header, { paddingTop: insets.top, height: 50 + insets.top }]}>
           <Text style={styles.headerTitle}>아가보개 👶</Text>
           <Text style={styles.headerSubtitle}>{profile.name} 일기</Text>
         </View>
@@ -137,7 +174,13 @@ export default function App() {
 
       {/* Custom Bottom Tab Bar */}
       {showTabs && (
-        <View style={styles.tabBar}>
+        <View style={[
+          styles.tabBar, 
+          { 
+            height: tabBarHeight, 
+            paddingBottom: bottomPadding 
+          }
+        ]}>
           {/* Dashboard Tab */}
           <TouchableOpacity 
             style={[styles.tabItem, activeScreen === 'dashboard' && styles.tabItemActive]}
@@ -166,7 +209,15 @@ export default function App() {
           </TouchableOpacity>
         </View>
       )}
-    </SafeAreaView>
+    </View>
+  );
+}
+
+export default function App() {
+  return (
+    <SafeAreaProvider>
+      <MainApp />
+    </SafeAreaProvider>
   );
 }
 
@@ -174,8 +225,6 @@ const styles = StyleSheet.create({
   container: {
     flex: 1,
     backgroundColor: COLORS.background,
-    // Add extra padding for android top bar if not covered by safearea
-    paddingTop: Platform.OS === 'android' ? 35 : 0,
   },
   loadingContainer: {
     flex: 1,
@@ -190,7 +239,6 @@ const styles = StyleSheet.create({
     fontWeight: '600',
   },
   header: {
-    height: 55,
     backgroundColor: COLORS.card,
     borderBottomWidth: 1,
     borderColor: COLORS.border,
@@ -213,14 +261,12 @@ const styles = StyleSheet.create({
     flex: 1,
   },
   tabBar: {
-    height: 64,
     backgroundColor: COLORS.card,
     borderTopWidth: 1,
     borderColor: COLORS.border,
     flexDirection: 'row',
     justifyContent: 'space-around',
     alignItems: 'center',
-    paddingBottom: Platform.OS === 'ios' ? 12 : 6,
     paddingTop: 6,
   },
   tabItem: {
