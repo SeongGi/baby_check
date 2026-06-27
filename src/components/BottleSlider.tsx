@@ -20,6 +20,7 @@ export const BottleSlider: React.FC<BottleSliderProps> = ({
 }) => {
   const [isDragging, setIsDragging] = useState(false);
   const bottleRef = useRef<View>(null);
+  const startYRef = useRef(0);
 
   // Calculate the y position of the current ml value
   // 0 ml is at the bottom (y = BOTTLE_HEIGHT)
@@ -57,12 +58,13 @@ export const BottleSlider: React.FC<BottleSliderProps> = ({
         (evt.currentTarget as any)?.requestDisallowInterceptTouchEvent?.(true);
         // Get the touch location relative to the node
         const y = evt.nativeEvent.locationY;
+        startYRef.current = y;
         handleTouch(y);
       },
       onPanResponderMove: (evt, gestureState) => {
         (evt.currentTarget as any)?.requestDisallowInterceptTouchEvent?.(true);
-        const y = evt.nativeEvent.locationY;
-        handleTouch(y);
+        const currentY = startYRef.current + gestureState.dy;
+        handleTouch(currentY);
       },
       onPanResponderRelease: () => {
         setIsDragging(false);
@@ -116,14 +118,14 @@ export const BottleSlider: React.FC<BottleSliderProps> = ({
           {...panResponder.panHandlers}
         >
           {/* Milk Liquid Fill */}
-          <View style={[styles.milkFill, { height: getFillHeight() }]}>
+          <View style={[styles.milkFill, { height: getFillHeight() }]} pointerEvents="none">
             {/* Liquid wave highlight overlay */}
             <View style={styles.milkWaveTop} />
             <View style={styles.milkGlassHighlight} />
           </View>
 
           {/* Glass Glossy Highlight (vertical stripe) */}
-          <View style={styles.glassHighlightStripe} />
+          <View style={styles.glassHighlightStripe} pointerEvents="none" />
 
           {/* Graduation lines */}
           <View style={styles.graduationsContainer} pointerEvents="none">
@@ -149,7 +151,7 @@ export const BottleSlider: React.FC<BottleSliderProps> = ({
           
           {/* Animated floating bubble/indicator during drag */}
           {isDragging && (
-            <View style={[styles.floatingBubble, { bottom: getFillHeight() - 20 }]}>
+            <View style={[styles.floatingBubble, { bottom: getFillHeight() - 20 }]} pointerEvents="none">
               <Text style={styles.floatingBubbleText}>{value} ml</Text>
             </View>
           )}
@@ -299,7 +301,6 @@ const styles = StyleSheet.create({
     width: 8,
     borderRadius: 4,
     backgroundColor: 'rgba(255, 255, 255, 0.4)', // glass gloss reflection
-    pointerEvents: 'none',
   },
   graduationsContainer: {
     position: 'absolute',
