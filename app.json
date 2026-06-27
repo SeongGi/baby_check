@@ -10,7 +10,8 @@
       "policy": "appVersion"
     },
     "updates": {
-      "url": "https://u.expo.dev"
+      "url": "https://u.expo.dev",
+      "checkAutomatically": "NEVER"
     },
     "splash": {
       "image": "./assets/splash-icon.png",
