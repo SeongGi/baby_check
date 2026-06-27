@@ -11,6 +11,7 @@ import {
   Platform
 } from 'react-native';
 import * as Clipboard from 'expo-clipboard';
+import * as Updates from 'expo-updates';
 import { BabyProfile, BabyLogEntry } from '../types';
 import { COLORS } from '../theme/colors';
 import { getLogs } from '../database/storage';
@@ -35,9 +36,59 @@ export const Profile: React.FC<ProfileProps> = ({ profile, onSaveProfile, onImpo
     setTargetFormula(profile.targetFormula.toString());
   }, [profile]);
   const [isSaving, setIsSaving] = useState(false);
+  const [isCheckingUpdates, setIsCheckingUpdates] = useState(false);
 
   const [showImportInput, setShowImportInput] = useState(false);
   const [importText, setImportText] = useState('');
+
+  const handleCheckUpdates = async () => {
+    if (!Updates.isEnabled) {
+      Alert.alert('업데이트 안내', '이 빌드에서는 라이브 업데이트를 사용할 수 없습니다. (개발 모드 또는 빌드 옵션 비활성화)');
+      return;
+    }
+
+    setIsCheckingUpdates(true);
+    try {
+      const update = await Updates.checkForUpdateAsync();
+      if (update.isAvailable) {
+        Alert.alert(
+          '새로운 업데이트 발견',
+          '새로운 앱 업데이트 버전을 다운로드하시겠습니까? (다운로드 후 앱이 재시작됩니다.)',
+          [
+            { text: '나중에', style: 'cancel' },
+            { 
+              text: '업데이트 시작', 
+              onPress: async () => {
+                try {
+                  setIsCheckingUpdates(true);
+                  await Updates.fetchUpdateAsync();
+                  Alert.alert('다운로드 완료', '업데이트가 완료되었습니다. 앱을 재시작하여 적용합니다.', [
+                    { 
+                      text: '확인', 
+                      onPress: async () => {
+                        await Updates.reloadAsync();
+                      } 
+                    }
+                  ]);
+                } catch (err) {
+                  Alert.alert('업데이트 실패', '업데이트를 다운로드하는 중 오류가 발생했습니다: ' + (err instanceof Error ? err.message : String(err)));
+                } finally {
+                  setIsCheckingUpdates(false);
+                }
+              }
+            }
+          ]
+        );
+      } else {
+        Alert.alert('최신 버전', '현재 이미 최신 버전의 앱을 사용하고 있습니다.');
+      }
+    } catch (e) {
+      console.error(e);
+      Alert.alert('확인 실패', '업데이트 서버에 연결할 수 없거나 오류가 발생했습니다: ' + (e instanceof Error ? e.message : String(e)));
+    } finally {
+      setIsCheckingUpdates(false);
+    }
+  };
 
   const handleExport = async () => {
     try {
@@ -255,6 +306,21 @@ export const Profile: React.FC<ProfileProps> = ({ profile, onSaveProfile, onImpo
           )}
         </View>
 
+        {/* App Updates Card */}
+        <View style={styles.backupCard}>
+          <Text style={styles.backupTitle}>⚡ 앱 업데이트 확인</Text>
+          <Text style={styles.backupDesc}>새로운 기능이나 버그 수정사항이 배포되면 앱을 무선(OTA)으로 최신 상태로 업데이트합니다.</Text>
+          <TouchableOpacity 
+            style={[styles.updateButton, isCheckingUpdates && styles.updateButtonDisabled]} 
+            onPress={handleCheckUpdates}
+            disabled={isCheckingUpdates}
+          >
+            <Text style={styles.updateButtonText}>
+              {isCheckingUpdates ? '업데이트 확인 중...' : '앱 자동 업데이트 확인 🔄'}
+            </Text>
+          </TouchableOpacity>
+        </View>
+
         {/* Info Box */}
         <View style={styles.infoCard}>
           <Text style={styles.infoTitle}>💡 신생아 상식 꿀팁!</Text>
@@ -445,6 +511,27 @@ const styles = StyleSheet.create({
     elevation: 2,
   },
   runImportButtonText: {
+    color: '#FFFFFF',
+    fontSize: 13,
+    fontWeight: 'bold',
+  },
+  updateButton: {
+    backgroundColor: COLORS.secondary,
+    borderRadius: 14,
+    paddingVertical: 14,
+    alignItems: 'center',
+    justifyContent: 'center',
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 2 },
+    shadowOpacity: 0.05,
+    shadowRadius: 4,
+    elevation: 1,
+    marginTop: 8,
+  },
+  updateButtonDisabled: {
+    backgroundColor: COLORS.textMuted,
+  },
+  updateButtonText: {
     color: '#FFFFFF',
     fontSize: 13,
     fontWeight: 'bold',
