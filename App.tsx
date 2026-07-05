@@ -229,7 +229,7 @@ function MainApp() {
       {/* Top Bar / App Header */}
       {showTabs && (
         <View style={[styles.header, { paddingTop: insets.top, height: 50 + insets.top }]}>
-          <Text style={styles.headerTitle}>아가보개 👶</Text>
+          <Text style={styles.headerTitle}>아기기록-도우미 👶</Text>
           <Text style={styles.headerSubtitle}>{profile.name} 일기</Text>
         </View>
       )}

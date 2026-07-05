@@ -1,7 +1,62 @@
 import { BabyLogEntry, BabyProfile } from '../types';
 import { saveLogs, saveProfile } from './storage';
 
-const BUCKET_URL = 'https://kvdb.io/79563103-adf4-45c2-b610-ae4c461868f0';
+const KEYVALUE_APP_KEY = '1w3sbtb8';
+const KEYVALUE_BASE_URL = 'https://keyvalue.immanuel.co/api/KeyVal';
+const EXTENDSCLASS_BASE_URL = 'https://extendsclass.com/api/json-storage/bin';
+
+// Cache to hold resolved bin ID in memory during app session
+let cachedBinId: string | null = null;
+
+export const getOrCreateBinId = async (sanitizedKey: string): Promise<string | null> => {
+  if (cachedBinId) return cachedBinId;
+  
+  try {
+    const lookupKey = `baby_check_map_${sanitizedKey}`;
+    // Fetch mapping from keyvalue.immanuel.co (cache-busted)
+    const res = await fetch(`${KEYVALUE_BASE_URL}/GetValue/${KEYVALUE_APP_KEY}/${lookupKey}?t=${Date.now()}`);
+    if (res.ok) {
+      let binId = await res.json();
+      if (binId) {
+        binId = binId.trim();
+        if (binId !== "") {
+          cachedBinId = binId;
+          return binId;
+        }
+      }
+    }
+    
+    // If not found, create a new bin on ExtendsClass
+    const createRes = await fetch(EXTENDSCLASS_BASE_URL, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ logs: [], profile: {} }),
+    });
+    if (!createRes.ok) {
+      console.error('Failed to create ExtendsClass bin');
+      return null;
+    }
+    const createData = await createRes.json();
+    const newBinId = createData.id;
+    if (!newBinId) return null;
+    
+    // Save mapping back to keyvalue.immanuel.co
+    const saveRes = await fetch(`${KEYVALUE_BASE_URL}/UpdateValue/${KEYVALUE_APP_KEY}/${lookupKey}/${newBinId}`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: '',
+    });
+    if (!saveRes.ok) {
+      console.warn('Failed to save bin mapping to KeyVal');
+    }
+    
+    cachedBinId = newBinId;
+    return newBinId;
+  } catch (err) {
+    console.error('Error in getOrCreateBinId', err);
+    return null;
+  }
+};
 
 // Merge logs by ID and compare updatedAt
 export const mergeLogs = (localLogs: BabyLogEntry[], remoteLogs: BabyLogEntry[]): BabyLogEntry[] => {
@@ -42,7 +97,7 @@ export const mergeProfile = (localProfile: BabyProfile, remoteProfile: BabyProfi
   return localProfile;
 };
 
-// Upload logs and profile to kvdb
+// Upload logs and profile to cloud sync (ExtendsClass)
 export const uploadToCloud = async (syncKey: string, logs: BabyLogEntry[], profile: BabyProfile): Promise<boolean> => {
   if (!syncKey || !syncKey.trim()) return false;
   
@@ -50,20 +105,16 @@ export const uploadToCloud = async (syncKey: string, logs: BabyLogEntry[], profi
   if (!sanitizedKey) return false;
   
   try {
-    const logsPromise = fetch(`${BUCKET_URL}/${sanitizedKey}_logs`, {
-      method: 'POST',
+    const binId = await getOrCreateBinId(sanitizedKey);
+    if (!binId) return false;
+    
+    const res = await fetch(`${EXTENDSCLASS_BASE_URL}/${binId}`, {
+      method: 'PUT',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(logs),
+      body: JSON.stringify({ logs, profile }),
     });
     
-    const profilePromise = fetch(`${BUCKET_URL}/${sanitizedKey}_profile`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(profile),
-    });
-    
-    const [resLogs, resProfile] = await Promise.all([logsPromise, profilePromise]);
-    return resLogs.ok && resProfile.ok;
+    return res.ok;
   } catch (error) {
     console.error('Error uploading to cloud sync', error);
     return false;
@@ -86,10 +137,25 @@ export const syncWithCloud = async (
   }
   
   try {
-    const logsPromise = fetch(`${BUCKET_URL}/${sanitizedKey}_logs`).then(r => r.ok ? r.json() : null);
-    const profilePromise = fetch(`${BUCKET_URL}/${sanitizedKey}_profile`).then(r => r.ok ? r.json() : null);
+    const binId = await getOrCreateBinId(sanitizedKey);
+    if (!binId) {
+      return { logs: localLogs, profile: localProfile, success: false, merged: false };
+    }
     
-    const [remoteLogs, remoteProfile] = await Promise.all([logsPromise, profilePromise]);
+    // Fetch with cache-busting query parameter and headers to prevent local CDN/device caching
+    const res = await fetch(`${EXTENDSCLASS_BASE_URL}/${binId}?t=${Date.now()}`, {
+      headers: {
+        'Cache-Control': 'no-cache',
+        'Pragma': 'no-cache'
+      }
+    });
+    if (!res.ok) {
+      return { logs: localLogs, profile: localProfile, success: false, merged: false };
+    }
+    
+    const remoteData = await res.json();
+    const remoteLogs = remoteData?.logs;
+    const remoteProfile = remoteData?.profile;
     
     let mergedLogs = localLogs;
     let mergedProfile = localProfile;
