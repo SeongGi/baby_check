@@ -11,7 +11,10 @@
     },
     "updates": {
       "url": "https://u.expo.dev/79563103-adf4-45c2-b610-ae4c461868f0",
-      "checkAutomatically": "NEVER"
+      "checkAutomatically": "NEVER",
+      "requestHeaders": {
+        "expo-channel-name": "master"
+      }
     },
     "splash": {
       "image": "./assets/splash-icon.png",
