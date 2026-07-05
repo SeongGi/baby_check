@@ -9,7 +9,7 @@
     "runtimeVersion": "1.0.0",
     "updates": {
       "url": "https://u.expo.dev/79563103-adf4-45c2-b610-ae4c461868f0",
-      "checkAutomatically": "NEVER",
+      "checkAutomatically": "ON_LOAD",
       "requestHeaders": {
         "expo-channel-name": "master"
       }
