@@ -223,49 +223,13 @@ export const LogDiaper: React.FC<LogDiaperProps> = ({ onAddLog, onNavigate }) =>
           </View>
         ) : (
           /* Urine (Pee) Section */
-          <View>
-            {/* Wetness level */}
-            <View style={styles.section}>
-              <Text style={styles.sectionTitle}>소변 젖은 정도 (양)</Text>
-              <View style={styles.optionsRow}>
-                {(['light', 'medium', 'heavy'] as UrineWetness[]).map((wet) => {
-                  const label = wet === 'light' ? '조금 🤏' : wet === 'medium' ? '보통 👍' : '많음 💧';
-                  const isSelected = urineWetness === wet;
-                  return (
-                    <TouchableOpacity
-                      key={wet}
-                      style={[styles.optionButton, isSelected && styles.optionButtonActive]}
-                      onPress={() => setUrineWetness(wet)}
-                    >
-                      <Text style={[styles.optionText, isSelected && styles.optionTextActive]}>
-                        {label}
-                      </Text>
-                    </TouchableOpacity>
-                  );
-                })}
-              </View>
-            </View>
-
-            {/* Urine Color */}
-            <View style={styles.section}>
-              <Text style={styles.sectionTitle}>소변 색상</Text>
-              <View style={styles.optionsRow}>
-                {(['clear', 'normal', 'dark'] as UrineColor[]).map((col) => {
-                  const label = col === 'clear' ? '맑음/투명 ✨' : col === 'normal' ? '보통 💛' : '진함 (수분부족) 🧡';
-                  const isSelected = urineColor === col;
-                  return (
-                    <TouchableOpacity
-                      key={col}
-                      style={[styles.optionButton, isSelected && styles.optionButtonActive]}
-                      onPress={() => setUrineColor(col)}
-                    >
-                      <Text style={[styles.optionText, isSelected && styles.optionTextActive]}>
-                        {label}
-                      </Text>
-                    </TouchableOpacity>
-                  );
-                })}
-              </View>
+          <View style={styles.section}>
+            <View style={styles.simpleUrineCard}>
+              <Text style={styles.simpleUrineEmoji}>💧</Text>
+              <Text style={styles.simpleUrineTitle}>소변 기저귀 교체</Text>
+              <Text style={styles.simpleUrineDesc}>
+                기저귀에 소변을 확인하고 단순 기저귀 교체 기록을 저장합니다.
+              </Text>
             </View>
           </View>
         )}
@@ -506,5 +470,26 @@ const styles = StyleSheet.create({
     color: '#FFFFFF',
     fontSize: 16,
     fontWeight: 'bold',
+  },
+  simpleUrineCard: {
+    alignItems: 'center',
+    paddingVertical: 16,
+  },
+  simpleUrineEmoji: {
+    fontSize: 48,
+    marginBottom: 12,
+  },
+  simpleUrineTitle: {
+    fontSize: 16,
+    fontWeight: 'bold',
+    color: COLORS.text,
+    marginBottom: 8,
+  },
+  simpleUrineDesc: {
+    fontSize: 12,
+    color: COLORS.textMuted,
+    textAlign: 'center',
+    lineHeight: 18,
+    paddingHorizontal: 20,
   },
 });

@@ -20,9 +20,10 @@ interface ProfileProps {
   profile: BabyProfile;
   onSaveProfile: (profile: BabyProfile) => Promise<boolean>;
   onImportData: (profile: BabyProfile, logs: BabyLogEntry[]) => Promise<void>;
+  onSync: (syncKey: string) => Promise<{ success: boolean; merged: boolean }>;
 }
 
-export const Profile: React.FC<ProfileProps> = ({ profile, onSaveProfile, onImportData }) => {
+export const Profile: React.FC<ProfileProps> = ({ profile, onSaveProfile, onImportData, onSync }) => {
   const [name, setName] = useState(profile.name);
   const [birthDate, setBirthDate] = useState(profile.birthDate);
   const [birthWeight, setBirthWeight] = useState(profile.birthWeight);
@@ -37,9 +38,47 @@ export const Profile: React.FC<ProfileProps> = ({ profile, onSaveProfile, onImpo
   }, [profile]);
   const [isSaving, setIsSaving] = useState(false);
   const [isCheckingUpdates, setIsCheckingUpdates] = useState(false);
+  const [syncKey, setSyncKey] = useState(profile.syncKey || '');
+  const [isSyncing, setIsSyncing] = useState(false);
 
   const [showImportInput, setShowImportInput] = useState(false);
   const [importText, setImportText] = useState('');
+
+  const handleSyncSetup = async () => {
+    setIsSyncing(true);
+    try {
+      const updatedProfile: BabyProfile = {
+        name: name.trim(),
+        birthDate,
+        birthWeight,
+        targetFormula: parseInt(targetFormula) || 800,
+        syncKey: syncKey.trim(),
+      };
+      
+      const saved = await onSaveProfile(updatedProfile);
+      
+      if (saved && syncKey.trim()) {
+        const result = await onSync(syncKey.trim());
+        if (result.success) {
+          Alert.alert(
+            '동기화 완료', 
+            result.merged 
+              ? '원격 서버의 최신 데이터를 가져와 병합을 완료했습니다!'
+              : '동기화 완료! 현재 이미 최신 상태입니다.'
+          );
+        } else {
+          Alert.alert('동기화 실패', '원격 서버에 연결하지 못했거나 그룹 키가 올바르지 않습니다.');
+        }
+      } else if (saved) {
+        Alert.alert('설정 저장 완료', '동기화가 비활성화되었습니다.');
+      }
+    } catch (e) {
+      console.error(e);
+      Alert.alert('오류', '동기화 설정 중 오류가 발생했습니다.');
+    } finally {
+      setIsSyncing(false);
+    }
+  };
 
   const handleCheckUpdates = async () => {
     if (!Updates.isEnabled) {
@@ -269,6 +308,37 @@ export const Profile: React.FC<ProfileProps> = ({ profile, onSaveProfile, onImpo
             {isSaving ? '저장 중...' : '프로필 수정 완료'}
           </Text>
         </TouchableOpacity>
+
+        {/* Real-time Cloud Sync Card */}
+        <View style={styles.backupCard}>
+          <Text style={styles.backupTitle}>🔗 부부 실시간 데이터 동기화</Text>
+          <Text style={styles.backupDesc}>
+            동일한 그룹 키를 입력하면 아내와 남편의 핸드폰 간에 실시간으로 수유 및 기저귀 데이터를 동기화합니다. (영문/숫자 조합 입력 권장)
+          </Text>
+          
+          <View style={[styles.inputGroup, { marginBottom: 12 }]}>
+            <Text style={styles.label}>동기화 그룹 키 (예: heesung2026)</Text>
+            <TextInput
+              style={styles.input}
+              value={syncKey}
+              onChangeText={setSyncKey}
+              placeholder="동기화할 그룹 비밀번호 입력"
+              placeholderTextColor={COLORS.textMuted}
+              autoCapitalize="none"
+              autoCorrect={false}
+            />
+          </View>
+          
+          <TouchableOpacity 
+            style={[styles.syncButton, isSyncing && styles.syncButtonDisabled]} 
+            onPress={handleSyncSetup}
+            disabled={isSyncing}
+          >
+            <Text style={styles.syncButtonText}>
+              {isSyncing ? '동기화 처리 중...' : profile.syncKey ? '동기화 설정 업데이트 & 지금 동기화 🔄' : '동기화 시작하기 🚀'}
+            </Text>
+          </TouchableOpacity>
+        </View>
 
         {/* Data Backup & Restore Card */}
         <View style={styles.backupCard}>
@@ -532,6 +602,27 @@ const styles = StyleSheet.create({
     backgroundColor: COLORS.textMuted,
   },
   updateButtonText: {
+    color: '#FFFFFF',
+    fontSize: 13,
+    fontWeight: 'bold',
+  },
+  syncButton: {
+    backgroundColor: COLORS.primary,
+    borderRadius: 14,
+    paddingVertical: 14,
+    alignItems: 'center',
+    justifyContent: 'center',
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 2 },
+    shadowOpacity: 0.05,
+    shadowRadius: 4,
+    elevation: 1,
+    marginTop: 4,
+  },
+  syncButtonDisabled: {
+    backgroundColor: COLORS.textMuted,
+  },
+  syncButtonText: {
     color: '#FFFFFF',
     fontSize: 13,
     fontWeight: 'bold',

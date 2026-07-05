@@ -4,15 +4,20 @@ export interface BaseLog {
   id: string;
   type: LogType;
   timestamp: number; // UTC timestamp
+  updatedAt?: number; // Last modified timestamp for syncing
   notes?: string;
 }
 
 export type MilkTemperature = 'warm' | 'room' | 'cold';
+export type FeedingType = 'formula' | 'breast' | 'mixed';
 
 export interface FormulaLog extends BaseLog {
   type: 'formula';
-  amount: number; // in ml
-  temperature: MilkTemperature;
+  feedingType?: FeedingType; // default to 'formula'
+  amount: number; // in ml (total amount)
+  formulaAmount?: number; // for mixed feeding
+  breastAmount?: number; // for mixed feeding
+  temperature?: MilkTemperature;
 }
 
 export type UrineWetness = 'light' | 'medium' | 'heavy';
@@ -42,4 +47,7 @@ export interface BabyProfile {
   birthDate: string; // YYYY-MM-DD
   birthWeight: string; // in kg, e.g. "3.2"
   targetFormula: number; // in ml, e.g. 800
+  syncKey?: string; // Sync group key for 부부 공유
+  updatedAt?: number; // Last modified timestamp for syncing
 }
+

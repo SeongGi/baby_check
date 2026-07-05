@@ -12,7 +12,8 @@ import { StatusBar } from 'expo-status-bar';
 import { SafeAreaProvider, useSafeAreaInsets } from 'react-native-safe-area-context';
 import { COLORS } from './src/theme/colors';
 import { BabyLogEntry, BabyProfile } from './src/types';
-import { getLogs, getProfile, addLog, deleteLog, saveProfile, saveLogs } from './src/database/storage';
+import { getLogs, getProfile, addLog, deleteLog, updateLog, saveProfile, saveLogs } from './src/database/storage';
+import { syncWithCloud, uploadToCloud } from './src/database/sync';
 import { Dashboard } from './src/screens/Dashboard';
 import { LogFormula } from './src/screens/LogFormula';
 import { LogDiaper } from './src/screens/LogDiaper';
@@ -24,10 +25,11 @@ function MainApp() {
   const [profile, setProfile] = useState<BabyProfile | null>(null);
   const [activeScreen, setActiveScreen] = useState<'dashboard' | 'formula' | 'diaper' | 'statistics' | 'profile'>('dashboard');
   const [isLoading, setIsLoading] = useState(true);
+  const [refreshing, setRefreshing] = useState(false);
   
   const insets = useSafeAreaInsets();
 
-  // Load initial data
+  // Load initial data and run background sync if syncKey is set
   useEffect(() => {
     async function loadData() {
       try {
@@ -35,8 +37,17 @@ function MainApp() {
         const loadedProfile = await getProfile();
         setLogs(loadedLogs);
         setProfile(loadedProfile);
+        
+        // Background sync on startup if key exists
+        if (loadedProfile.syncKey) {
+          const result = await syncWithCloud(loadedProfile.syncKey, loadedLogs, loadedProfile);
+          if (result.success) {
+            setLogs(result.logs);
+            setProfile(result.profile);
+          }
+        }
       } catch (error) {
-        console.error('Error loading data', error);
+        console.error('Error loading initial data', error);
       } finally {
         setIsLoading(false);
       }
@@ -62,11 +73,43 @@ function MainApp() {
     return () => backHandler.remove();
   }, [activeScreen]);
 
+  const handleSync = async (targetSyncKey: string) => {
+    if (!targetSyncKey || !targetSyncKey.trim()) return { success: false, merged: false };
+    try {
+      const currentLogs = await getLogs();
+      const currentProfile = await getProfile();
+      const result = await syncWithCloud(targetSyncKey.trim(), currentLogs, currentProfile);
+      if (result.success) {
+        setLogs(result.logs);
+        setProfile(result.profile);
+      }
+      return { success: result.success, merged: result.merged };
+    } catch (e) {
+      console.error(e);
+      return { success: false, merged: false };
+    }
+  };
+
+  const handleRefresh = async () => {
+    if (!profile || !profile.syncKey) return;
+    setRefreshing(true);
+    try {
+      await handleSync(profile.syncKey);
+    } catch (error) {
+      console.error('Refresh sync failed', error);
+    } finally {
+      setRefreshing(false);
+    }
+  };
+
   const handleAddLog = async (newLogData: Omit<BabyLogEntry, 'id'>) => {
     const savedLog = await addLog(newLogData);
     if (savedLog) {
       const updatedLogs = await getLogs();
       setLogs(updatedLogs);
+      if (profile?.syncKey) {
+        await uploadToCloud(profile.syncKey, updatedLogs, profile);
+      }
     }
     return savedLog;
   };
@@ -76,6 +119,20 @@ function MainApp() {
     if (success) {
       const updatedLogs = await getLogs();
       setLogs(updatedLogs);
+      if (profile?.syncKey) {
+        await uploadToCloud(profile.syncKey, updatedLogs, profile);
+      }
+    }
+  };
+
+  const handleUpdateLog = async (updatedLog: BabyLogEntry) => {
+    const success = await updateLog(updatedLog);
+    if (success) {
+      const updatedLogs = await getLogs();
+      setLogs(updatedLogs);
+      if (profile?.syncKey) {
+        await uploadToCloud(profile.syncKey, updatedLogs, profile);
+      }
     }
   };
 
@@ -83,6 +140,9 @@ function MainApp() {
     const success = await saveProfile(newProfile);
     if (success) {
       setProfile(newProfile);
+      if (newProfile.syncKey) {
+        await uploadToCloud(newProfile.syncKey, logs, newProfile);
+      }
     }
     return success;
   };
@@ -93,6 +153,9 @@ function MainApp() {
     setProfile(newProfile);
     setLogs(newLogs);
     setActiveScreen('dashboard');
+    if (newProfile.syncKey) {
+      await uploadToCloud(newProfile.syncKey, newLogs, newProfile);
+    }
   };
 
   if (isLoading || !profile) {
@@ -113,7 +176,10 @@ function MainApp() {
             logs={logs} 
             profile={profile} 
             onDeleteLog={handleDeleteLog} 
-            onNavigate={setActiveScreen} 
+            onUpdateLog={handleUpdateLog}
+            onNavigate={setActiveScreen}
+            refreshing={refreshing}
+            onRefresh={profile.syncKey ? handleRefresh : undefined}
           />
         );
       case 'formula':
@@ -138,6 +204,7 @@ function MainApp() {
             profile={profile} 
             onSaveProfile={handleSaveProfile} 
             onImportData={handleImportData}
+            onSync={handleSync}
           />
         );
     }
