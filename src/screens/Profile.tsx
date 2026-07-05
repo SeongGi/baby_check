@@ -81,6 +81,15 @@ export const Profile: React.FC<ProfileProps> = ({ profile, onSaveProfile, onImpo
   };
 
   const handleCheckUpdates = async () => {
+    // Prevent calling update check in Metro development server or Expo Go
+    if (__DEV__) {
+      Alert.alert(
+        '개발 모드 안내',
+        '현재 개발 모드(Expo Go 또는 로컬 디버깅) 환경입니다.\n무선(OTA) 업데이트 기능은 릴리즈 모드(APK 설치본)에서만 작동합니다.'
+      );
+      return;
+    }
+
     if (!Updates.isEnabled) {
       Alert.alert('업데이트 안내', '이 빌드에서는 라이브 업데이트를 사용할 수 없습니다. (개발 모드 또는 빌드 옵션 비활성화)');
       return;
@@ -123,7 +132,15 @@ export const Profile: React.FC<ProfileProps> = ({ profile, onSaveProfile, onImpo
       }
     } catch (e) {
       console.error(e);
-      Alert.alert('확인 실패', '업데이트 서버에 연결할 수 없거나 오류가 발생했습니다: ' + (e instanceof Error ? e.message : String(e)));
+      const errMsg = e instanceof Error ? e.message : String(e);
+      if (errMsg.includes('rejected') || errMsg.includes('ExpoUpdates') || errMsg.includes('checkForUpdateAsync')) {
+        Alert.alert(
+          '업데이트 확인 실패',
+          '업데이트 서버에 연결하지 못했습니다.\n\n[확인 사항]\n1. 기기가 인터넷(Wi-Fi 또는 모바일 데이터)에 연결되어 있는지 확인해주세요.\n2. 개발자 디버깅 모드(Metro/Expo Go) 환경에서는 무선 업데이트가 작동하지 않습니다.'
+        );
+      } else {
+        Alert.alert('확인 실패', '업데이트 확인 중 오류가 발생했습니다: ' + errMsg);
+      }
     } finally {
       setIsCheckingUpdates(false);
     }
