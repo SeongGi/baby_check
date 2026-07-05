@@ -6,6 +6,8 @@
     "@react-native-async-storage/async-storage": "2.2.0",
     "expo": "~56.0.12",
     "expo-clipboard": "~56.0.4",
+    "expo-file-system": "~56.0.8",
+    "expo-intent-launcher": "~56.0.4",
     "expo-status-bar": "~56.0.4",
     "expo-updates": "~56.0.19",
     "react": "19.2.3",

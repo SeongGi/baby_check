@@ -11,7 +11,7 @@ import {
   Platform
 } from 'react-native';
 import * as Clipboard from 'expo-clipboard';
-import * as Updates from 'expo-updates';
+import { checkForAppUpdate, downloadAndInstallApk } from '../utils/appUpdater';
 import { BabyProfile, BabyLogEntry } from '../types';
 import { COLORS } from '../theme/colors';
 import { getLogs } from '../database/storage';
@@ -20,7 +20,7 @@ interface ProfileProps {
   profile: BabyProfile;
   onSaveProfile: (profile: BabyProfile) => Promise<boolean>;
   onImportData: (profile: BabyProfile, logs: BabyLogEntry[]) => Promise<void>;
-  onSync: (syncKey: string) => Promise<{ success: boolean; merged: boolean }>;
+  onSync: (syncKey: string) => Promise<{ success: boolean; merged: boolean; error?: string }>;
 }
 
 export const Profile: React.FC<ProfileProps> = ({ profile, onSaveProfile, onImportData, onSync }) => {
@@ -84,66 +84,58 @@ export const Profile: React.FC<ProfileProps> = ({ profile, onSaveProfile, onImpo
   };
 
   const handleCheckUpdates = async () => {
-    // Prevent calling update check in Metro development server or Expo Go
-    if (__DEV__) {
-      Alert.alert(
-        '개발 모드 안내',
-        '현재 개발 모드(Expo Go 또는 로컬 디버깅) 환경입니다.\n무선(OTA) 업데이트 기능은 릴리즈 모드(APK 설치본)에서만 작동합니다.'
-      );
-      return;
-    }
-
-    if (!Updates.isEnabled) {
-      Alert.alert('업데이트 안내', '이 빌드에서는 라이브 업데이트를 사용할 수 없습니다. (개발 모드 또는 빌드 옵션 비활성화)');
-      return;
-    }
-
+    // GitHub Releases 기반 자체 업데이트 – 디버그/릴리즈 모드 모두 작동
     setIsCheckingUpdates(true);
     try {
-      const update = await Updates.checkForUpdateAsync();
-      if (update.isAvailable) {
-        Alert.alert(
-          '새로운 업데이트 발견',
-          '새로운 앱 업데이트 버전을 다운로드하시겠습니까? (다운로드 후 앱이 재시작됩니다.)',
-          [
-            { text: '나중에', style: 'cancel' },
-            { 
-              text: '업데이트 시작', 
-              onPress: async () => {
-                try {
-                  setIsCheckingUpdates(true);
-                  await Updates.fetchUpdateAsync();
-                  Alert.alert('다운로드 완료', '업데이트가 완료되었습니다. 앱을 재시작하여 적용합니다.', [
-                    { 
-                      text: '확인', 
-                      onPress: async () => {
-                        await Updates.reloadAsync();
-                      } 
-                    }
-                  ]);
-                } catch (err) {
-                  Alert.alert('업데이트 실패', '업데이트를 다운로드하는 중 오류가 발생했습니다: ' + (err instanceof Error ? err.message : String(err)));
-                } finally {
-                  setIsCheckingUpdates(false);
-                }
-              }
-            }
-          ]
-        );
-      } else {
-        Alert.alert('최신 버전', '현재 이미 최신 버전의 앱을 사용하고 있습니다.');
+      const info = await checkForAppUpdate();
+
+      if (!info.hasUpdate) {
+        Alert.alert('최신 버전', `현재 최신 버전(${info.currentVersion})을 사용하고 있습니다.`);
+        return;
       }
+
+      if (!info.apkDownloadUrl) {
+        Alert.alert(
+          '업데이트 안내',
+          `새 버전(${info.latestVersion})이 있지만 APK 파일을 찾을 수 없습니다.\nGitHub에서 직접 다운로드해 주세요.`
+        );
+        return;
+      }
+
+      Alert.alert(
+        `새 버전 발견: ${info.latestVersion}`,
+        `현재 버전: ${info.currentVersion}\n\n${info.releaseNotes ? info.releaseNotes.slice(0, 200) : '새 업데이트가 준비되었습니다.'}\n\nAPK를 다운로드하고 설치하시겠습니까?`,
+        [
+          { text: '나중에', style: 'cancel' },
+          {
+            text: '지금 업데이트',
+            onPress: async () => {
+              setIsCheckingUpdates(true);
+              try {
+                await downloadAndInstallApk(
+                  info.apkDownloadUrl!,
+                  (pct) => console.log(`다운로드 중: ${pct}%`)
+                );
+              } catch (err) {
+                Alert.alert(
+                  '설치 실패',
+                  '업데이트 설치 중 오류가 발생했습니다: ' +
+                    (err instanceof Error ? err.message : String(err))
+                );
+              } finally {
+                setIsCheckingUpdates(false);
+              }
+            },
+          },
+        ]
+      );
     } catch (e) {
       console.error(e);
       const errMsg = e instanceof Error ? e.message : String(e);
-      if (errMsg.includes('rejected') || errMsg.includes('ExpoUpdates') || errMsg.includes('checkForUpdateAsync')) {
-        Alert.alert(
-          '업데이트 확인 실패',
-          '업데이트 서버에 연결하지 못했습니다.\n\n[확인 사항]\n1. 기기가 인터넷(Wi-Fi 또는 모바일 데이터)에 연결되어 있는지 확인해주세요.\n2. 개발자 디버깅 모드(Metro/Expo Go) 환경에서는 무선 업데이트가 작동하지 않습니다.'
-        );
-      } else {
-        Alert.alert('확인 실패', '업데이트 확인 중 오류가 발생했습니다: ' + errMsg);
-      }
+      Alert.alert(
+        '업데이트 확인 실패',
+        `GitHub에서 업데이트 정보를 가져오지 못했습니다.\n\n[상세 오류]: ${errMsg}`
+      );
     } finally {
       setIsCheckingUpdates(false);
     }
