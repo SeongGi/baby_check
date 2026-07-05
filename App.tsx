@@ -74,7 +74,7 @@ function MainApp() {
   }, [activeScreen]);
 
   const handleSync = async (targetSyncKey: string) => {
-    if (!targetSyncKey || !targetSyncKey.trim()) return { success: false, merged: false };
+    if (!targetSyncKey || !targetSyncKey.trim()) return { success: false, merged: false, error: 'Empty key' };
     try {
       const currentLogs = await getLogs();
       const currentProfile = await getProfile();
@@ -83,10 +83,10 @@ function MainApp() {
         setLogs(result.logs);
         setProfile(result.profile);
       }
-      return { success: result.success, merged: result.merged };
+      return { success: result.success, merged: result.merged, error: result.error };
     } catch (e) {
       console.error(e);
-      return { success: false, merged: false };
+      return { success: false, merged: false, error: e instanceof Error ? e.message : String(e) };
     }
   };
 

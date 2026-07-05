@@ -67,7 +67,10 @@ export const Profile: React.FC<ProfileProps> = ({ profile, onSaveProfile, onImpo
               : '동기화 완료! 현재 이미 최신 상태입니다.'
           );
         } else {
-          Alert.alert('동기화 실패', '원격 서버에 연결하지 못했거나 그룹 키가 올바르지 않습니다.');
+          Alert.alert(
+            '동기화 실패', 
+            `원격 서버에 연결하지 못했거나 그룹 키가 올바르지 않습니다.\n\n[상세 오류]: ${result.error || '알 수 없는 오류'}`
+          );
         }
       } else if (saved) {
         Alert.alert('설정 저장 완료', '동기화가 비활성화되었습니다.');
