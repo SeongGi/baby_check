@@ -1,5 +1,5 @@
 import { BabyLogEntry, BabyProfile } from '../types';
-import { saveLogs, saveProfile } from './storage';
+import { saveLogs, saveProfile, backupLocalData } from './storage';
 
 const KEYVALUE_APP_KEY = '1w3sbtb8';
 const KEYVALUE_BASE_URL = 'https://keyvalue.immanuel.co/api/KeyVal';
@@ -65,15 +65,22 @@ export const getOrCreateBinId = async (sanitizedKey: string, forceNew = false): 
   }
 };
 
-// Merge logs by ID and compare updatedAt
-export const mergeLogs = (localLogs: BabyLogEntry[], remoteLogs: BabyLogEntry[]): BabyLogEntry[] => {
+// Merge logs by ID and compare updatedAt, filtering out tombstoned entries
+export const mergeLogs = (
+  localLogs: BabyLogEntry[],
+  remoteLogs: BabyLogEntry[],
+  deletedLogIds: Set<string> = new Set()
+): BabyLogEntry[] => {
   const mergedMap = new Map<string, BabyLogEntry>();
   
   localLogs.forEach(log => {
-    mergedMap.set(log.id, log);
+    if (!deletedLogIds.has(log.id)) {
+      mergedMap.set(log.id, log);
+    }
   });
   
   remoteLogs.forEach(log => {
+    if (deletedLogIds.has(log.id)) return; // tombstone된 로그는 무시
     const existing = mergedMap.get(log.id);
     if (!existing) {
       mergedMap.set(log.id, log);
@@ -89,19 +96,29 @@ export const mergeLogs = (localLogs: BabyLogEntry[], remoteLogs: BabyLogEntry[])
   return Array.from(mergedMap.values()).sort((a, b) => b.timestamp - a.timestamp);
 };
 
-// Merge profile by comparing updatedAt
+// Merge profile by comparing updatedAt and merging deletedLogIds
 export const mergeProfile = (localProfile: BabyProfile, remoteProfile: BabyProfile): BabyProfile => {
   const localUpdated = localProfile.updatedAt || 0;
   const remoteUpdated = remoteProfile.updatedAt || 0;
+  
+  // deletedLogIds는 항상 합집합으로 붙이기
+  const mergedDeletedIds = Array.from(new Set([
+    ...(localProfile.deletedLogIds || []),
+    ...(remoteProfile.deletedLogIds || []),
+  ]));
   
   if (remoteUpdated > localUpdated) {
     // Keep local syncKey
     return {
       ...remoteProfile,
       syncKey: localProfile.syncKey,
+      deletedLogIds: mergedDeletedIds,
     };
   }
-  return localProfile;
+  return {
+    ...localProfile,
+    deletedLogIds: mergedDeletedIds,
+  };
 };
 
 // Upload logs and profile to cloud sync (ExtendsClass)
@@ -144,6 +161,9 @@ export const syncWithCloud = async (
   }
   
   try {
+    // ━━━ 동기화 전 로컬 백업 자동 수행 ━━━
+    await backupLocalData();
+    
     let binId = await getOrCreateBinId(sanitizedKey);
     if (!binId) {
       return { logs: localLogs, profile: localProfile, success: false, merged: false, error: 'Could not resolve or create storage mapping key' };
@@ -171,8 +191,19 @@ export const syncWithCloud = async (
     } else {
       try {
         const remoteData = await res.json();
-        remoteLogs = remoteData?.logs;
-        remoteProfile = remoteData?.profile;
+        // ━━━ 원격 데이터 구조 검증 ━━━
+        if (remoteData && typeof remoteData === 'object') {
+          if (Array.isArray(remoteData.logs)) {
+            remoteLogs = remoteData.logs;
+          } else {
+            console.warn('Remote data has invalid logs format, ignoring remote logs');
+          }
+          if (remoteData.profile && typeof remoteData.profile === 'object' && remoteData.profile.name) {
+            remoteProfile = remoteData.profile;
+          } else {
+            console.warn('Remote data has invalid profile format, ignoring remote profile');
+          }
+        }
       } catch (parseErr) {
         console.warn('Failed to parse remote JSON, syncing local data as fallback', parseErr);
       }
@@ -182,19 +213,31 @@ export const syncWithCloud = async (
     let mergedProfile = localProfile;
     let merged = false;
     
-    if (remoteLogs && Array.isArray(remoteLogs)) {
-      mergedLogs = mergeLogs(localLogs, remoteLogs);
-      if (JSON.stringify(mergedLogs) !== JSON.stringify(localLogs)) {
-        merged = true;
-        await saveLogs(mergedLogs);
-      }
-    }
-    
+    // 프로필을 먼저 머지하여 deletedLogIds 합집합을 확보
     if (remoteProfile && typeof remoteProfile === 'object') {
       mergedProfile = mergeProfile(localProfile, remoteProfile);
       if (JSON.stringify(mergedProfile) !== JSON.stringify(localProfile)) {
         merged = true;
         await saveProfile(mergedProfile);
+      }
+    }
+    
+    // deletedLogIds 합집합으로 tombstone 필터링 적용
+    const allDeletedIds = new Set(mergedProfile.deletedLogIds || []);
+    
+    if (remoteLogs && Array.isArray(remoteLogs)) {
+      mergedLogs = mergeLogs(localLogs, remoteLogs, allDeletedIds);
+      if (JSON.stringify(mergedLogs) !== JSON.stringify(localLogs)) {
+        merged = true;
+        await saveLogs(mergedLogs);
+      }
+    } else if (allDeletedIds.size > 0) {
+      // 원격 로그가 없더라도 로컬에서 tombstone된 항목을 걸러내기
+      const filteredLocal = localLogs.filter(log => !allDeletedIds.has(log.id));
+      if (filteredLocal.length !== localLogs.length) {
+        mergedLogs = filteredLocal;
+        merged = true;
+        await saveLogs(mergedLogs);
       }
     }
     

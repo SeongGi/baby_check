@@ -14,7 +14,7 @@ import * as Clipboard from 'expo-clipboard';
 import { checkForAppUpdate, downloadAndInstallApk } from '../utils/appUpdater';
 import { BabyProfile, BabyLogEntry } from '../types';
 import { COLORS } from '../theme/colors';
-import { getLogs } from '../database/storage';
+import { getLogs, getLocalBackup, restoreFromLocalBackup } from '../database/storage';
 
 interface ProfileProps {
   profile: BabyProfile;
@@ -43,6 +43,45 @@ export const Profile: React.FC<ProfileProps> = ({ profile, onSaveProfile, onImpo
 
   const [showImportInput, setShowImportInput] = useState(false);
   const [importText, setImportText] = useState('');
+  const [lastBackupTime, setLastBackupTime] = useState<string | null>(null);
+
+  // 최근 백업 시간 로드
+  useEffect(() => {
+    const loadBackupInfo = async () => {
+      const backup = await getLocalBackup();
+      if (backup) {
+        const d = new Date(backup.timestamp);
+        setLastBackupTime(
+          `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')} ${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`
+        );
+      }
+    };
+    loadBackupInfo();
+  }, []);
+
+  const handleRestoreBackup = async () => {
+    Alert.alert(
+      '로컬 백업 복원',
+      `마지막 동기화 직전 상태로 데이터를 되돌립니다.\n\n이 작업은 현재 데이터를 덮어씁니다. 계속하시겠습니까?`,
+      [
+        { text: '취소', style: 'cancel' },
+        {
+          text: '복원 실행',
+          style: 'destructive',
+          onPress: async () => {
+            const result = await restoreFromLocalBackup();
+            if (result.success && result.backup) {
+              const d = new Date(result.backup.timestamp);
+              const timeStr = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')} ${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`;
+              Alert.alert('복원 완료', `${timeStr} 시점의 데이터로 성공적으로 복원되었습니다.\n앱을 재시작해 주세요.`);
+            } else {
+              Alert.alert('복원 실패', '저장된 로컬 백업이 없습니다. 동기화를 한 번 수행한 후에 사용할 수 있습니다.');
+            }
+          },
+        },
+      ]
+    );
+  };
 
   const handleSyncSetup = async () => {
     setIsSyncing(true);
@@ -386,6 +425,22 @@ export const Profile: React.FC<ProfileProps> = ({ profile, onSaveProfile, onImpo
               </TouchableOpacity>
             </View>
           )}
+
+          {/* 로컬 백업 복원 */}
+          <View style={styles.restoreSection}>
+            <Text style={styles.restoreLabel}>
+              {lastBackupTime
+                ? `📅 최근 로컬 백업: ${lastBackupTime}`
+                : '📅 로컬 백업 없음 (동기화 수행 시 자동 생성)'}
+            </Text>
+            <TouchableOpacity
+              style={[styles.restoreButton, !lastBackupTime && styles.restoreButtonDisabled]}
+              onPress={handleRestoreBackup}
+              disabled={!lastBackupTime}
+            >
+              <Text style={styles.restoreButtonText}>로컬 백업에서 복원 ⏮️</Text>
+            </TouchableOpacity>
+          </View>
         </View>
 
         {/* App Updates Card */}
@@ -638,5 +693,32 @@ const styles = StyleSheet.create({
     color: '#FFFFFF',
     fontSize: 13,
     fontWeight: 'bold',
+  },
+  restoreSection: {
+    marginTop: 16,
+    paddingTop: 14,
+    borderTopWidth: 1,
+    borderTopColor: COLORS.border,
+  },
+  restoreLabel: {
+    fontSize: 12,
+    color: COLORS.textMuted,
+    marginBottom: 8,
+  },
+  restoreButton: {
+    backgroundColor: '#FF8C42',
+    borderRadius: 14,
+    paddingVertical: 12,
+    alignItems: 'center' as const,
+    justifyContent: 'center' as const,
+  },
+  restoreButtonDisabled: {
+    backgroundColor: COLORS.textMuted,
+    opacity: 0.5,
+  },
+  restoreButtonText: {
+    color: '#FFFFFF',
+    fontSize: 13,
+    fontWeight: 'bold' as const,
   },
 });

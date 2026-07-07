@@ -140,9 +140,7 @@ function MainApp() {
     const success = await saveProfile(newProfile);
     if (success) {
       setProfile(newProfile);
-      if (newProfile.syncKey) {
-        await uploadToCloud(newProfile.syncKey, logs, newProfile);
-      }
+      // 프로필 저장만 수행 — 동기화는 syncWithCloud를 통해 안전하게 머지 후 업로드
     }
     return success;
   };

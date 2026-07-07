@@ -3,6 +3,7 @@ import { BabyLogEntry, BabyProfile } from '../types';
 
 const LOGS_STORAGE_KEY = '@baby_logs';
 const PROFILE_STORAGE_KEY = '@baby_profile';
+const BACKUP_STORAGE_KEY = '@baby_local_backup';
 
 const DEFAULT_PROFILE: BabyProfile = {
   name: '희성이',
@@ -57,7 +58,16 @@ export const deleteLog = async (id: string): Promise<boolean> => {
   try {
     const logs = await getLogs();
     const filteredLogs = logs.filter(log => log.id !== id);
-    return await saveLogs(filteredLogs);
+    const saved = await saveLogs(filteredLogs);
+    if (saved) {
+      // Tombstone: 삭제된 ID를 프로필에 기록하여 동기화 시 재출현 방지
+      const profile = await getProfile();
+      const deletedIds = new Set(profile.deletedLogIds || []);
+      deletedIds.add(id);
+      profile.deletedLogIds = Array.from(deletedIds);
+      await saveProfile(profile);
+    }
+    return saved;
   } catch (error) {
     console.error('Error deleting log from AsyncStorage', error);
     return false;
@@ -111,5 +121,59 @@ export const saveProfile = async (profile: BabyProfile): Promise<boolean> => {
   } catch (error) {
     console.error('Error saving profile to AsyncStorage', error);
     return false;
+  }
+};
+
+// ────────────── 로컬 백업 / 복원 API ──────────────
+
+export interface LocalBackup {
+  timestamp: number;
+  logs: BabyLogEntry[];
+  profile: BabyProfile;
+}
+
+/** 동기화 전에 호출하여 현재 로컬 데이터를 백업합니다. */
+export const backupLocalData = async (): Promise<boolean> => {
+  try {
+    const logs = await getLogs();
+    const profile = await getProfile();
+    const backup: LocalBackup = {
+      timestamp: Date.now(),
+      logs,
+      profile,
+    };
+    await AsyncStorage.setItem(BACKUP_STORAGE_KEY, JSON.stringify(backup));
+    return true;
+  } catch (error) {
+    console.error('Error backing up local data', error);
+    return false;
+  }
+};
+
+/** 최근 로컬 백업 정보를 가져옵니다 (타임스탬프 확인용). */
+export const getLocalBackup = async (): Promise<LocalBackup | null> => {
+  try {
+    const rawData = await AsyncStorage.getItem(BACKUP_STORAGE_KEY);
+    if (!rawData) return null;
+    return JSON.parse(rawData) as LocalBackup;
+  } catch (error) {
+    console.error('Error reading local backup', error);
+    return null;
+  }
+};
+
+/** 최근 로컬 백업으로 데이터를 복원합니다. */
+export const restoreFromLocalBackup = async (): Promise<{ success: boolean; backup: LocalBackup | null }> => {
+  try {
+    const backup = await getLocalBackup();
+    if (!backup) {
+      return { success: false, backup: null };
+    }
+    await saveLogs(backup.logs);
+    await saveProfile(backup.profile);
+    return { success: true, backup };
+  } catch (error) {
+    console.error('Error restoring from local backup', error);
+    return { success: false, backup: null };
   }
 };

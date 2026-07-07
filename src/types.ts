@@ -49,5 +49,6 @@ export interface BabyProfile {
   targetFormula: number; // in ml, e.g. 800
   syncKey?: string; // Sync group key for 부부 공유
   updatedAt?: number; // Last modified timestamp for syncing
+  deletedLogIds?: string[]; // Tombstone: 삭제된 로그 ID 추적 (동기화 시 재출현 방지)
 }
 

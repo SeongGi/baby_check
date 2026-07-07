@@ -17,7 +17,7 @@ const GITHUB_REPO = 'baby_check';
 const GITHUB_API_URL = `https://api.github.com/repos/${GITHUB_OWNER}/${GITHUB_REPO}/releases/latest`;
 
 // 현재 앱 버전 (app.json과 동기화 유지)
-export const CURRENT_APP_VERSION = '1.0.3';
+export const CURRENT_APP_VERSION = '1.0.4';
 
 export interface UpdateInfo {
   hasUpdate: boolean;
