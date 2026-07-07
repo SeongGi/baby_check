@@ -17,7 +17,7 @@ const GITHUB_REPO = 'baby_check';
 const GITHUB_API_URL = `https://api.github.com/repos/${GITHUB_OWNER}/${GITHUB_REPO}/releases/latest`;
 
 // 현재 앱 버전 (app.json과 동기화 유지)
-export const CURRENT_APP_VERSION = '1.0.4';
+export const CURRENT_APP_VERSION = '1.0.5';
 
 export interface UpdateInfo {
   hasUpdate: boolean;
@@ -126,10 +126,18 @@ export async function downloadAndInstallApk(
     throw new Error('APK 다운로드에 실패했습니다.');
   }
 
-  // expo-intent-launcher로 APK 설치 트리거
-  await IntentLauncher.startActivityAsync('android.intent.action.VIEW', {
-    data: result.uri,
-    flags: 1, // FLAG_GRANT_READ_URI_PERMISSION
-    type: 'application/vnd.android.package-archive',
-  });
+  // file:// → content:// URI 변환 (Android 7+ StrictMode 대응)
+  try {
+    const contentUri = await LegacyFS.getContentUriAsync(result.uri);
+    await IntentLauncher.startActivityAsync('android.intent.action.VIEW', {
+      data: contentUri,
+      flags: 1, // FLAG_GRANT_READ_URI_PERMISSION
+      type: 'application/vnd.android.package-archive',
+    });
+  } catch (intentErr) {
+    // Fallback: 브라우저에서 직접 APK URL 열기
+    console.warn('Intent install failed, falling back to Linking:', intentErr);
+    const { Linking } = require('react-native');
+    await Linking.openURL(apkUrl);
+  }
 }
