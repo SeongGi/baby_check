@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useEffect, useState } from 'react';
 import { 
   View, 
   Text, 
@@ -16,6 +16,7 @@ import { BabyLogEntry, BabyProfile, FormulaLog, StoolLog, UrineLog, MilkTemperat
 import { COLORS } from '../theme/colors';
 import { getDDay, formatTime, getRelativeDateString, formatDateTime } from '../utils/date';
 import { BottleSlider } from '../components/BottleSlider';
+import { getLatestFeeding, getNextFeedingAt } from '../utils/feedingReminder';
 
 interface DashboardProps {
   logs: BabyLogEntry[];
@@ -36,6 +37,11 @@ export const Dashboard: React.FC<DashboardProps> = ({
   refreshing,
   onRefresh
 }) => {
+  const [now, setNow] = useState(Date.now());
+  useEffect(() => {
+    const timer = setInterval(() => setNow(Date.now()), 30_000);
+    return () => clearInterval(timer);
+  }, []);
   const dday = getDDay(profile.birthDate);
 
   // Filter logs for today
@@ -54,6 +60,9 @@ export const Dashboard: React.FC<DashboardProps> = ({
   const totalUrines = todayLogs.filter(log => log.type === 'urine').length;
 
   const formulaProgress = Math.min(1, totalFormulaMl / profile.targetFormula);
+  const latestFeeding = getLatestFeeding(logs);
+  const nextFeedingAt = getNextFeedingAt(logs, profile);
+  const nextFeedingMinutes = nextFeedingAt ? Math.ceil((nextFeedingAt - now) / 60000) : null;
 
   // Edit Modal States
   const [editingLog, setEditingLog] = useState<BabyLogEntry | null>(null);
@@ -309,6 +318,24 @@ export const Dashboard: React.FC<DashboardProps> = ({
 
         {/* Summary Cards */}
         <View style={styles.summaryContainer}>
+          {latestFeeding && nextFeedingAt && (
+            <TouchableOpacity style={styles.nextFeedingCard} onPress={() => onNavigate('formula')}>
+              <View>
+                <Text style={styles.nextFeedingTitle}>⏰ 다음 수유</Text>
+                <Text style={styles.nextFeedingSub}>
+                  마지막 {formatTime(latestFeeding.timestamp)} · {profile.feedingIntervalMinutes || 180}분 간격
+                </Text>
+              </View>
+              <View style={styles.nextFeedingRight}>
+                <Text style={styles.nextFeedingTime}>{formatTime(nextFeedingAt)}</Text>
+                <Text style={[styles.nextFeedingRemaining, nextFeedingMinutes !== null && nextFeedingMinutes <= 0 && styles.overdueText]}>
+                  {nextFeedingMinutes !== null && nextFeedingMinutes > 0
+                    ? `${Math.floor(nextFeedingMinutes / 60) > 0 ? `${Math.floor(nextFeedingMinutes / 60)}시간 ` : ''}${nextFeedingMinutes % 60}분 남음`
+                    : '수유 시간이 지났어요'}
+                </Text>
+              </View>
+            </TouchableOpacity>
+          )}
           {/* Formula summary */}
           <TouchableOpacity 
             style={styles.summaryCard}
@@ -367,7 +394,7 @@ export const Dashboard: React.FC<DashboardProps> = ({
         <Text style={styles.sectionHeader}>활동 타임라인</Text>
         {logs.length === 0 ? (
           <View style={styles.emptyContainer}>
-            <Text style={styles.emptyIcon}>👶</Text>
+            <Text style={styles.emptyIcon}>🧸</Text>
             <Text style={styles.emptyText}>아직 기록된 활동이 없습니다.</Text>
             <Text style={styles.emptySubText}>분유 수유나 대소변을 먼저 기록해보세요!</Text>
           </View>
@@ -1255,5 +1282,43 @@ const styles = StyleSheet.create({
     color: '#FFFFFF',
     fontWeight: 'bold',
     fontSize: 14,
+  },
+  nextFeedingCard: {
+    backgroundColor: '#F3EFE8',
+    borderRadius: 18,
+    padding: 16,
+    marginBottom: 12,
+    borderWidth: 1,
+    borderColor: COLORS.primary + '35',
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+  },
+  nextFeedingTitle: {
+    color: COLORS.text,
+    fontSize: 15,
+    fontWeight: 'bold',
+  },
+  nextFeedingSub: {
+    color: COLORS.textMuted,
+    fontSize: 11,
+    marginTop: 5,
+  },
+  nextFeedingRight: {
+    alignItems: 'flex-end',
+  },
+  nextFeedingTime: {
+    color: COLORS.primary,
+    fontSize: 22,
+    fontWeight: 'bold',
+  },
+  nextFeedingRemaining: {
+    color: '#62825E',
+    fontSize: 11,
+    fontWeight: 'bold',
+    marginTop: 2,
+  },
+  overdueText: {
+    color: '#D95D5D',
   },
 });

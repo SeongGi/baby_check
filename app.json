@@ -2,11 +2,11 @@
   "expo": {
     "name": "아기기록-도우미",
     "slug": "baby_check",
-    "version": "1.0.5",
+    "version": "1.1.0",
     "orientation": "portrait",
     "icon": "./assets/icon.png",
     "userInterfaceStyle": "light",
-    "runtimeVersion": "1.0.0",
+    "runtimeVersion": "1.1.0",
     "updates": {
       "url": "https://u.expo.dev/79563103-adf4-45c2-b610-ae4c461868f0",
       "checkAutomatically": "ON_LOAD",
@@ -20,11 +20,15 @@
       "backgroundColor": "#FDFBF7"
     },
     "ios": {
-      "supportsTablet": true
+      "supportsTablet": true,
+      "bundleIdentifier": "com.seonggi.babycheck"
     },
     "android": {
       "package": "com.seonggi.babycheck",
-      "versionCode": 6,
+      "versionCode": 7,
+      "permissions": [
+        "android.permission.REQUEST_INSTALL_PACKAGES"
+      ],
       "adaptiveIcon": {
         "backgroundColor": "#E6F4FE",
         "foregroundImage": "./assets/android-icon-foreground.png",
@@ -41,6 +45,29 @@
         "projectId": "79563103-adf4-45c2-b610-ae4c461868f0"
       }
     },
-    "owner": "seonggi"
+    "owner": "seonggi",
+    "plugins": [
+      "expo-notifications",
+      [
+        "expo-widgets",
+        {
+          "widgets": [
+            {
+              "name": "FeedingReminderWidget",
+              "displayName": "다음 수유",
+              "description": "마지막 수유와 다음 수유 예정 시간을 보여줍니다.",
+              "ios": {
+                "supportedFamilies": [
+                  "systemSmall",
+                  "systemMedium",
+                  "accessoryRectangular",
+                  "accessoryInline"
+                ]
+              }
+            }
+          ]
+        }
+      ]
+    ]
   }
 }

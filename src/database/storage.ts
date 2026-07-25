@@ -4,6 +4,9 @@ import { BabyLogEntry, BabyProfile } from '../types';
 const LOGS_STORAGE_KEY = '@baby_logs';
 const PROFILE_STORAGE_KEY = '@baby_profile';
 const BACKUP_STORAGE_KEY = '@baby_local_backup';
+const MIGRATION_BACKUP_STORAGE_KEY = '@baby_migration_backup_v2';
+const SCHEMA_VERSION_STORAGE_KEY = '@baby_schema_version';
+const CURRENT_SCHEMA_VERSION = 2;
 
 const DEFAULT_PROFILE: BabyProfile = {
   name: '희성이',
@@ -11,6 +14,54 @@ const DEFAULT_PROFILE: BabyProfile = {
   birthWeight: '3.2',
   targetFormula: 800, // 800ml is a standard daily intake target for infants
   updatedAt: Date.now(),
+  feedingReminderEnabled: false,
+  feedingIntervalMinutes: 180,
+};
+
+const normalizeProfile = (profile: BabyProfile): BabyProfile => ({
+  ...DEFAULT_PROFILE,
+  ...profile,
+  deletedLogIds: Array.isArray(profile.deletedLogIds) ? profile.deletedLogIds : [],
+  feedingReminderEnabled: profile.feedingReminderEnabled === true,
+  feedingIntervalMinutes:
+    typeof profile.feedingIntervalMinutes === 'number' &&
+    profile.feedingIntervalMinutes >= 30 &&
+    profile.feedingIntervalMinutes <= 720
+      ? Math.round(profile.feedingIntervalMinutes)
+      : 180,
+});
+
+/**
+ * Runs before normal reads. It first stores the exact legacy values and only
+ * then adds new defaults, so an app upgrade never replaces existing logs.
+ */
+export const migrateStoredData = async (): Promise<void> => {
+  const [versionRaw, logsRaw, profileRaw] = await Promise.all([
+    AsyncStorage.getItem(SCHEMA_VERSION_STORAGE_KEY),
+    AsyncStorage.getItem(LOGS_STORAGE_KEY),
+    AsyncStorage.getItem(PROFILE_STORAGE_KEY),
+  ]);
+  const version = Number(versionRaw || 0);
+  if (version >= CURRENT_SCHEMA_VERSION) return;
+
+  await AsyncStorage.setItem(
+    MIGRATION_BACKUP_STORAGE_KEY,
+    JSON.stringify({ timestamp: Date.now(), schemaVersion: version, logsRaw, profileRaw }),
+  );
+
+  let profile: BabyProfile | null = null;
+  if (profileRaw) {
+    try {
+      const parsed = JSON.parse(profileRaw);
+      if (parsed && typeof parsed === 'object') profile = normalizeProfile(parsed as BabyProfile);
+    } catch (error) {
+      console.error('Legacy profile could not be parsed; raw migration backup retained', error);
+    }
+  }
+
+  const writes: [string, string][] = [[SCHEMA_VERSION_STORAGE_KEY, String(CURRENT_SCHEMA_VERSION)]];
+  if (profile) writes.push([PROFILE_STORAGE_KEY, JSON.stringify(profile)]);
+  await AsyncStorage.multiSet(writes);
 };
 
 export const getLogs = async (): Promise<BabyLogEntry[]> => {
@@ -96,7 +147,7 @@ export const getProfile = async (): Promise<BabyProfile> => {
   try {
     const rawData = await AsyncStorage.getItem(PROFILE_STORAGE_KEY);
     if (!rawData) return DEFAULT_PROFILE;
-    const profile: BabyProfile = JSON.parse(rawData);
+    const profile: BabyProfile = normalizeProfile(JSON.parse(rawData));
     // If the profile name is still default '꼬꼬마', update it to '희성이'
     if (profile.name === '꼬꼬마') {
       profile.name = '희성이';
@@ -112,11 +163,21 @@ export const getProfile = async (): Promise<BabyProfile> => {
 
 export const saveProfile = async (profile: BabyProfile): Promise<boolean> => {
   try {
+    let existing: Partial<BabyProfile> = {};
+    const rawExisting = await AsyncStorage.getItem(PROFILE_STORAGE_KEY);
+    if (rawExisting) {
+      try {
+        existing = JSON.parse(rawExisting);
+      } catch {
+        // The exact broken value is retained by migrateStoredData's raw backup.
+      }
+    }
     const profileWithUpdate = {
+      ...existing,
       ...profile,
       updatedAt: Date.now(),
     };
-    await AsyncStorage.setItem(PROFILE_STORAGE_KEY, JSON.stringify(profileWithUpdate));
+    await AsyncStorage.setItem(PROFILE_STORAGE_KEY, JSON.stringify(normalizeProfile(profileWithUpdate as BabyProfile)));
     return true;
   } catch (error) {
     console.error('Error saving profile to AsyncStorage', error);
@@ -131,6 +192,41 @@ export interface LocalBackup {
   logs: BabyLogEntry[];
   profile: BabyProfile;
 }
+
+export const importDataWithoutLoss = async (
+  importedLogs: BabyLogEntry[],
+  importedProfile: BabyProfile,
+): Promise<{ logs: BabyLogEntry[]; profile: BabyProfile }> => {
+  await backupLocalData();
+  const currentLogs = await getLogs();
+  const currentProfile = await getProfile();
+  const logsById = new Map<string, BabyLogEntry>();
+  [...currentLogs, ...importedLogs].forEach(log => {
+    if (!log || typeof log.id !== 'string' || typeof log.timestamp !== 'number') return;
+    const existing = logsById.get(log.id);
+    const existingUpdated = existing?.updatedAt || existing?.timestamp || 0;
+    const candidateUpdated = log.updatedAt || log.timestamp;
+    if (!existing || candidateUpdated >= existingUpdated) logsById.set(log.id, log);
+  });
+  const deletedIds = new Set([
+    ...(currentProfile.deletedLogIds || []),
+    ...(importedProfile.deletedLogIds || []),
+  ]);
+  const logs = Array.from(logsById.values())
+    .filter(log => !deletedIds.has(log.id))
+    .sort((a, b) => b.timestamp - a.timestamp);
+  const profile = normalizeProfile({
+    ...currentProfile,
+    ...importedProfile,
+    syncKey: currentProfile.syncKey || importedProfile.syncKey,
+    deletedLogIds: Array.from(deletedIds),
+  });
+  await AsyncStorage.multiSet([
+    [LOGS_STORAGE_KEY, JSON.stringify(logs)],
+    [PROFILE_STORAGE_KEY, JSON.stringify({ ...profile, updatedAt: Date.now() })],
+  ]);
+  return { logs, profile };
+};
 
 /** 동기화 전에 호출하여 현재 로컬 데이터를 백업합니다. */
 export const backupLocalData = async (): Promise<boolean> => {

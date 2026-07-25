@@ -8,7 +8,8 @@ import {
   ScrollView, 
   Alert,
   KeyboardAvoidingView,
-  Platform
+  Platform,
+  Switch,
 } from 'react-native';
 import * as Clipboard from 'expo-clipboard';
 import { checkForAppUpdate, downloadAndInstallApk } from '../utils/appUpdater';
@@ -28,6 +29,10 @@ export const Profile: React.FC<ProfileProps> = ({ profile, onSaveProfile, onImpo
   const [birthDate, setBirthDate] = useState(profile.birthDate);
   const [birthWeight, setBirthWeight] = useState(profile.birthWeight);
   const [targetFormula, setTargetFormula] = useState(profile.targetFormula.toString());
+  const [feedingReminderEnabled, setFeedingReminderEnabled] = useState(profile.feedingReminderEnabled === true);
+  const [feedingIntervalMinutes, setFeedingIntervalMinutes] = useState(
+    String(profile.feedingIntervalMinutes || 180),
+  );
 
   // Sync inputs if profile values update from parent (e.g. edited from dashboard)
   useEffect(() => {
@@ -35,6 +40,8 @@ export const Profile: React.FC<ProfileProps> = ({ profile, onSaveProfile, onImpo
     setBirthDate(profile.birthDate);
     setBirthWeight(profile.birthWeight);
     setTargetFormula(profile.targetFormula.toString());
+    setFeedingReminderEnabled(profile.feedingReminderEnabled === true);
+    setFeedingIntervalMinutes(String(profile.feedingIntervalMinutes || 180));
   }, [profile]);
   const [isSaving, setIsSaving] = useState(false);
   const [isCheckingUpdates, setIsCheckingUpdates] = useState(false);
@@ -87,11 +94,14 @@ export const Profile: React.FC<ProfileProps> = ({ profile, onSaveProfile, onImpo
     setIsSyncing(true);
     try {
       const updatedProfile: BabyProfile = {
+        ...profile,
         name: name.trim(),
         birthDate,
         birthWeight,
         targetFormula: parseInt(targetFormula) || 800,
         syncKey: syncKey.trim(),
+        feedingReminderEnabled,
+        feedingIntervalMinutes: parseInt(feedingIntervalMinutes) || 180,
       };
       
       const saved = await onSaveProfile(updatedProfile);
@@ -213,7 +223,7 @@ export const Profile: React.FC<ProfileProps> = ({ profile, onSaveProfile, onImpo
 
       Alert.alert(
         '데이터 복원 확인',
-        '기존 기기의 모든 아기 일지와 설정 정보가 삭제되고 백업된 데이터로 복원됩니다. 정말 진행하시겠습니까?',
+        '현재 기기와 백업의 기록을 안전하게 합칩니다. 같은 기록은 최신 수정본을 사용하며 기존 기록은 삭제하지 않습니다. 진행하시겠습니까?',
         [
           { text: '취소', style: 'cancel' },
           { 
@@ -222,7 +232,7 @@ export const Profile: React.FC<ProfileProps> = ({ profile, onSaveProfile, onImpo
             onPress: async () => {
               try {
                 await onImportData(parsedData.profile, parsedData.logs);
-                Alert.alert('복원 성공', '우리아기 기록이 성공적으로 복원되었습니다.');
+                Alert.alert('복원 성공', '기존 기록을 보존하면서 백업 데이터를 성공적으로 합쳤습니다.');
                 setShowImportInput(false);
                 setImportText('');
               } catch (e) {
@@ -267,10 +277,13 @@ export const Profile: React.FC<ProfileProps> = ({ profile, onSaveProfile, onImpo
     setIsSaving(true);
     try {
       const updatedProfile: BabyProfile = {
+        ...profile,
         name: name.trim(),
         birthDate,
         birthWeight: weightNum.toString(),
         targetFormula: goalNum,
+        feedingReminderEnabled,
+        feedingIntervalMinutes: Math.min(720, Math.max(30, parseInt(feedingIntervalMinutes) || 180)),
       };
 
       const success = await onSaveProfile(updatedProfile);
@@ -346,6 +359,58 @@ export const Profile: React.FC<ProfileProps> = ({ profile, onSaveProfile, onImpo
               placeholderTextColor={COLORS.textMuted}
               keyboardType="number-pad"
             />
+          </View>
+        </View>
+
+        <View style={styles.backupCard}>
+          <View style={styles.reminderHeader}>
+            <View style={styles.reminderText}>
+              <Text style={styles.backupTitle}>🍼 다음 수유 자동 알림</Text>
+              <Text style={styles.backupDesc}>
+                수유를 기록하면 다음 시간을 자동 계산해 알림과 iPhone 위젯을 갱신합니다.
+              </Text>
+            </View>
+            <Switch
+              value={feedingReminderEnabled}
+              onValueChange={setFeedingReminderEnabled}
+              trackColor={{ false: COLORS.border, true: COLORS.primary + '80' }}
+              thumbColor={feedingReminderEnabled ? COLORS.primary : '#FFFFFF'}
+            />
+          </View>
+          <View style={styles.inputGroup}>
+            <Text style={styles.label}>수유 간격 (분)</Text>
+            <TextInput
+              style={styles.input}
+              value={feedingIntervalMinutes}
+              onChangeText={value => setFeedingIntervalMinutes(value.replace(/[^0-9]/g, ''))}
+              keyboardType="number-pad"
+              placeholder="예: 180"
+              placeholderTextColor={COLORS.textMuted}
+            />
+            <View style={styles.intervalPresets}>
+              {[120, 150, 180, 210, 240].map(minutes => (
+                <TouchableOpacity
+                  key={minutes}
+                  style={[
+                    styles.intervalPreset,
+                    feedingIntervalMinutes === String(minutes) && styles.intervalPresetActive,
+                  ]}
+                  onPress={() => setFeedingIntervalMinutes(String(minutes))}
+                >
+                  <Text
+                    style={[
+                      styles.intervalPresetText,
+                      feedingIntervalMinutes === String(minutes) && styles.intervalPresetTextActive,
+                    ]}
+                  >
+                    {minutes / 60 >= 1
+                      ? `${Math.floor(minutes / 60)}시간${minutes % 60 ? ` ${minutes % 60}분` : ''}`
+                      : `${minutes}분`}
+                  </Text>
+                </TouchableOpacity>
+              ))}
+            </View>
+            <Text style={styles.reminderHint}>30~720분 사이로 설정할 수 있어요. 변경 후 아래 저장 버튼을 눌러주세요.</Text>
           </View>
         </View>
 
@@ -594,6 +659,48 @@ const styles = StyleSheet.create({
     color: COLORS.textMuted,
     lineHeight: 18,
     marginBottom: 16,
+  },
+  reminderHeader: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'flex-start',
+  },
+  reminderText: {
+    flex: 1,
+    paddingRight: 12,
+  },
+  reminderHint: {
+    color: COLORS.textMuted,
+    fontSize: 11,
+    lineHeight: 16,
+    marginTop: 7,
+  },
+  intervalPresets: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    gap: 6,
+    marginTop: 10,
+  },
+  intervalPreset: {
+    borderWidth: 1,
+    borderColor: COLORS.border,
+    borderRadius: 10,
+    paddingHorizontal: 10,
+    paddingVertical: 7,
+    backgroundColor: COLORS.background,
+  },
+  intervalPresetActive: {
+    borderColor: COLORS.primary,
+    backgroundColor: COLORS.primary + '15',
+  },
+  intervalPresetText: {
+    color: COLORS.textMuted,
+    fontSize: 11,
+    fontWeight: '600',
+  },
+  intervalPresetTextActive: {
+    color: COLORS.primary,
+    fontWeight: 'bold',
   },
   backupButtonsRow: {
     flexDirection: 'row',

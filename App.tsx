@@ -6,19 +6,22 @@ import {
   TouchableOpacity, 
   ActivityIndicator,
   Platform,
-  BackHandler
+  BackHandler,
+  Alert,
 } from 'react-native';
 import { StatusBar } from 'expo-status-bar';
 import { SafeAreaProvider, useSafeAreaInsets } from 'react-native-safe-area-context';
 import { COLORS } from './src/theme/colors';
 import { BabyLogEntry, BabyProfile } from './src/types';
-import { getLogs, getProfile, addLog, deleteLog, updateLog, saveProfile, saveLogs } from './src/database/storage';
+import { getLogs, getProfile, addLog, deleteLog, updateLog, saveProfile, migrateStoredData, importDataWithoutLoss } from './src/database/storage';
 import { syncWithCloud, uploadToCloud } from './src/database/sync';
+import { refreshFeedingReminder } from './src/utils/feedingReminder';
 import { Dashboard } from './src/screens/Dashboard';
 import { LogFormula } from './src/screens/LogFormula';
 import { LogDiaper } from './src/screens/LogDiaper';
 import { Statistics } from './src/screens/Statistics';
 import { Profile } from './src/screens/Profile';
+import { checkForAppUpdate, downloadAndInstallApk } from './src/utils/appUpdater';
 
 function MainApp() {
   const [logs, setLogs] = useState<BabyLogEntry[]>([]);
@@ -33,6 +36,7 @@ function MainApp() {
   useEffect(() => {
     async function loadData() {
       try {
+        await migrateStoredData();
         const loadedLogs = await getLogs();
         const loadedProfile = await getProfile();
         setLogs(loadedLogs);
@@ -44,7 +48,12 @@ function MainApp() {
           if (result.success) {
             setLogs(result.logs);
             setProfile(result.profile);
+            await refreshFeedingReminder(result.logs, result.profile);
+          } else {
+            await refreshFeedingReminder(loadedLogs, loadedProfile);
           }
+        } else {
+          await refreshFeedingReminder(loadedLogs, loadedProfile);
         }
       } catch (error) {
         console.error('Error loading initial data', error);
@@ -53,6 +62,38 @@ function MainApp() {
       }
     }
     loadData();
+  }, []);
+
+  // 새 바이너리가 배포되면 Android 앱 실행 시 한 번 자동으로 확인합니다.
+  useEffect(() => {
+    if (Platform.OS !== 'android') return;
+    let active = true;
+    const checkUpdateOnLaunch = async () => {
+      try {
+        const info = await checkForAppUpdate();
+        if (!active || !info.hasUpdate || !info.apkDownloadUrl) return;
+        Alert.alert(
+          `새 버전 ${info.latestVersion}`,
+          `현재 버전 ${info.currentVersion}\n\n기존 아기 기록은 그대로 유지됩니다. 지금 업데이트할까요?`,
+          [
+            { text: '나중에', style: 'cancel' },
+            {
+              text: '업데이트',
+              onPress: () =>
+                downloadAndInstallApk(info.apkDownloadUrl!).catch(error =>
+                  Alert.alert('업데이트 실패', error instanceof Error ? error.message : String(error)),
+                ),
+            },
+          ],
+        );
+      } catch (error) {
+        console.warn('Automatic update check failed', error);
+      }
+    };
+    checkUpdateOnLaunch();
+    return () => {
+      active = false;
+    };
   }, []);
 
   // Handle hardware back button on Android
@@ -82,6 +123,7 @@ function MainApp() {
       if (result.success) {
         setLogs(result.logs);
         setProfile(result.profile);
+        await refreshFeedingReminder(result.logs, result.profile);
       }
       return { success: result.success, merged: result.merged, error: result.error };
     } catch (e) {
@@ -107,6 +149,7 @@ function MainApp() {
     if (savedLog) {
       const updatedLogs = await getLogs();
       setLogs(updatedLogs);
+      if (profile) await refreshFeedingReminder(updatedLogs, profile);
       if (profile?.syncKey) {
         await uploadToCloud(profile.syncKey, updatedLogs, profile);
       }
@@ -119,6 +162,7 @@ function MainApp() {
     if (success) {
       const updatedLogs = await getLogs();
       setLogs(updatedLogs);
+      if (profile) await refreshFeedingReminder(updatedLogs, profile);
       if (profile?.syncKey) {
         await uploadToCloud(profile.syncKey, updatedLogs, profile);
       }
@@ -130,6 +174,7 @@ function MainApp() {
     if (success) {
       const updatedLogs = await getLogs();
       setLogs(updatedLogs);
+      if (profile) await refreshFeedingReminder(updatedLogs, profile);
       if (profile?.syncKey) {
         await uploadToCloud(profile.syncKey, updatedLogs, profile);
       }
@@ -137,22 +182,25 @@ function MainApp() {
   };
 
   const handleSaveProfile = async (newProfile: BabyProfile) => {
-    const success = await saveProfile(newProfile);
+    const mergedProfile = { ...profile, ...newProfile } as BabyProfile;
+    const success = await saveProfile(mergedProfile);
     if (success) {
-      setProfile(newProfile);
+      const savedProfile = await getProfile();
+      setProfile(savedProfile);
+      await refreshFeedingReminder(logs, savedProfile, newProfile.feedingReminderEnabled === true);
       // 프로필 저장만 수행 — 동기화는 syncWithCloud를 통해 안전하게 머지 후 업로드
     }
     return success;
   };
 
   const handleImportData = async (newProfile: BabyProfile, newLogs: BabyLogEntry[]) => {
-    await saveProfile(newProfile);
-    await saveLogs(newLogs);
-    setProfile(newProfile);
-    setLogs(newLogs);
+    const imported = await importDataWithoutLoss(newLogs, newProfile);
+    setProfile(imported.profile);
+    setLogs(imported.logs);
     setActiveScreen('dashboard');
-    if (newProfile.syncKey) {
-      await uploadToCloud(newProfile.syncKey, newLogs, newProfile);
+    await refreshFeedingReminder(imported.logs, imported.profile);
+    if (imported.profile.syncKey) {
+      await uploadToCloud(imported.profile.syncKey, imported.logs, imported.profile);
     }
   };
 
