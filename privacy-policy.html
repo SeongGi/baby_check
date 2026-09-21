@@ -1,0 +1,157 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>아기기록 개인정보처리방침</title>
+<meta name="description" content="아기기록(Baby Check) 앱의 개인정보 수집·이용·보관·삭제 방침" />
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Noto+Sans+KR:wght@400;500;700;900&display=swap">
+<style>
+  :root {
+    color-scheme: light dark;
+    --bg: #FDFBF7;
+    --card: #FFFFFF;
+    --text: #333333;
+    --muted: #7E7E7E;
+    --border: #F0EBE1;
+    --accent: #FF8E9C;
+    --accent-soft: #FFF0F2;
+    --mint: #3E9784;
+    --mint-soft: #EDF9F6;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #1C1A18;
+      --card: #262320;
+      --text: #F1EDE6;
+      --muted: #A9A29A;
+      --border: #38332E;
+      --accent: #FF9FAC;
+      --accent-soft: #3A2529;
+      --mint: #7FD1C1;
+      --mint-soft: #1F2E2B;
+    }
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; padding: 0; }
+  body {
+    background: var(--bg);
+    color: var(--text);
+    font-family: 'Noto Sans KR', -apple-system, BlinkMacSystemFont, sans-serif;
+    padding: 0 20px;
+    padding-block: 48px 64px;
+    line-height: 1.7;
+  }
+  .wrap { max-width: 680px; margin: 0 auto; }
+  .eyebrow {
+    display: inline-flex; align-items: center; gap: 8px;
+    font-size: 13px; font-weight: 700; color: var(--accent);
+    background: var(--accent-soft); padding: 6px 14px; border-radius: 999px;
+    margin-bottom: 18px;
+  }
+  h1 { font-size: 28px; font-weight: 900; margin: 0 0 10px; letter-spacing: -0.02em; }
+  .meta { color: var(--muted); font-size: 13px; margin: 0 0 40px; display: flex; flex-wrap: wrap; gap: 6px 16px; }
+  .meta b { color: var(--text); font-weight: 500; }
+  .lede {
+    background: var(--mint-soft); border: 1px solid var(--border); border-radius: 18px;
+    padding: 18px 20px; font-size: 14.5px; color: var(--text); margin-bottom: 40px;
+  }
+  .lede b { color: var(--mint); }
+  section { margin-bottom: 36px; }
+  section:last-of-type { margin-bottom: 0; }
+  .sec-head { display: flex; align-items: baseline; gap: 10px; margin-bottom: 14px; }
+  .sec-num { font-size: 13px; font-weight: 900; color: var(--accent); font-variant-numeric: tabular-nums; }
+  h2 { font-size: 18px; font-weight: 700; margin: 0; letter-spacing: -0.01em; }
+  p { margin: 0 0 12px; font-size: 14.5px; }
+  p:last-child { margin-bottom: 0; }
+  .card { background: var(--card); border: 1px solid var(--border); border-radius: 16px; padding: 18px 20px; }
+  table { width: 100%; border-collapse: collapse; font-size: 14px; }
+  th, td { text-align: left; padding: 9px 0; vertical-align: top; }
+  th { width: 34%; color: var(--muted); font-weight: 500; padding-right: 12px; }
+  tr + tr th, tr + tr td { border-top: 1px solid var(--border); padding-top: 12px; }
+  tr:not(:last-child) td, tr:not(:last-child) th { padding-bottom: 12px; }
+  ul { margin: 0; padding-left: 20px; }
+  li { font-size: 14.5px; margin-bottom: 6px; }
+  li:last-child { margin-bottom: 0; }
+  .pill-row { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 4px; }
+  .pill { font-size: 12.5px; font-weight: 500; background: var(--accent-soft); color: var(--text); border-radius: 10px; padding: 7px 11px; }
+  a { color: var(--accent); text-decoration: none; border-bottom: 1px solid currentColor; }
+  a:hover { opacity: .8; }
+  footer { margin-top: 56px; padding-top: 24px; border-top: 1px solid var(--border); color: var(--muted); font-size: 12.5px; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <span class="eyebrow">🍼 아기기록 (Baby Check)</span>
+  <h1>개인정보처리방침</h1>
+  <p class="meta"><span>시행일자: <b>2026년 9월 21일</b></span><span>버전: <b>1.6.0</b></span></p>
+
+  <div class="lede">
+    <b>핵심 요약</b> — 아기기록은 아기의 이름·생일·수유/배변/목욕 기록을 앱 안에
+    <b>이 기기 저장소에 먼저 저장</b>하고, 보호자가 가족 연결을 할 때만 두 기기
+    사이 동기화 목적으로 서버에 올립니다. 광고나 마케팅을 위해 개인정보를
+    수집하거나 제3자에게 판매·제공하지 않습니다.
+  </div>
+
+  <section>
+    <div class="sec-head"><span class="sec-num">01</span><h2>수집하는 개인정보 항목</h2></div>
+    <div class="card">
+      <table>
+        <tr><th>아기 정보</th><td>이름 또는 태명, 생년월일, 출생 체중</td></tr>
+        <tr><th>육아 기록</th><td>수유(분유·모유량, 시간), 기저귀(대·소변), 목욕, 수면, 터미타임, 놀기시간, 체중 기록</td></tr>
+        <tr><th>기기·앱 식별자</th><td>Firebase 익명 인증 UID (이름·이메일 등 실제 신원과 연결되지 않는 임의 식별자)</td></tr>
+      </table>
+    </div>
+  </section>
+
+  <section>
+    <div class="sec-head"><span class="sec-num">02</span><h2>수집 및 이용 목적</h2></div>
+    <p>위 정보는 오직 다음 목적을 위해서만 사용합니다.</p>
+    <div class="pill-row">
+      <span class="pill">앱 핵심 기능 제공 (기록·통계)</span>
+      <span class="pill">가족 구성원 간 실시간 동기화</span>
+      <span class="pill">기기 변경·재설치 시 데이터 복구</span>
+    </div>
+  </section>
+
+  <section>
+    <div class="sec-head"><span class="sec-num">03</span><h2>보관 위치와 기간</h2></div>
+    <p>모든 기록은 <b>기기 로컬 저장소에 우선 저장</b>되며, 앱을 삭제하면 로컬
+    데이터도 함께 삭제됩니다. 가족 연결(초대 키 공유)을 설정한 경우에 한해
+    Google Firebase(Firestore)에도 암호화된 통신으로 동기화되어, 가족 연결이
+    유지되는 동안 보관됩니다.</p>
+  </section>
+
+  <section>
+    <div class="sec-head"><span class="sec-num">04</span><h2>제3자 제공 및 광고</h2></div>
+    <p>아기기록은 광고 SDK를 포함하지 않으며, 수집한 개인정보를 마케팅이나
+    광고 목적으로 제3자에게 제공·판매하지 않습니다. 데이터 저장을 위해
+    이용하는 인프라(Google Firebase)를 제외하고는 외부 업체와 공유하지
+    않습니다.</p>
+  </section>
+
+  <section>
+    <div class="sec-head"><span class="sec-num">05</span><h2>이용자의 권리 — 열람·삭제</h2></div>
+    <p>앱 안에서 언제든지 다음을 직접 수행할 수 있습니다.</p>
+    <ul>
+      <li><b>내보내기</b> — 설정 화면의 "데이터 내보내기"로 전체 기록을 JSON 파일로 저장</li>
+      <li><b>가족 연결 해제</b> — 이 기기의 실시간 동기화만 중단 (기기 안 기록은 유지)</li>
+      <li><b>가족 서버 데이터 영구 삭제</b> — 설정 &gt; 개인정보 보호 화면에서 서버에 저장된 가족 전체 기록을 영구히 삭제 (되돌릴 수 없으며, 함께 연결된 다른 보호자의 기록도 함께 삭제됩니다)</li>
+      <li><b>앱 삭제</b> — 기기에서 앱을 삭제하면 로컬에 저장된 모든 기록이 함께 삭제됩니다</li>
+    </ul>
+  </section>
+
+  <section>
+    <div class="sec-head"><span class="sec-num">06</span><h2>문의</h2></div>
+    <p>개인정보 처리에 관해 문의하실 사항이 있으면 GitHub 저장소의 이슈로
+    남겨주세요: <a href="https://github.com/SeongGi/baby_check/issues" target="_blank" rel="noopener">github.com/SeongGi/baby_check/issues</a></p>
+  </section>
+
+  <footer>
+    이 방침은 서비스 변경에 따라 갱신될 수 있으며, 변경 시 이 페이지에 반영됩니다.
+  </footer>
+</div>
+</body>
+</html>
