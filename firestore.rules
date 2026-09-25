@@ -1,0 +1,83 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    function signedIn() {
+      return request.auth != null;
+    }
+
+    function isMember(familyId) {
+      return signedIn() &&
+        exists(/databases/$(database)/documents/families/$(familyId)/members/$(request.auth.uid));
+    }
+
+    // 예전 스키마로 만들어진 문서에는 이 필드가 없을 수 있습니다. 없는 필드를
+    // 그냥 읽으면 규칙 평가가 오류로 끝나 정상 사용자까지 거부됩니다.
+    function pinned(field) {
+      return request.resource.data.get(field, null) == resource.data.get(field, null);
+    }
+
+    // 가족 데이터 영구 삭제는 즉시 지우지 않고, 먼저 families 문서에
+    // pendingDeletionAt(최소 50분 뒤)을 표시해 냉각 기간을 둡니다. 그 안에
+    // 배우자가 취소할 수 있고, 실제 delete는 그 시각이 지난 뒤에만 허용됩니다.
+    function pendingDeletionValid() {
+      return !('pendingDeletionAt' in request.resource.data) ||
+        // 값이 그대로 유지되는 쓰기(다른 필드만 바뀌는 평소 동기화)는 항상 허용합니다.
+        // 그러지 않으면 예약 시각이 다가올수록 그 가족의 평소 동기화 쓰기가 막힙니다.
+        request.resource.data.pendingDeletionAt == resource.data.get('pendingDeletionAt', null) ||
+        request.resource.data.pendingDeletionAt == null ||
+        (request.resource.data.pendingDeletionAt is timestamp &&
+          request.resource.data.pendingDeletionAt > request.time + duration.value(50, 'm'));
+    }
+
+    function familyDeletionUnlocked(familyId) {
+      let family = get(/databases/$(database)/documents/families/$(familyId));
+      return family.data.get('pendingDeletionAt', null) is timestamp &&
+        request.time > family.data.pendingDeletionAt;
+    }
+
+    match /families/{familyId} {
+      allow create: if signedIn() &&
+        request.resource.data.inviteHash is string &&
+        request.resource.data.schemaVersion == 3;
+      allow get: if isMember(familyId);
+      allow update: if isMember(familyId) && pinned('inviteHash') && pinned('createdAt') && pendingDeletionValid();
+      allow list: if false;
+      // 가족 데이터 영구 삭제(계정 삭제 요건)는 냉각 기간이 지난 뒤에만 허용합니다.
+      // 클라이언트는 자식 문서를 먼저 지운 뒤 이 문서를 마지막에 지웁니다.
+      allow delete: if isMember(familyId) &&
+        resource.data.get('pendingDeletionAt', null) is timestamp &&
+        request.time > resource.data.pendingDeletionAt;
+
+      match /members/{uid} {
+        allow create: if signedIn() &&
+          uid == request.auth.uid &&
+          request.resource.data.inviteHash ==
+            get(/databases/$(database)/documents/families/$(familyId)).data.inviteHash;
+        // 아직 가입 전인 기기가 "내가 회원인가"를 확인할 수 있어야 합니다.
+        // 여기서 거부하면 네트워크 오류와 미가입 상태를 구분할 수 없습니다.
+        allow get: if signedIn() && uid == request.auth.uid;
+        allow update: if isMember(familyId) && uid == request.auth.uid;
+        allow list: if false;
+        // 가족 데이터 영구 삭제 시 다른 회원 문서도 함께 지울 수 있어야 합니다.
+        // (냉각 기간이 지난 뒤에만 — familyDeletionUnlocked 참고)
+        allow delete: if isMember(familyId) && familyDeletionUnlocked(familyId);
+      }
+
+      match /logs/{logId} {
+        allow read, create: if isMember(familyId);
+        // 삭제 표시된 기록을 되살리는 쓰기만 막습니다.
+        allow update: if isMember(familyId) &&
+          !(resource.data.get('deleted', false) == true &&
+            request.resource.data.get('deleted', false) != true);
+        // 평소 삭제는 tombstone 쓰기(update)로 처리합니다. 문서 자체를 지우는
+        // 것은 가족 데이터 영구 삭제(계정 삭제 요건) 흐름에서만, 냉각 기간이
+        // 지난 뒤에만 씁니다.
+        allow delete: if isMember(familyId) && familyDeletionUnlocked(familyId);
+      }
+
+      match /profile/{profileId} {
+        allow read, write: if isMember(familyId);
+      }
+    }
+  }
+}
