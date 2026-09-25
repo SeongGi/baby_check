@@ -67,23 +67,25 @@ export const LogDiaper: React.FC<LogDiaperProps> = ({ onAddLog, onNavigate }) =>
   const handleSave = async () => {
     setIsSaving(true);
     try {
-      if (activeTab === 'stool') {
-        await onAddLog({
+      const saved = activeTab === 'stool'
+        ? await onAddLog({
           type: 'stool',
           color: stoolColor,
           consistency: stoolConsistency,
           amount: stoolAmount,
           timestamp: Date.now(),
           notes: notes.trim() ? notes.trim() : undefined,
-        });
-      } else {
-        await onAddLog({
+        })
+        : await onAddLog({
           type: 'urine',
           wetness: urineWetness,
           color: urineColor,
           timestamp: Date.now(),
           notes: notes.trim() ? notes.trim() : undefined,
         });
+      if (!saved) {
+        alert('기록을 저장하지 못했습니다. 다시 시도해 주세요.');
+        return;
       }
       
       // Reset

@@ -5,6 +5,7 @@ import {
   StyleSheet, 
   TouchableOpacity, 
   TextInput, 
+  Alert,
   KeyboardAvoidingView, 
   Platform, 
   ScrollView 
@@ -51,14 +52,14 @@ export const LogFormula: React.FC<LogFormulaProps> = ({ onAddLog, onNavigate }) 
       mixedBreastAmount = bAmt;
     }
 
-    if (finalAmount <= 0) {
-      alert('수유 양을 10ml 이상 선택해주세요.');
+    if (finalAmount < 10) {
+      Alert.alert('입력 확인', '수유 양을 10ml 이상 선택해 주세요.');
       return;
     }
 
     setIsSaving(true);
     try {
-      await onAddLog({
+      const saved = await onAddLog({
         type: 'formula',
         feedingType,
         amount: finalAmount,
@@ -68,6 +69,10 @@ export const LogFormula: React.FC<LogFormulaProps> = ({ onAddLog, onNavigate }) 
         timestamp: Date.now(),
         notes: notes.trim() ? notes.trim() : undefined,
       });
+      if (!saved) {
+        Alert.alert('저장 실패', '수유 기록을 저장하지 못했습니다. 다시 시도해 주세요.');
+        return;
+      }
       // Reset
       setAmount(120);
       setFormulaAmount('60');

@@ -1,0 +1,54 @@
+# dependencies
+node_modules/
+
+# Expo
+.expo/
+dist/
+web-build/
+expo-env.d.ts
+
+# Native build caches and local machine configuration
+.kotlin/
+android/.gradle/
+android/.cxx/
+android/build/
+android/app/build/
+android/local.properties
+ios/
+
+# Signing credentials
+credentials.json
+credentials/
+*.jks
+*.keystore
+*.p8
+*.p12
+*.key
+*.mobileprovision
+*.pem
+
+# Metro and package manager logs
+.metro-health-check*
+npm-debug.*
+yarn-debug.*
+yarn-error.*
+
+# Local and generated files
+.DS_Store
+.env*.local
+*.tsbuildinfo
+*.orig.*
+scratch/
+tools/
+tester_credentials.md
+tester_emails.txt
+gws_*.csv
+/*.py
+/inspect_terms.js
+/optin_single_test.js
+
+# Built binaries at the repository root
+/*.apk
+/*.aab
+/app-release.apk.zip
+/play-*.png

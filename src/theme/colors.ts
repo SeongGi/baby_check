@@ -10,6 +10,8 @@ export const COLORS = {
   lightPink: '#FFF0F2',    // Light pink background
   lightBlue: '#F0F6FF',    // Light blue background
   lightYellow: '#FFF9EB',  // Light yellow background
+  bath: '#69BFAF',         // Calm mint for bath records
+  lightMint: '#EDF9F6',    // Light mint background
   success: '#4CAF50',      // Safe green
   danger: '#FF5252',       // Warning red
   

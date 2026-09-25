@@ -6,6 +6,8 @@
  * APK를 다운로드하여 설치합니다.
  *
  * expo-updates 불필요 – 일반 fetch만 사용합니다.
+ * 정식으로 Google Play / App Store에 출시된 뒤에는 각 스토어의 자체
+ * 업데이트 메커니즘으로 전환합니다. 그 전까지는 이 방식이 유일한 배포 경로입니다.
  */
 
 import * as LegacyFS from 'expo-file-system/legacy';
@@ -17,7 +19,7 @@ const GITHUB_REPO = 'baby_check';
 const GITHUB_API_URL = `https://api.github.com/repos/${GITHUB_OWNER}/${GITHUB_REPO}/releases/latest`;
 
 // 현재 앱 버전 (app.json과 동기화 유지)
-export const CURRENT_APP_VERSION = '1.1.0';
+export const CURRENT_APP_VERSION = '1.7.0';
 
 export interface UpdateInfo {
   hasUpdate: boolean;

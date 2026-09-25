@@ -1,0 +1,83 @@
+<?xml version="1.0" encoding="utf-8"?>
+<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+  android:id="@+id/widget_root"
+  android:layout_width="match_parent"
+  android:layout_height="match_parent"
+  android:background="@drawable/baby_widget_background"
+  android:orientation="vertical"
+  android:padding="16dp">
+
+  <TextView
+    android:id="@+id/widget_name_status"
+    android:layout_width="match_parent"
+    android:layout_height="wrap_content"
+    android:ellipsize="end"
+    android:maxLines="1"
+    android:textColor="#745F58"
+    android:textSize="13sp"
+    android:textStyle="bold" />
+
+  <LinearLayout
+    android:layout_width="match_parent"
+    android:layout_height="wrap_content"
+    android:layout_marginTop="6dp"
+    android:gravity="center_vertical"
+    android:orientation="horizontal">
+    <TextView
+      android:id="@+id/widget_next_feeding"
+      android:layout_width="wrap_content"
+      android:layout_height="wrap_content"
+      android:textColor="#493D39"
+      android:textSize="27sp"
+      android:textStyle="bold" />
+    <Chronometer
+      android:id="@+id/widget_countdown"
+      android:layout_width="0dp"
+      android:layout_height="wrap_content"
+      android:layout_marginStart="10dp"
+      android:layout_weight="1"
+      android:gravity="end"
+      android:textColor="#648267"
+      android:textSize="13sp"
+      android:textStyle="bold" />
+    <TextView
+      android:id="@+id/widget_remaining_text"
+      android:layout_width="0dp"
+      android:layout_height="wrap_content"
+      android:layout_marginStart="10dp"
+      android:layout_weight="1"
+      android:gravity="end"
+      android:textColor="#D65D66"
+      android:textSize="13sp"
+      android:textStyle="bold"
+      android:visibility="gone" />
+  </LinearLayout>
+
+  <TextView
+    android:id="@+id/widget_last_feeding"
+    android:layout_width="match_parent"
+    android:layout_height="wrap_content"
+    android:layout_marginTop="1dp"
+    android:textColor="#988882"
+    android:textSize="11sp" />
+
+  <LinearLayout
+    android:layout_width="match_parent"
+    android:layout_height="0dp"
+    android:layout_marginTop="9dp"
+    android:layout_weight="1"
+    android:orientation="vertical">
+    <TextView android:id="@+id/widget_formula" style="@style/BabyWidgetRow" android:textColor="#493D39" />
+    <TextView android:id="@+id/widget_urine" style="@style/BabyWidgetRow" android:textColor="#493D39" />
+    <TextView android:id="@+id/widget_stool" style="@style/BabyWidgetRow" android:textColor="#493D39" />
+    <TextView android:id="@+id/widget_sleep" style="@style/BabyWidgetRow" android:textColor="#493D39" />
+  </LinearLayout>
+
+  <TextView
+    android:layout_width="match_parent"
+    android:layout_height="wrap_content"
+    android:gravity="end"
+    android:text="항목을 눌러 기록하기"
+    android:textColor="#AD9F99"
+    android:textSize="10sp" />
+</LinearLayout>

@@ -1,34 +1,32 @@
 {
   "expo": {
-    "name": "아기기록-도우미",
+    "name": "아기기록",
     "slug": "baby_check",
-    "version": "1.1.0",
+    "version": "1.7.0",
+    "scheme": "babycheck",
     "orientation": "portrait",
     "icon": "./assets/icon.png",
     "userInterfaceStyle": "light",
-    "runtimeVersion": "1.1.0",
+    "runtimeVersion": "1.3.0",
     "updates": {
+      "enabled": false,
       "url": "https://u.expo.dev/79563103-adf4-45c2-b610-ae4c461868f0",
-      "checkAutomatically": "ON_LOAD",
+      "checkAutomatically": "NEVER",
       "requestHeaders": {
         "expo-channel-name": "master"
       }
     },
-    "splash": {
-      "image": "./assets/splash-icon.png",
-      "resizeMode": "contain",
-      "backgroundColor": "#FDFBF7"
-    },
     "ios": {
-      "supportsTablet": true,
-      "bundleIdentifier": "com.seonggi.babycheck"
+      "supportsTablet": false,
+      "bundleIdentifier": "com.seonggi.babycheck",
+      "buildNumber": "1",
+      "infoPlist": {
+        "ITSAppUsesNonExemptEncryption": false
+      }
     },
     "android": {
       "package": "com.seonggi.babycheck",
-      "versionCode": 7,
-      "permissions": [
-        "android.permission.REQUEST_INSTALL_PACKAGES"
-      ],
+      "versionCode": 17,
       "adaptiveIcon": {
         "backgroundColor": "#E6F4FE",
         "foregroundImage": "./assets/android-icon-foreground.png",
@@ -47,6 +45,7 @@
     },
     "owner": "seonggi",
     "plugins": [
+      "./plugins/withBabyStatusWidget",
       "expo-notifications",
       [
         "expo-widgets",
@@ -60,6 +59,7 @@
                 "supportedFamilies": [
                   "systemSmall",
                   "systemMedium",
+                  "systemLarge",
                   "accessoryRectangular",
                   "accessoryInline"
                 ]
@@ -67,7 +67,17 @@
             }
           ]
         }
-      ]
+      ],
+      [
+        "expo-splash-screen",
+        {
+          "image": "./assets/splash-icon.png",
+          "resizeMode": "contain",
+          "backgroundColor": "#FDFBF7",
+          "imageWidth": 200
+        }
+      ],
+      "expo-sharing"
     ]
   }
 }

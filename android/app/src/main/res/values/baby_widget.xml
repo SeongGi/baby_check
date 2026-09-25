@@ -1,0 +1,13 @@
+<resources>
+  <string name="baby_widget_description">아기 상태와 다음 수유, 최근 기록을 한눈에 확인합니다.</string>
+
+  <style name="BabyWidgetRow">
+    <item name="android:layout_width">match_parent</item>
+    <item name="android:layout_height">0dp</item>
+    <item name="android:layout_weight">1</item>
+    <item name="android:ellipsize">end</item>
+    <item name="android:gravity">center_vertical</item>
+    <item name="android:maxLines">1</item>
+    <item name="android:textSize">12sp</item>
+  </style>
+</resources>

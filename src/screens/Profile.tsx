@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import { 
   View, 
   Text, 
@@ -10,21 +10,47 @@ import {
   KeyboardAvoidingView,
   Platform,
   Switch,
+  Share,
+  Linking,
 } from 'react-native';
-import * as Clipboard from 'expo-clipboard';
+import { Directory, File, Paths } from 'expo-file-system';
+import * as Sharing from 'expo-sharing';
 import { checkForAppUpdate, downloadAndInstallApk } from '../utils/appUpdater';
 import { BabyProfile, BabyLogEntry } from '../types';
 import { COLORS } from '../theme/colors';
 import { getLogs, getLocalBackup, restoreFromLocalBackup } from '../database/storage';
+import { createFamilyInviteLink, createFamilySyncId, parseFamilySyncId, FamilyDeletionStatus } from '../database/sync';
+
+const PRIVACY_POLICY_URL = 'https://seonggi.github.io/baby_check/privacy-policy.html';
 
 interface ProfileProps {
   profile: BabyProfile;
-  onSaveProfile: (profile: BabyProfile) => Promise<boolean>;
+  onSaveProfile: (profile: Partial<BabyProfile>, syncInBackground?: boolean) => Promise<boolean>;
   onImportData: (profile: BabyProfile, logs: BabyLogEntry[]) => Promise<void>;
-  onSync: (syncKey: string) => Promise<{ success: boolean; merged: boolean; error?: string }>;
+  onRestoreData: (profile: BabyProfile, logs: BabyLogEntry[]) => Promise<void>;
+  onSync: (
+    syncKey: string,
+    createBackup?: boolean,
+    allowFamilyCreation?: boolean,
+    connecting?: boolean,
+  ) => Promise<{ success: boolean; merged: boolean; error?: string }>;
+  onDeleteFamilyData: (syncKey: string) => Promise<{ success: boolean; error?: string; partiallyDeleted?: boolean }>;
+  onScheduleFamilyDeletion: (syncKey: string) => Promise<{ success: boolean; readyAt?: number; error?: string }>;
+  onCancelFamilyDeletion: (syncKey: string) => Promise<{ success: boolean; error?: string }>;
+  onGetFamilyDeletionStatus: (syncKey: string) => Promise<FamilyDeletionStatus>;
 }
 
-export const Profile: React.FC<ProfileProps> = ({ profile, onSaveProfile, onImportData, onSync }) => {
+export const Profile: React.FC<ProfileProps> = ({
+  profile,
+  onSaveProfile,
+  onImportData,
+  onRestoreData,
+  onSync,
+  onDeleteFamilyData,
+  onScheduleFamilyDeletion,
+  onCancelFamilyDeletion,
+  onGetFamilyDeletionStatus,
+}) => {
   const [name, setName] = useState(profile.name);
   const [birthDate, setBirthDate] = useState(profile.birthDate);
   const [birthWeight, setBirthWeight] = useState(profile.birthWeight);
@@ -34,23 +60,91 @@ export const Profile: React.FC<ProfileProps> = ({ profile, onSaveProfile, onImpo
     String(profile.feedingIntervalMinutes || 180),
   );
 
+  type EditableProfileField =
+    | 'name'
+    | 'birthDate'
+    | 'birthWeight'
+    | 'targetFormula'
+    | 'feedingReminderEnabled'
+    | 'feedingIntervalMinutes';
+  const dirtyFieldsRef = useRef(new Set<EditableProfileField>());
+  const markEdited = (field: EditableProfileField) => { dirtyFieldsRef.current.add(field); };
+  const buildProfilePatch = (): Partial<BabyProfile> => {
+    const dirty = dirtyFieldsRef.current;
+    const patch: Partial<BabyProfile> = {};
+    if (dirty.has('name')) patch.name = name.trim();
+    if (dirty.has('birthDate')) patch.birthDate = birthDate;
+    if (dirty.has('birthWeight')) patch.birthWeight = String(Number(birthWeight));
+    if (dirty.has('targetFormula')) patch.targetFormula = parseInt(targetFormula) || 800;
+    if (dirty.has('feedingReminderEnabled')) patch.feedingReminderEnabled = feedingReminderEnabled;
+    if (dirty.has('feedingIntervalMinutes')) {
+      patch.feedingIntervalMinutes = Math.min(720, Math.max(30, parseInt(feedingIntervalMinutes) || 180));
+    }
+    return patch;
+  };
+
   // Sync inputs if profile values update from parent (e.g. edited from dashboard)
   useEffect(() => {
-    setName(profile.name);
-    setBirthDate(profile.birthDate);
-    setBirthWeight(profile.birthWeight);
-    setTargetFormula(profile.targetFormula.toString());
-    setFeedingReminderEnabled(profile.feedingReminderEnabled === true);
-    setFeedingIntervalMinutes(String(profile.feedingIntervalMinutes || 180));
+    if (!dirtyFieldsRef.current.has('name')) setName(profile.name);
+    if (!dirtyFieldsRef.current.has('birthDate')) setBirthDate(profile.birthDate);
+    if (!dirtyFieldsRef.current.has('birthWeight')) setBirthWeight(profile.birthWeight);
+    if (!dirtyFieldsRef.current.has('targetFormula')) setTargetFormula(profile.targetFormula.toString());
+    if (!dirtyFieldsRef.current.has('feedingReminderEnabled')) {
+      setFeedingReminderEnabled(profile.feedingReminderEnabled === true);
+    }
+    if (!dirtyFieldsRef.current.has('feedingIntervalMinutes')) {
+      setFeedingIntervalMinutes(String(profile.feedingIntervalMinutes || 180));
+    }
+    setSyncKey(profile.syncKey || '');
   }, [profile]);
   const [isSaving, setIsSaving] = useState(false);
   const [isCheckingUpdates, setIsCheckingUpdates] = useState(false);
   const [syncKey, setSyncKey] = useState(profile.syncKey || '');
+  const [inviteInput, setInviteInput] = useState('');
   const [isSyncing, setIsSyncing] = useState(false);
 
-  const [showImportInput, setShowImportInput] = useState(false);
-  const [importText, setImportText] = useState('');
   const [lastBackupTime, setLastBackupTime] = useState<string | null>(null);
+  const [showDeleteFamilyConfirm, setShowDeleteFamilyConfirm] = useState(false);
+  const [deleteFamilyConfirmText, setDeleteFamilyConfirmText] = useState('');
+  const [isProcessingDeletion, setIsProcessingDeletion] = useState(false);
+  const [deletionStatus, setDeletionStatus] = useState<FamilyDeletionStatus | null>(null);
+  const DELETE_FAMILY_CONFIRM_PHRASE = '삭제합니다';
+
+  // 가족 서버 데이터 삭제 예약 상태 로드. 냉각 기간이 이미 지났다면 별도
+  // 확인 없이 바로 실행합니다 — 사용자가 예약할 때 이미 한 번 확인했고,
+  // 그 뒤로 계속 취소할 기회가 있었기 때문입니다(휴지통 자동 비우기와 동일한 방식).
+  useEffect(() => {
+    if (!profile.syncKey) {
+      setDeletionStatus(null);
+      return;
+    }
+    let cancelled = false;
+    const key = profile.syncKey;
+    onGetFamilyDeletionStatus(key).then(async status => {
+      if (cancelled) return;
+      if (status.scheduled && status.canDeleteNow) {
+        const result = await onDeleteFamilyData(key);
+        if (cancelled) return;
+        if (result.success) {
+          setSyncKey('');
+          setDeletionStatus(null);
+          Alert.alert('삭제 완료', '예약된 가족 서버 데이터 영구 삭제가 자동으로 실행됐습니다. 이 휴대폰의 기록은 그대로 남아 있습니다.');
+        } else {
+          // 실행이 실패하면(예: 오프라인) 수동으로 다시 시도할 수 있게 상태를 보여줍니다.
+          setDeletionStatus(status);
+          if (result.partiallyDeleted) {
+            Alert.alert(
+              '일부만 삭제됨',
+              `자동 삭제가 도중에 실패했지만, 이미 일부 데이터는 서버에서 지워졌습니다.\n\n[상세 오류]: ${result.error || ''}\n\n"다시 시도"를 눌러 나머지를 마저 지워주세요.`,
+            );
+          }
+        }
+        return;
+      }
+      setDeletionStatus(status);
+    }).catch(() => undefined);
+    return () => { cancelled = true; };
+  }, [profile.syncKey]);
 
   // 최근 백업 시간 로드
   useEffect(() => {
@@ -78,9 +172,10 @@ export const Profile: React.FC<ProfileProps> = ({ profile, onSaveProfile, onImpo
           onPress: async () => {
             const result = await restoreFromLocalBackup();
             if (result.success && result.backup) {
+              await onRestoreData(result.backup.profile, result.backup.logs);
               const d = new Date(result.backup.timestamp);
               const timeStr = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')} ${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`;
-              Alert.alert('복원 완료', `${timeStr} 시점의 데이터로 성공적으로 복원되었습니다.\n앱을 재시작해 주세요.`);
+              Alert.alert('복원 완료', `${timeStr} 시점의 데이터로 복원하고 화면과 가족 동기화에 반영했습니다.`);
             } else {
               Alert.alert('복원 실패', '저장된 로컬 백업이 없습니다. 동기화를 한 번 수행한 후에 사용할 수 있습니다.');
             }
@@ -90,50 +185,220 @@ export const Profile: React.FC<ProfileProps> = ({ profile, onSaveProfile, onImpo
     );
   };
 
-  const handleSyncSetup = async () => {
+  const handleScheduleFamilyDeletion = () => {
+    if (!profile.syncKey) return;
+    if (deleteFamilyConfirmText.trim() !== DELETE_FAMILY_CONFIRM_PHRASE) return;
+    Alert.alert(
+      '마지막 확인',
+      '가족 서버 데이터 영구 삭제를 예약합니다. 1시간 뒤에 별도 확인 없이 자동으로 지워지며, 그 전까지는 취소할 수 있습니다. 배우자의 기록도 함께 지워집니다. 예약하시겠습니까?',
+      [
+        { text: '취소', style: 'cancel' },
+        {
+          text: '삭제 예약',
+          style: 'destructive',
+          onPress: async () => {
+            setIsProcessingDeletion(true);
+            try {
+              const result = await onScheduleFamilyDeletion(profile.syncKey!);
+              if (result.success) {
+                setDeletionStatus({ scheduled: true, readyAt: result.readyAt, canDeleteNow: false });
+                setShowDeleteFamilyConfirm(false);
+                setDeleteFamilyConfirmText('');
+                Alert.alert('삭제 예약됨', '1시간 뒤에 가족 서버 데이터가 자동으로 영구 삭제됩니다. 그 전까지는 이 화면에서 취소할 수 있습니다.');
+              } else {
+                Alert.alert('예약 실패', result.error || '알 수 없는 오류가 발생했습니다.');
+              }
+            } finally {
+              setIsProcessingDeletion(false);
+            }
+          },
+        },
+      ],
+    );
+  };
+
+  const handleCancelFamilyDeletion = () => {
+    if (!profile.syncKey) return;
+    setIsProcessingDeletion(true);
+    onCancelFamilyDeletion(profile.syncKey)
+      .then(result => {
+        if (result.success) {
+          setDeletionStatus({ scheduled: false, canDeleteNow: false });
+          Alert.alert('취소 완료', '가족 서버 데이터 삭제 예약을 취소했습니다.');
+        } else {
+          Alert.alert('취소 실패', result.error || '알 수 없는 오류가 발생했습니다.');
+        }
+      })
+      .finally(() => setIsProcessingDeletion(false));
+  };
+
+  const handleExecuteFamilyDeletion = () => {
+    if (!profile.syncKey) return;
+    Alert.alert(
+      '마지막 확인',
+      '가족 서버 데이터를 지금 영구히 삭제합니다. 배우자의 기록을 포함해 되돌릴 수 없습니다. 정말 진행하시겠습니까?',
+      [
+        { text: '취소', style: 'cancel' },
+        {
+          text: '영구 삭제',
+          style: 'destructive',
+          onPress: async () => {
+            setIsProcessingDeletion(true);
+            try {
+              const result = await onDeleteFamilyData(profile.syncKey!);
+              if (result.success) {
+                setSyncKey('');
+                setDeletionStatus(null);
+                Alert.alert('삭제 완료', '가족 서버 데이터를 삭제했습니다. 이 휴대폰의 기록은 그대로 남아 있습니다.');
+              } else if (result.partiallyDeleted) {
+                Alert.alert(
+                  '일부만 삭제됨',
+                  `도중에 실패했지만, 이미 일부 데이터는 서버에서 지워졌습니다.\n\n[상세 오류]: ${result.error || ''}\n\n"다시 시도"를 눌러 나머지를 마저 지워주세요.`,
+                );
+              } else {
+                Alert.alert('삭제 실패', result.error || '알 수 없는 오류가 발생했습니다.');
+              }
+            } finally {
+              setIsProcessingDeletion(false);
+            }
+          },
+        },
+      ],
+    );
+  };
+
+  const connectFamily = async (
+    newSyncId: string,
+    showSuccess = true,
+    allowFamilyCreation = false,
+  ): Promise<boolean> => {
     setIsSyncing(true);
     try {
-      const updatedProfile: BabyProfile = {
-        ...profile,
-        name: name.trim(),
-        birthDate,
-        birthWeight,
-        targetFormula: parseInt(targetFormula) || 800,
-        syncKey: syncKey.trim(),
-        feedingReminderEnabled,
-        feedingIntervalMinutes: parseInt(feedingIntervalMinutes) || 180,
-      };
+      if (profile.syncKey && profile.syncKey !== newSyncId) {
+        Alert.alert(
+          '다른 가족에 연결되어 있어요',
+          '기록이 서로 섞이지 않도록 기존 가족 연결을 먼저 해제해 주세요.',
+        );
+        return false;
+      }
+      const updatedProfile = buildProfilePatch();
       
-      const saved = await onSaveProfile(updatedProfile);
+      // 아래의 명시적 동기화가 가족 가입과 첫 데이터 병합을 맡습니다.
+      // 프로필 저장에서 또 백그라운드 동기화를 시작하면 같은 작업이 두 번
+      // 대기열에 들어가 연결 화면이 불필요하게 오래 걸립니다.
+      const saved = await onSaveProfile(updatedProfile, false);
       
-      if (saved && syncKey.trim()) {
-        const result = await onSync(syncKey.trim());
+      if (saved) {
+        dirtyFieldsRef.current.clear();
+        const result = await onSync(newSyncId, true, allowFamilyCreation, true);
         if (result.success) {
-          Alert.alert(
-            '동기화 완료', 
-            result.merged 
-              ? '원격 서버의 최신 데이터를 가져와 병합을 완료했습니다!'
-              : '동기화 완료! 현재 이미 최신 상태입니다.'
-          );
+          setSyncKey(newSyncId);
+          if (showSuccess) {
+            Alert.alert(
+              '가족 연결 완료',
+              '이제 두 휴대폰의 기록이 앱 실행 중 자동으로 동기화됩니다.',
+            );
+          }
+          return true;
         } else {
           Alert.alert(
-            '동기화 실패', 
-            `원격 서버에 연결하지 못했거나 그룹 키가 올바르지 않습니다.\n\n[상세 오류]: ${result.error || '알 수 없는 오류'}`
+            '가족 연결 실패',
+            `서버에 연결하지 못했습니다.\n\n[상세 오류]: ${result.error || '알 수 없는 오류'}`,
           );
+          return false;
         }
-      } else if (saved) {
-        Alert.alert('설정 저장 완료', '동기화가 비활성화되었습니다.');
       }
+      return false;
     } catch (e) {
       console.error(e);
       Alert.alert('오류', '동기화 설정 중 오류가 발생했습니다.');
+      return false;
     } finally {
       setIsSyncing(false);
     }
   };
 
+  const handleCreateFamily = async () => {
+    const newSyncId = createFamilySyncId();
+    const connected = await connectFamily(newSyncId, false, true);
+    if (!connected) return;
+    const inviteLink = createFamilyInviteLink(newSyncId);
+    await Share.share({
+      title: '아기기록 가족 초대',
+      message: `아기기록 앱에서 이 링크를 눌러 가족 기록에 연결하세요.\n${inviteLink}`,
+    });
+  };
+
+  const handleManualSync = async () => {
+    if (!syncKey || isSyncing) return;
+
+    setIsSyncing(true);
+    try {
+      const result = await onSync(syncKey);
+      if (result.success) {
+        Alert.alert(
+          '동기화 완료',
+          result.merged
+            ? '상대방 기기의 변경사항을 받아와 합쳤습니다.'
+            : '서버와 확인을 마쳤습니다. 새로운 변경사항은 없습니다.',
+        );
+      } else {
+        Alert.alert(
+          '동기화 실패',
+          `서버에 연결하지 못했습니다.\n\n[상세 오류]: ${result.error || '알 수 없는 오류'}`,
+        );
+      }
+    } catch (error) {
+      Alert.alert(
+        '동기화 실패',
+        `예상하지 못한 오류가 발생했습니다.\n\n[상세 오류]: ${error instanceof Error ? error.message : String(error)}`,
+      );
+    } finally {
+      setIsSyncing(false);
+    }
+  };
+
+  const handleJoinFamily = async () => {
+    const syncId = /^babycheck:\/\/family\/[a-f0-9]{32}$/i.test(inviteInput.trim())
+      ? parseFamilySyncId(inviteInput)
+      : null;
+    if (!syncId) {
+      Alert.alert('초대 확인', '받은 가족 초대 링크를 붙여넣어 주세요.');
+      return;
+    }
+    const connected = await connectFamily(syncId, true, false);
+    if (connected) setInviteInput('');
+  };
+
+  const handleShareFamilyInvite = async () => {
+    if (!syncKey) return;
+    const inviteLink = createFamilyInviteLink(syncKey);
+    await Share.share({
+      title: '아기기록 가족 초대',
+      message: `아기기록 앱에서 이 링크를 눌러 가족 기록에 연결하세요.\n${inviteLink}`,
+    });
+  };
+
+  const handleDisconnectFamily = () => {
+    Alert.alert('가족 연결 해제', '이 휴대폰의 자동 동기화를 중지할까요?', [
+      { text: '취소', style: 'cancel' },
+      {
+        text: '연결 해제',
+        style: 'destructive',
+        onPress: async () => {
+          const saved = await onSaveProfile({ syncKey: undefined });
+          if (saved) {
+            setSyncKey('');
+            Alert.alert('연결 해제 완료', '이 휴대폰의 기록은 그대로 유지됩니다.');
+          }
+        },
+      },
+    ]);
+  };
+
   const handleCheckUpdates = async () => {
-    // GitHub Releases 기반 자체 업데이트 – 디버그/릴리즈 모드 모두 작동
+    // GitHub Releases 기반 자체 업데이트 – 디버그/릴리즈 모드 모두 작동.
+    // 정식 스토어 출시 전까지의 임시 배포 경로입니다.
     setIsCheckingUpdates(true);
     try {
       const info = await checkForAppUpdate();
@@ -193,29 +458,48 @@ export const Profile: React.FC<ProfileProps> = ({ profile, onSaveProfile, onImpo
   const handleExport = async () => {
     try {
       const allLogs = await getLogs();
+      // 백업 파일에는 가족 초대 키(syncKey)를 포함하지 않아 다른 사람이나 기기에 공유되어도
+      // 우리 가족의 실시간 동기화 공간이 무단 노출되거나 오염되지 않도록 보호합니다.
+      const { syncKey: _unusedSyncKey, ...exportProfile } = profile;
       const backupData = {
         version: 1,
         backupDate: Date.now(),
-        profile,
+        profile: exportProfile,
         logs: allLogs,
       };
-      const jsonString = JSON.stringify(backupData);
-      await Clipboard.setStringAsync(jsonString);
-      Alert.alert('내보내기 성공', '데이터가 클립보드에 안전하게 복사되었습니다. 카카오톡이나 메모장에 붙여넣기 하여 백업해 두세요!');
+      // Expo 56 FileSystem의 안전한 문서 저장소에 폴더를 자동으로 만듭니다.
+      // 폴더 선택 권한이나 존재 여부 때문에 백업이 실패하지 않습니다.
+      const directory = new Directory(Paths.document, 'BabyCheck');
+      directory.create({ idempotent: true, intermediates: true });
+      const date = new Date();
+      const datePart = `${date.getFullYear()}${String(date.getMonth() + 1).padStart(2, '0')}${String(date.getDate()).padStart(2, '0')}-${String(date.getHours()).padStart(2, '0')}${String(date.getMinutes()).padStart(2, '0')}${String(date.getSeconds()).padStart(2, '0')}`;
+      const backupFile = new File(directory, `baby-check-backup-${datePart}.json`);
+      backupFile.create({ overwrite: true });
+      backupFile.write(JSON.stringify(backupData, null, 2));
+
+      // iOS 및 모바일 기기에서 사용자가 파일 앱 저장, AirDrop, 메신저 등으로 전달할 수 있도록 공유 시트를 엽니다.
+      const isSharingAvailable = await Sharing.isAvailableAsync().catch(() => false);
+      if (isSharingAvailable) {
+        await Sharing.shareAsync(backupFile.uri, {
+          mimeType: 'application/json',
+          dialogTitle: '아기기록 백업 파일 내보내기',
+          UTI: 'public.json',
+        });
+      } else {
+        Alert.alert('내보내기 성공', `기기 저장소의 BabyCheck 폴더에 ${backupFile.name} 파일을 저장했습니다.`);
+      }
     } catch (e) {
+      if (String(e).toLowerCase().includes('cancel')) return;
       console.error(e);
-      Alert.alert('내보내기 실패', '데이터를 백업하는 중 오류가 발생했습니다.');
+      Alert.alert('내보내기 실패', `백업 파일을 저장하거나 공유하지 못했습니다.\n${e instanceof Error ? e.message : String(e)}`);
     }
   };
 
   const handleImport = async () => {
-    if (!importText.trim()) {
-      Alert.alert('복원 오류', '복원할 텍스트 데이터를 붙여넣어 주세요.');
-      return;
-    }
-
     try {
-      const parsedData = JSON.parse(importText.trim());
+      const picked = await File.pickFileAsync({ mimeTypes: ['application/json', 'text/plain'] });
+      if (picked.canceled) return;
+      const parsedData = JSON.parse(await picked.result.text());
       if (!parsedData.profile || !Array.isArray(parsedData.logs)) {
         Alert.alert('복원 실패', '올바르지 않은 백업 데이터 포맷입니다.');
         return;
@@ -233,8 +517,6 @@ export const Profile: React.FC<ProfileProps> = ({ profile, onSaveProfile, onImpo
               try {
                 await onImportData(parsedData.profile, parsedData.logs);
                 Alert.alert('복원 성공', '기존 기록을 보존하면서 백업 데이터를 성공적으로 합쳤습니다.');
-                setShowImportInput(false);
-                setImportText('');
               } catch (e) {
                 console.error(e);
                 Alert.alert('오류', '데이터 저장 중 문제가 발생했습니다.');
@@ -244,7 +526,8 @@ export const Profile: React.FC<ProfileProps> = ({ profile, onSaveProfile, onImpo
         ]
       );
     } catch (e) {
-      Alert.alert('복원 실패', '텍스트를 데이터 객체로 변환하는 중 오류가 발생했습니다. 정상적인 텍스트인지 다시 확인해 주세요.');
+      if (String(e).toLowerCase().includes('cancel')) return;
+      Alert.alert('복원 실패', '올바른 아기기록 백업 파일인지 확인해 주세요.');
     }
   };
 
@@ -259,6 +542,17 @@ export const Profile: React.FC<ProfileProps> = ({ profile, onSaveProfile, onImpo
     const dateRegex = /^\d{4}-\d{2}-\d{2}$/;
     if (!dateRegex.test(birthDate)) {
       Alert.alert('입력 확인', '생년월일을 YYYY-MM-DD 형식으로 입력해 주세요. (예: 2026-06-25)');
+      return;
+    }
+    const [birthYear, birthMonth, birthDay] = birthDate.split('-').map(Number);
+    const parsedBirthDate = new Date(birthYear, birthMonth - 1, birthDay);
+    const isRealBirthDate = parsedBirthDate.getFullYear() === birthYear
+      && parsedBirthDate.getMonth() === birthMonth - 1
+      && parsedBirthDate.getDate() === birthDay;
+    const today = new Date();
+    today.setHours(23, 59, 59, 999);
+    if (!isRealBirthDate || parsedBirthDate.getTime() > today.getTime()) {
+      Alert.alert('입력 확인', '실제로 존재하며 오늘보다 늦지 않은 생년월일을 입력해 주세요.');
       return;
     }
 
@@ -276,17 +570,11 @@ export const Profile: React.FC<ProfileProps> = ({ profile, onSaveProfile, onImpo
 
     setIsSaving(true);
     try {
-      const updatedProfile: BabyProfile = {
-        ...profile,
-        name: name.trim(),
-        birthDate,
-        birthWeight: weightNum.toString(),
-        targetFormula: goalNum,
-        feedingReminderEnabled,
-        feedingIntervalMinutes: Math.min(720, Math.max(30, parseInt(feedingIntervalMinutes) || 180)),
-      };
+      const updatedProfile = buildProfilePatch();
 
       const success = await onSaveProfile(updatedProfile);
+      // 저장에 실패했다면 입력칸을 계속 보호해야 사용자가 적은 내용이 남습니다.
+      if (success) dirtyFieldsRef.current.clear();
       if (success) {
         Alert.alert('저장 완료', '아기 프로필이 안전하게 저장되었습니다.');
       } else {
@@ -316,7 +604,7 @@ export const Profile: React.FC<ProfileProps> = ({ profile, onSaveProfile, onImpo
             <TextInput
               style={styles.input}
               value={name}
-              onChangeText={setName}
+              onChangeText={value => { markEdited('name'); setName(value); }}
               placeholder="예: 꼬꼬마"
               placeholderTextColor={COLORS.textMuted}
             />
@@ -328,7 +616,7 @@ export const Profile: React.FC<ProfileProps> = ({ profile, onSaveProfile, onImpo
             <TextInput
               style={styles.input}
               value={birthDate}
-              onChangeText={setBirthDate}
+              onChangeText={value => { markEdited('birthDate'); setBirthDate(value); }}
               placeholder="예: 2026-06-25"
               placeholderTextColor={COLORS.textMuted}
               keyboardType="number-pad"
@@ -341,7 +629,7 @@ export const Profile: React.FC<ProfileProps> = ({ profile, onSaveProfile, onImpo
             <TextInput
               style={styles.input}
               value={birthWeight}
-              onChangeText={setBirthWeight}
+              onChangeText={value => { markEdited('birthWeight'); setBirthWeight(value); }}
               placeholder="예: 3.2"
               placeholderTextColor={COLORS.textMuted}
               keyboardType="decimal-pad"
@@ -354,7 +642,7 @@ export const Profile: React.FC<ProfileProps> = ({ profile, onSaveProfile, onImpo
             <TextInput
               style={styles.input}
               value={targetFormula}
-              onChangeText={setTargetFormula}
+              onChangeText={value => { markEdited('targetFormula'); setTargetFormula(value); }}
               placeholder="예: 800"
               placeholderTextColor={COLORS.textMuted}
               keyboardType="number-pad"
@@ -367,12 +655,12 @@ export const Profile: React.FC<ProfileProps> = ({ profile, onSaveProfile, onImpo
             <View style={styles.reminderText}>
               <Text style={styles.backupTitle}>🍼 다음 수유 자동 알림</Text>
               <Text style={styles.backupDesc}>
-                수유를 기록하면 다음 시간을 자동 계산해 알림과 iPhone 위젯을 갱신합니다.
+                수유를 기록하면 다음 시간을 자동 계산해 기기 화면 상단과 알림창에 알려줍니다.
               </Text>
             </View>
             <Switch
               value={feedingReminderEnabled}
-              onValueChange={setFeedingReminderEnabled}
+              onValueChange={value => { markEdited('feedingReminderEnabled'); setFeedingReminderEnabled(value); }}
               trackColor={{ false: COLORS.border, true: COLORS.primary + '80' }}
               thumbColor={feedingReminderEnabled ? COLORS.primary : '#FFFFFF'}
             />
@@ -382,7 +670,7 @@ export const Profile: React.FC<ProfileProps> = ({ profile, onSaveProfile, onImpo
             <TextInput
               style={styles.input}
               value={feedingIntervalMinutes}
-              onChangeText={value => setFeedingIntervalMinutes(value.replace(/[^0-9]/g, ''))}
+              onChangeText={value => { markEdited('feedingIntervalMinutes'); setFeedingIntervalMinutes(value.replace(/[^0-9]/g, '')); }}
               keyboardType="number-pad"
               placeholder="예: 180"
               placeholderTextColor={COLORS.textMuted}
@@ -395,7 +683,7 @@ export const Profile: React.FC<ProfileProps> = ({ profile, onSaveProfile, onImpo
                     styles.intervalPreset,
                     feedingIntervalMinutes === String(minutes) && styles.intervalPresetActive,
                   ]}
-                  onPress={() => setFeedingIntervalMinutes(String(minutes))}
+                  onPress={() => { markEdited('feedingIntervalMinutes'); setFeedingIntervalMinutes(String(minutes)); }}
                 >
                   <Text
                     style={[
@@ -427,39 +715,64 @@ export const Profile: React.FC<ProfileProps> = ({ profile, onSaveProfile, onImpo
 
         {/* Real-time Cloud Sync Card */}
         <View style={styles.backupCard}>
-          <Text style={styles.backupTitle}>🔗 부부 실시간 데이터 동기화</Text>
+          <Text style={styles.backupTitle}>🔗 실시간 데이터 동기화</Text>
           <Text style={styles.backupDesc}>
-            동일한 그룹 키를 입력하면 아내와 남편의 핸드폰 간에 실시간으로 수유 및 기저귀 데이터를 동기화합니다. (영문/숫자 조합 입력 권장)
+            비밀번호나 그룹 키를 정할 필요 없이 가족 초대 링크로 두 휴대폰을 연결합니다. 앱을 사용 중이면 변경 기록이 자동으로 반영됩니다.
           </Text>
-          
-          <View style={[styles.inputGroup, { marginBottom: 12 }]}>
-            <Text style={styles.label}>동기화 그룹 키 (예: heesung2026)</Text>
-            <TextInput
-              style={styles.input}
-              value={syncKey}
-              onChangeText={setSyncKey}
-              placeholder="동기화할 그룹 비밀번호 입력"
-              placeholderTextColor={COLORS.textMuted}
-              autoCapitalize="none"
-              autoCorrect={false}
-            />
-          </View>
-          
-          <TouchableOpacity 
-            style={[styles.syncButton, isSyncing && styles.syncButtonDisabled]} 
-            onPress={handleSyncSetup}
-            disabled={isSyncing}
-          >
-            <Text style={styles.syncButtonText}>
-              {isSyncing ? '동기화 처리 중...' : profile.syncKey ? '동기화 설정 업데이트 & 지금 동기화 🔄' : '동기화 시작하기 🚀'}
-            </Text>
-          </TouchableOpacity>
+
+          {syncKey ? (
+            <>
+              <Text style={styles.reminderHint}>✅ 이 휴대폰은 가족 기록에 연결되어 있습니다.</Text>
+              <TouchableOpacity
+                style={[styles.syncButton, isSyncing && styles.syncButtonDisabled]}
+                onPress={handleManualSync}
+                disabled={isSyncing}
+              >
+                <Text style={styles.syncButtonText}>{isSyncing ? '동기화 확인 중...' : '지금 동기화 🔄'}</Text>
+              </TouchableOpacity>
+              <TouchableOpacity style={[styles.syncButton, { marginTop: 10 }]} onPress={handleShareFamilyInvite}>
+                <Text style={styles.syncButtonText}>다른 보호자 초대하기 💌</Text>
+              </TouchableOpacity>
+              <TouchableOpacity style={styles.restoreButton} onPress={handleDisconnectFamily}>
+                <Text style={styles.restoreButtonText}>이 휴대폰 연결 해제</Text>
+              </TouchableOpacity>
+            </>
+          ) : (
+            <>
+              <TouchableOpacity
+                style={[styles.syncButton, isSyncing && styles.syncButtonDisabled]}
+                onPress={handleCreateFamily}
+                disabled={isSyncing}
+              >
+                <Text style={styles.syncButtonText}>
+                  {isSyncing ? '가족 연결 준비 중...' : '새 가족 연결 만들기 💌'}
+                </Text>
+              </TouchableOpacity>
+              <Text style={[styles.label, { marginTop: 18 }]}>상대방에게 받은 초대 링크</Text>
+              <TextInput
+                style={styles.input}
+                value={inviteInput}
+                onChangeText={setInviteInput}
+                placeholder="babycheck:// 로 시작하는 링크 붙여넣기"
+                placeholderTextColor={COLORS.textMuted}
+                autoCapitalize="none"
+                autoCorrect={false}
+              />
+              <TouchableOpacity
+                style={[styles.syncButton, { marginTop: 10 }, isSyncing && styles.syncButtonDisabled]}
+                onPress={handleJoinFamily}
+                disabled={isSyncing}
+              >
+                <Text style={styles.syncButtonText}>받은 초대로 연결하기</Text>
+              </TouchableOpacity>
+            </>
+          )}
         </View>
 
         {/* Data Backup & Restore Card */}
         <View style={styles.backupCard}>
           <Text style={styles.backupTitle}>📂 데이터 백업 및 복원</Text>
-          <Text style={styles.backupDesc}>우리아기 일지를 복사해서 다른 기기로 옮기거나 안전하게 백업해 둘 수 있습니다.</Text>
+          <Text style={styles.backupDesc}>백업 파일을 저장하거나 다른 기기에서 받은 백업 파일을 선택해 기록을 옮길 수 있습니다.</Text>
           
           <View style={styles.backupButtonsRow}>
             <TouchableOpacity style={styles.backupButton} onPress={handleExport}>
@@ -468,28 +781,11 @@ export const Profile: React.FC<ProfileProps> = ({ profile, onSaveProfile, onImpo
             
             <TouchableOpacity 
               style={[styles.backupButton, { backgroundColor: COLORS.secondary }]} 
-              onPress={() => setShowImportInput(!showImportInput)}
+              onPress={handleImport}
             >
               <Text style={styles.backupButtonText}>데이터 가져오기 📥</Text>
             </TouchableOpacity>
           </View>
-
-          {showImportInput && (
-            <View style={styles.importInputContainer}>
-              <TextInput
-                style={styles.importInput}
-                placeholder="내보내기 한 백업 텍스트를 여기에 붙여넣어 주세요."
-                placeholderTextColor={COLORS.textMuted}
-                value={importText}
-                onChangeText={setImportText}
-                multiline
-                numberOfLines={4}
-              />
-              <TouchableOpacity style={styles.runImportButton} onPress={handleImport}>
-                <Text style={styles.runImportButtonText}>데이터 복원 실행 ⚡</Text>
-              </TouchableOpacity>
-            </View>
-          )}
 
           {/* 로컬 백업 복원 */}
           <View style={styles.restoreSection}>
@@ -508,19 +804,146 @@ export const Profile: React.FC<ProfileProps> = ({ profile, onSaveProfile, onImpo
           </View>
         </View>
 
-        {/* App Updates Card */}
+        {/* GitHub Releases 기반 자체 업데이트. APK 설치는 Android 전용입니다. */}
+        {Platform.OS === 'android' && (
+          <View style={styles.backupCard}>
+            <Text style={styles.backupTitle}>⚡ 앱 업데이트 확인</Text>
+            <Text style={styles.backupDesc}>새로운 기능이나 버그 수정사항이 배포되면 앱을 무선(OTA)으로 최신 상태로 업데이트합니다.</Text>
+            <TouchableOpacity
+              style={[styles.updateButton, isCheckingUpdates && styles.updateButtonDisabled]}
+              onPress={handleCheckUpdates}
+              disabled={isCheckingUpdates}
+            >
+              <Text style={styles.updateButtonText}>
+                {isCheckingUpdates ? '업데이트 확인 중...' : '앱 자동 업데이트 확인 🔄'}
+              </Text>
+            </TouchableOpacity>
+          </View>
+        )}
+        {/* 개인정보 보호 및 데이터 관리 (Apple App Store 가이드라인 준수) */}
         <View style={styles.backupCard}>
-          <Text style={styles.backupTitle}>⚡ 앱 업데이트 확인</Text>
-          <Text style={styles.backupDesc}>새로운 기능이나 버그 수정사항이 배포되면 앱을 무선(OTA)으로 최신 상태로 업데이트합니다.</Text>
-          <TouchableOpacity 
-            style={[styles.updateButton, isCheckingUpdates && styles.updateButtonDisabled]} 
-            onPress={handleCheckUpdates}
-            disabled={isCheckingUpdates}
-          >
-            <Text style={styles.updateButtonText}>
-              {isCheckingUpdates ? '업데이트 확인 중...' : '앱 자동 업데이트 확인 🔄'}
+          <Text style={styles.backupTitle}>🔒 개인정보 보호 및 데이터 관리</Text>
+          <Text style={styles.backupDesc}>
+            아기기록은 사용자의 개인정보를 소중히 다룹니다. 계정은 익명으로 안전하게 생성되며, 이름과 수유 기록은 가족 연결 시에만 암호화된 통신으로 보호자 간 공유됩니다.
+          </Text>
+          <View style={styles.privacyNoteBox}>
+            <Text style={styles.privacyNoteText}>
+              ℹ️ 안내: 가족 연결 해제는 기기 간 실시간 동기화만 중단하며, 서버의 가족 기록은 남습니다.
+              서버에 저장된 가족 기록까지 완전히 지우려면 아래 "가족 서버 데이터 영구 삭제"를 사용하세요.
             </Text>
+          </View>
+          <TouchableOpacity
+            style={[styles.restoreButton, { marginTop: 12, borderColor: COLORS.border }]}
+            onPress={() => {
+              Alert.alert(
+                '개인정보 처리 및 보관 방침',
+                '1. 수집 항목: 아기 이름/태명, 생년월일, 출생 체중, 수유/배변/목욕/체중 기록\n' +
+                '2. 보관 방법: 사용자 기기 내 로컬 저장소에 우선 보관되며, 가족 연결 시 Firebase 클라우드를 통해 가족 간에만 동기화됩니다.\n' +
+                '3. 제3자 제공: 광고 식별자나 마케팅 목적의 개인정보 제3자 제공은 일체 없습니다.\n' +
+                '4. 문의 및 삭제: 가족 연결 해제 및 "가족 서버 데이터 영구 삭제" 기능을 통해 언제든지 데이터를 관리할 수 있습니다.',
+                [{ text: '확인' }],
+              );
+            }}
+          >
+            <Text style={styles.restoreButtonText}>개인정보처리방침 요약 보기 📋</Text>
           </TouchableOpacity>
+
+          <TouchableOpacity
+            style={[styles.restoreButton, { marginTop: 10, borderColor: COLORS.border }]}
+            onPress={() => {
+              Linking.openURL(PRIVACY_POLICY_URL).catch(() => {
+                Alert.alert('열기 실패', '개인정보처리방침 페이지를 열지 못했습니다.');
+              });
+            }}
+          >
+            <Text style={styles.restoreButtonText}>개인정보처리방침 전문 보기 🔗</Text>
+          </TouchableOpacity>
+
+          {!!profile.syncKey && (
+            <View style={styles.dangerZone}>
+              {deletionStatus?.scheduled ? (
+                <>
+                  <Text style={styles.dangerWarningText}>
+                    {deletionStatus.canDeleteNow
+                      ? '⚠️ 예약 시각이 지나 자동 삭제를 시도했지만 실패했습니다(오프라인 등). 아래 버튼으로 다시 시도할 수 있습니다.'
+                      : `⏳ 가족 서버 데이터 삭제가 예약되어 있습니다. ${deletionStatus.readyAt ? new Date(deletionStatus.readyAt).toLocaleString('ko-KR') : ''}에 별도 확인 없이 자동으로 삭제됩니다. 그 전까지는 취소할 수 있습니다.`}
+                  </Text>
+                  <View style={styles.backupButtonsRow}>
+                    <TouchableOpacity
+                      style={styles.backupButton}
+                      onPress={handleCancelFamilyDeletion}
+                      disabled={isProcessingDeletion}
+                    >
+                      <Text style={styles.backupButtonText}>삭제 예약 취소</Text>
+                    </TouchableOpacity>
+                    {deletionStatus.canDeleteNow && (
+                      <TouchableOpacity
+                        style={[styles.dangerButton, { flex: 1 }, isProcessingDeletion && styles.restoreButtonDisabled]}
+                        onPress={handleExecuteFamilyDeletion}
+                        disabled={isProcessingDeletion}
+                      >
+                        <Text style={styles.dangerButtonText}>
+                          {isProcessingDeletion ? '처리 중...' : '다시 시도'}
+                        </Text>
+                      </TouchableOpacity>
+                    )}
+                  </View>
+                </>
+              ) : !showDeleteFamilyConfirm ? (
+                <TouchableOpacity
+                  style={styles.dangerButton}
+                  onPress={() => setShowDeleteFamilyConfirm(true)}
+                >
+                  <Text style={styles.dangerButtonText}>가족 서버 데이터 영구 삭제 🗑️</Text>
+                </TouchableOpacity>
+              ) : (
+                <>
+                  <Text style={styles.dangerWarningText}>
+                    ⚠️ 배우자를 포함한 가족 전체의 서버 기록(수유·기저귀 등 모든 기록, 공유 프로필,
+                    가족 연결)이 영구히 삭제됩니다. 되돌릴 수 없습니다. 이 기기의 로컬 기록은
+                    지워지지 않습니다. 진행 전 "데이터 내보내기"로 백업하는 것을 권장합니다.
+                    {'\n\n'}예약을 누르면 즉시 지워지지 않고, 1시간 뒤에 별도 확인 없이 자동으로
+                    삭제됩니다. 그 전까지는 언제든 취소할 수 있습니다.
+                  </Text>
+                  <TextInput
+                    style={styles.input}
+                    value={deleteFamilyConfirmText}
+                    onChangeText={setDeleteFamilyConfirmText}
+                    placeholder={`확인을 위해 "${DELETE_FAMILY_CONFIRM_PHRASE}" 입력`}
+                    placeholderTextColor={COLORS.textMuted}
+                    autoCapitalize="none"
+                    autoCorrect={false}
+                  />
+                  <View style={styles.backupButtonsRow}>
+                    <TouchableOpacity
+                      style={styles.backupButton}
+                      onPress={() => {
+                        setShowDeleteFamilyConfirm(false);
+                        setDeleteFamilyConfirmText('');
+                      }}
+                      disabled={isProcessingDeletion}
+                    >
+                      <Text style={styles.backupButtonText}>취소</Text>
+                    </TouchableOpacity>
+                    <TouchableOpacity
+                      style={[
+                        styles.dangerButton,
+                        { flex: 1 },
+                        (deleteFamilyConfirmText.trim() !== DELETE_FAMILY_CONFIRM_PHRASE || isProcessingDeletion)
+                          && styles.restoreButtonDisabled,
+                      ]}
+                      onPress={handleScheduleFamilyDeletion}
+                      disabled={deleteFamilyConfirmText.trim() !== DELETE_FAMILY_CONFIRM_PHRASE || isProcessingDeletion}
+                    >
+                      <Text style={styles.dangerButtonText}>
+                        {isProcessingDeletion ? '처리 중...' : '1시간 뒤 자동 삭제 예약'}
+                      </Text>
+                    </TouchableOpacity>
+                  </View>
+                </>
+              )}
+            </View>
+          )}
         </View>
 
         {/* Info Box */}
@@ -638,7 +1061,9 @@ const styles = StyleSheet.create({
   backupCard: {
     backgroundColor: COLORS.card,
     borderRadius: 22,
-    padding: 20,
+    padding: 18,
+    width: '100%',
+    alignSelf: 'stretch',
     marginBottom: 20,
     shadowColor: '#000',
     shadowOffset: { width: 0, height: 4 },
@@ -653,6 +1078,7 @@ const styles = StyleSheet.create({
     fontWeight: 'bold',
     color: COLORS.text,
     marginBottom: 6,
+    flexShrink: 1,
   },
   backupDesc: {
     fontSize: 12,
@@ -703,11 +1129,10 @@ const styles = StyleSheet.create({
     fontWeight: 'bold',
   },
   backupButtonsRow: {
-    flexDirection: 'row',
-    justifyContent: 'space-between',
+    gap: 10,
   },
   backupButton: {
-    flex: 0.485,
+    width: '100%',
     backgroundColor: COLORS.primary,
     borderRadius: 14,
     paddingVertical: 12,
@@ -722,41 +1147,6 @@ const styles = StyleSheet.create({
   backupButtonText: {
     color: '#FFFFFF',
     fontSize: 12,
-    fontWeight: 'bold',
-  },
-  importInputContainer: {
-    marginTop: 16,
-    borderTopWidth: 1,
-    borderTopColor: COLORS.border,
-    paddingTop: 16,
-  },
-  importInput: {
-    borderWidth: 1.5,
-    borderColor: COLORS.border,
-    borderRadius: 12,
-    padding: 10,
-    fontSize: 12,
-    color: COLORS.text,
-    backgroundColor: COLORS.background,
-    height: 100,
-    textAlignVertical: 'top',
-    marginBottom: 12,
-  },
-  runImportButton: {
-    backgroundColor: '#34D399',
-    borderRadius: 14,
-    paddingVertical: 12,
-    alignItems: 'center',
-    justifyContent: 'center',
-    shadowColor: '#000',
-    shadowOffset: { width: 0, height: 2 },
-    shadowOpacity: 0.08,
-    shadowRadius: 4,
-    elevation: 2,
-  },
-  runImportButtonText: {
-    color: '#FFFFFF',
-    fontSize: 13,
     fontWeight: 'bold',
   },
   updateButton: {
@@ -800,6 +1190,9 @@ const styles = StyleSheet.create({
     color: '#FFFFFF',
     fontSize: 13,
     fontWeight: 'bold',
+    textAlign: 'center',
+    paddingHorizontal: 8,
+    flexShrink: 1,
   },
   restoreSection: {
     marginTop: 16,
@@ -818,6 +1211,7 @@ const styles = StyleSheet.create({
     paddingVertical: 12,
     alignItems: 'center' as const,
     justifyContent: 'center' as const,
+    marginTop: 10,
   },
   restoreButtonDisabled: {
     backgroundColor: COLORS.textMuted,
@@ -827,5 +1221,42 @@ const styles = StyleSheet.create({
     color: '#FFFFFF',
     fontSize: 13,
     fontWeight: 'bold' as const,
+  },
+  dangerZone: {
+    marginTop: 16,
+    paddingTop: 14,
+    borderTopWidth: 1,
+    borderTopColor: COLORS.border,
+  },
+  dangerButton: {
+    backgroundColor: COLORS.danger,
+    borderRadius: 14,
+    paddingVertical: 12,
+    alignItems: 'center' as const,
+    justifyContent: 'center' as const,
+  },
+  dangerButtonText: {
+    color: '#FFFFFF',
+    fontSize: 13,
+    fontWeight: 'bold' as const,
+  },
+  dangerWarningText: {
+    fontSize: 12,
+    lineHeight: 18,
+    color: COLORS.danger,
+    marginBottom: 10,
+  },
+  privacyNoteBox: {
+    backgroundColor: '#F7F7F9',
+    borderRadius: 8,
+    padding: 10,
+    marginTop: 8,
+    borderWidth: 1,
+    borderColor: COLORS.border,
+  },
+  privacyNoteText: {
+    fontSize: 12,
+    lineHeight: 18,
+    color: COLORS.textMuted,
   },
 });

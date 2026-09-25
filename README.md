@@ -9,11 +9,11 @@
 1. **실시간 육아 기록**
    - 수유(분유량, 모유 시간), 수면, 기저귀(대/소변), 목욕 및 기타 활동 기록을 직관적이고 빠르게 입력할 수 있습니다.
 2. **부부 데이터 실시간 동기화**
-   - 설정한 그룹 키(예: `heesung2026`)만 양쪽 휴대폰에 입력하면 원격 서버를 통해 데이터를 상호 동기화합니다.
+   - 한 휴대폰에서 가족을 만든 뒤 초대 링크를 공유하면 두 휴대폰의 기록을 안전하게 동기화합니다.
 3. **데이터 백업 및 복구**
-   - 전체 데이터(프로필 및 로그)를 한 번의 클릭으로 클립보드에 텍스트 형태로 백업하고, 필요할 때 쉽게 복구할 수 있습니다.
-4. **자체 무선(OTA) 자동 업데이트**
-   - 개발자 디버깅 모드(USB 디버깅) 및 일반 릴리즈 설치 모드 모두에서 작동하는 GitHub Releases 기반 자동 업데이터가 내장되어 있어 편리하게 업데이트할 수 있습니다.
+   - 전체 데이터(프로필 및 로그)를 JSON 파일로 내보내고, 필요할 때 기존 기록과 안전하게 합쳐 복구합니다.
+4. **Google Play 업데이트**
+   - 앱의 업데이트 확인 버튼에서 Google Play 상세 화면을 열어 최신 버전 확인과 설치를 진행합니다.
 
 ---
 
@@ -21,36 +21,30 @@
 
 ### 1. 🔑 부부 데이터 동기화 설정하기
 - 앱 우측 상단의 **설정(톱니바퀴) 아이콘**을 누릅니다.
-- **그룹 동기화 키** 입력 칸에 부부가 함께 사용할 비밀 키(예: `ourbaby2026`)를 입력합니다. (영문, 숫자, `-`, `_` 조합만 가능)
-- **"동기화 시작하기"** 버튼을 누릅니다.
-- 배우자의 휴대폰에서도 동일한 그룹 키를 입력하고 동기화하면 서로 기록이 실시간으로 공유됩니다.
+- 첫 휴대폰에서 **"새 가족 만들기"**를 누른 뒤 가족 초대 링크를 공유합니다.
+- 다른 휴대폰에서 받은 링크를 누르거나 설정 화면에 붙여넣어 연결합니다.
+- 이미 다른 가족에 연결된 휴대폰은 기록이 섞이지 않도록 먼저 기존 연결을 해제해야 합니다.
 
 ### 2. 💾 데이터 백업 및 가져오기 (데이터 복원)
 - **내보내기 (백업)**:
-  - 설정 화면에서 **"데이터 내보내기"** 버튼을 누르면 전체 데이터가 클립보드에 자동으로 복사됩니다.
-  - 카카오톡의 '나와의 채팅방'이나 메모장에 붙여넣기(Ctrl+V / 붙여넣기)하여 텍스트를 저장해 둡니다.
+  - 설정 화면에서 **"데이터 내보내기"** 버튼을 누르면 앱 문서 저장소의 `BabyCheck` 폴더에 JSON 백업 파일이 생성됩니다.
 - **가져오기 (복원)**:
-  - 기존에 저장해 둔 백업 텍스트를 전체 복사합니다.
-  - 앱 설정 화면의 **"데이터 가져오기"** 칸에 붙여넣은 뒤, **"데이터 가져오기"** 버튼을 누르면 이전 상태로 복구됩니다.
+  - **"데이터 가져오기"**를 누르고 이전에 저장한 JSON 파일을 선택하면 기존 기록을 지우지 않고 안전하게 합칩니다.
 
-### 🚀 3. 🆙 앱 자동 업데이트 진행하기
+### 🚀 3. 🆙 앱 업데이트 진행하기
 - 설정 화면 하단의 **"앱 업데이트 확인"** 버튼을 누릅니다.
-- 새로운 버전이 배포된 경우 업데이트 내용과 알림이 표시되며, **"지금 업데이트"**를 누르면 자동으로 최신 패키지(APK)를 다운로드한 후 원클릭으로 설치를 진행합니다.
+- 버튼을 누르면 Google Play가 열리며, 새 버전이 있으면 **업데이트**를 눌러 설치합니다.
 
 ---
 
 ## 🛠️ 개발자 가이드 (빌드 및 배포)
 
 ### 1. 빌드 준비
-버전 상향 시 `app.json`과 `src/utils/appUpdater.ts` 파일의 버전을 함께 일치시켜 줍니다.
+버전 상향 시 `app.json`, `package.json`, `android/app/build.gradle`의 버전을 함께 일치시킵니다. `versionCode`는 Google Play에 제출할 때마다 반드시 이전 값보다 크게 올립니다.
 ```json
 // app.json
-"version": "1.0.4",
-"versionCode": 5
-```
-```typescript
-// src/utils/appUpdater.ts
-export const CURRENT_APP_VERSION = '1.0.4';
+"version": "1.5.1",
+"versionCode": 15
 ```
 
 ### 2. Android APK 빌드
@@ -65,10 +59,51 @@ ANDROID_HOME=~/Library/Android/sdk JAVA_HOME=/opt/homebrew/opt/openjdk@17/libexe
 ```
 빌드가 완료되면 `android/app/build/outputs/apk/release/app-release.apk` 경로에 APK 파일이 생성됩니다.
 
-### 3. 무선 업데이트 배포 (GitHub Release)
-GitHub CLI (`gh`) 또는 웹 브라우저를 통해 새 태그 버전으로 릴리즈를 게시하고 빌드된 `app-release.apk` 파일을 첨부하면 모든 앱의 무선 업데이트 감지가 활성화됩니다.
+### 3. Google Play 업데이트 배포
+새 버전의 `versionName`과 `versionCode`를 올린 뒤 AAB를 빌드하여 Google Play 비공개 Alpha 트랙에 제출합니다. Expo OTA나 GitHub APK 업데이트는 사용하지 않습니다.
 ```bash
-gh release create v1.0.4 app-release.apk \
-  --title "아기기록-도우미 v1.0.4" \
-  --notes "업데이트 변경 내용 설명"
+npx eas-cli build --platform android --profile production --auto-submit
 ```
+
+### 4. iOS 빌드 및 Apple App Store 배포
+iOS 빌드는 EAS Build(클라우드 빌드) 또는 정식 Xcode가 설치된 macOS 환경에서 진행합니다. (현재 환경에 Xcode CommandLineTools만 설치되어 있는 경우 로컬 xcodebuild 대신 EAS Build를 권장합니다.)
+
+```bash
+# 1) iOS 번들 내보내기 검증
+npx expo export --platform ios
+
+# 2) EAS Build 클라우드 빌드 (App Store 배포용 archive)
+npx eas-cli build --platform ios --profile production
+
+# 3) App Store Connect 제출 (계정 및 인증서 연결 후)
+npx eas-cli submit --platform ios --profile production
+```
+
+---
+
+## 🧪 재현 가능한 검증 명령 (Verification Commands)
+
+코드 변경 후 아래 명령들을 통해 정적 분석, 동기화 회귀 테스트 및 빌드 호환성을 일괄 검증할 수 있습니다:
+
+```bash
+# 1. 의존성 호환성 점검
+npx expo install --check
+
+# 2. TypeScript 타입 체크
+npx tsc --noEmit
+
+# 3. 로컬 동기화 스텁 단위 테스트 (18개 시나리오)
+bash tools/sync-harness/verify.sh unit
+
+# 4. 동기화 네트워크/예외/경합 회귀 테스트 (10개 시나리오)
+bash tools/sync-harness/verify.sh regression
+
+# 5. Expo Web & iOS 번들 빌드 검증
+npx expo export --platform web
+npx expo export --platform ios
+```
+
+---
+
+## 📋 Apple App Store 출시 체크리스트 및 상태 안내
+상세한 심사 준비 현황, Apple Review Guidelines 미충족 항목 및 배포 전 필수 사용자 입력 사항은 [APP_STORE_RELEASE_READINESS.md](./APP_STORE_RELEASE_READINESS.md) 문서를 참고하세요.

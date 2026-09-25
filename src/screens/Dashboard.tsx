@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useMemo, useState } from 'react';
 import { 
   View, 
   Text, 
@@ -12,30 +12,115 @@ import {
   Platform,
   RefreshControl
 } from 'react-native';
-import { BabyLogEntry, BabyProfile, FormulaLog, StoolLog, UrineLog, MilkTemperature, FeedingType, StoolColor, StoolConsistency, StoolAmount } from '../types';
+import { BabyLogEntry, BabyProfile, FormulaLog, StoolLog, MilkTemperature, FeedingType, StoolColor, StoolConsistency, StoolAmount, BathLog, BathType, WeightLog, SleepLog, TummyTimeLog, PlayLog } from '../types';
 import { COLORS } from '../theme/colors';
 import { getDDay, formatTime, getRelativeDateString, formatDateTime } from '../utils/date';
 import { BottleSlider } from '../components/BottleSlider';
 import { getLatestFeeding, getNextFeedingAt } from '../utils/feedingReminder';
 
+// 시작/종료를 한 번씩 눌러 기록하는 활동(수면·터미타임·놀기시간)은 동작이 동일해서
+// 개별 케이스를 세 번 복붙하는 대신 이 설정으로 공유합니다.
+type TimedType = 'sleep' | 'tummyTime' | 'play';
+type TimedLog = SleepLog | TummyTimeLog | PlayLog;
+const TIMED_TYPES: TimedType[] = ['sleep', 'tummyTime', 'play'];
+const isTimedType = (type: string): type is TimedType => (TIMED_TYPES as string[]).includes(type);
+
+const TIMED_META: Record<TimedType, {
+  label: string;
+  icon: string;
+  idleTitle: string;
+  activeTitle: string;
+  idleSub: string;
+  startCta: string;
+  endCta: string;
+  color: string;
+  bg: string;
+  border: string;
+  activeBg: string;
+  activeBorder: string;
+  startSectionTitle: string;
+  endSectionTitle: string;
+  ongoingText: string;
+  modalTitleWord: string;
+}> = {
+  sleep: {
+    label: '수면',
+    icon: '🌙',
+    idleTitle: '🌙 수면 기록',
+    activeTitle: '🌙 잠자는 중',
+    idleSub: '시작과 종료를 한 번씩 눌러 기록해요',
+    startCta: '잠자기 시작',
+    endCta: '잠에서 깨기',
+    color: '#7A6AB2',
+    bg: '#EDE9F8',
+    border: '#D9D1F0',
+    activeBg: '#E2DCF5',
+    activeBorder: '#B9ACDC',
+    startSectionTitle: '🌙 잠든 시간 설정',
+    endSectionTitle: '☀️ 깬 시간 설정',
+    ongoingText: '현재 잠자는 중이에요',
+    modalTitleWord: '수면 시작',
+  },
+  tummyTime: {
+    label: '터미타임',
+    icon: '🤸',
+    idleTitle: '🤸 터미타임 기록',
+    activeTitle: '🤸 터미타임 중',
+    idleSub: '시작과 종료를 한 번씩 눌러 기록해요',
+    startCta: '터미타임 시작',
+    endCta: '터미타임 종료',
+    color: '#D98A3D',
+    bg: '#FDF1E4',
+    border: '#F3DDBB',
+    activeBg: '#FBE6CB',
+    activeBorder: '#EAC28A',
+    startSectionTitle: '🤸 시작 시간 설정',
+    endSectionTitle: '🏁 종료 시간 설정',
+    ongoingText: '현재 터미타임 중이에요',
+    modalTitleWord: '터미타임 시작',
+  },
+  play: {
+    label: '놀기시간',
+    icon: '🎈',
+    idleTitle: '🎈 놀기시간 기록',
+    activeTitle: '🎈 노는 중',
+    idleSub: '시작과 종료를 한 번씩 눌러 기록해요',
+    startCta: '놀기 시작',
+    endCta: '놀기 종료',
+    color: '#4E9A55',
+    bg: '#EDF7ED',
+    border: '#CFE8CE',
+    activeBg: '#DCEFDC',
+    activeBorder: '#A9D4A8',
+    startSectionTitle: '🎈 시작 시간 설정',
+    endSectionTitle: '🏁 종료 시간 설정',
+    ongoingText: '현재 노는 중이에요',
+    modalTitleWord: '놀기 시작',
+  },
+};
+
 interface DashboardProps {
   logs: BabyLogEntry[];
   profile: BabyProfile;
+  onAddLog: (log: Omit<BabyLogEntry, 'id'>) => Promise<unknown>;
   onDeleteLog: (id: string) => Promise<void>;
   onUpdateLog: (log: BabyLogEntry) => Promise<void>;
-  onNavigate: (screen: 'dashboard' | 'formula' | 'diaper' | 'statistics' | 'profile') => void;
+  onNavigate: (screen: 'dashboard' | 'formula' | 'diaper' | 'bath' | 'weight' | 'statistics' | 'profile') => void;
   refreshing?: boolean;
   onRefresh?: () => void;
+  onSetNextFeedingTime: (timestamp: number | null, feedingLogId?: string) => Promise<void>;
 }
 
 export const Dashboard: React.FC<DashboardProps> = ({ 
   logs, 
   profile, 
+  onAddLog,
   onDeleteLog, 
   onUpdateLog, 
   onNavigate,
   refreshing,
-  onRefresh
+  onRefresh,
+  onSetNextFeedingTime,
 }) => {
   const [now, setNow] = useState(Date.now());
   useEffect(() => {
@@ -43,6 +128,23 @@ export const Dashboard: React.FC<DashboardProps> = ({
     return () => clearInterval(timer);
   }, []);
   const dday = getDDay(profile.birthDate);
+  const findActiveTimed = (type: TimedType) =>
+    logs.find(log => log.type === type && typeof (log as TimedLog).endedAt !== 'number') as TimedLog | undefined;
+  const getElapsedMinutes = (log: TimedLog) => Math.max(0, Math.floor(((log.endedAt ?? now) - log.timestamp) / 60_000));
+  const formatDuration = (minutes: number) => {
+    const hours = Math.floor(minutes / 60);
+    const restMinutes = minutes % 60;
+    return hours > 0 ? `${hours}시간${restMinutes > 0 ? ` ${restMinutes}분` : ''}` : `${restMinutes}분`;
+  };
+
+  const handleTimedAction = async (type: TimedType) => {
+    const active = findActiveTimed(type);
+    if (active) {
+      await onUpdateLog({ ...active, endedAt: Date.now() } as BabyLogEntry);
+      return;
+    }
+    await onAddLog({ type, timestamp: Date.now() } as Omit<BabyLogEntry, 'id'>);
+  };
 
   // Filter logs for today
   const todayStart = new Date();
@@ -58,11 +160,44 @@ export const Dashboard: React.FC<DashboardProps> = ({
 
   const totalStools = todayLogs.filter(log => log.type === 'stool').length;
   const totalUrines = todayLogs.filter(log => log.type === 'urine').length;
+  const totalBaths = todayLogs.filter(log => log.type === 'bath').length;
+  const latestWeight = useMemo(
+    () => logs
+      .filter((log): log is WeightLog => log.type === 'weight')
+      .reduce<WeightLog | null>((latest, log) =>
+        !latest || log.timestamp > latest.timestamp ? log : latest, null),
+    [logs],
+  );
 
   const formulaProgress = Math.min(1, totalFormulaMl / profile.targetFormula);
   const latestFeeding = getLatestFeeding(logs);
   const nextFeedingAt = getNextFeedingAt(logs, profile);
   const nextFeedingMinutes = nextFeedingAt ? Math.ceil((nextFeedingAt - now) / 60000) : null;
+  const [showNextFeedingModal, setShowNextFeedingModal] = useState(false);
+  const [nextFeedingHour, setNextFeedingHour] = useState('');
+  const [nextFeedingMinute, setNextFeedingMinute] = useState('');
+
+  const openNextFeedingModal = () => {
+    const base = new Date(nextFeedingAt || Date.now() + 3 * 60 * 60_000);
+    setNextFeedingHour(String(base.getHours()).padStart(2, '0'));
+    setNextFeedingMinute(String(base.getMinutes()).padStart(2, '0'));
+    setShowNextFeedingModal(true);
+  };
+
+  const saveNextFeedingTime = async () => {
+    if (!latestFeeding) return;
+    const hour = Number(nextFeedingHour);
+    const minute = Number(nextFeedingMinute);
+    if (!Number.isInteger(hour) || hour < 0 || hour > 23 || !Number.isInteger(minute) || minute < 0 || minute > 59) {
+      Alert.alert('시간 확인', '시간은 0~23, 분은 0~59 사이로 입력해 주세요.');
+      return;
+    }
+    const selected = new Date();
+    selected.setHours(hour, minute, 0, 0);
+    if (selected.getTime() <= Date.now()) selected.setDate(selected.getDate() + 1);
+    await onSetNextFeedingTime(selected.getTime(), latestFeeding.id);
+    setShowNextFeedingModal(false);
+  };
 
   // Edit Modal States
   const [editingLog, setEditingLog] = useState<BabyLogEntry | null>(null);
@@ -80,10 +215,16 @@ export const Dashboard: React.FC<DashboardProps> = ({
   const [editStoolColor, setEditStoolColor] = useState<StoolColor>('yellow');
   const [editStoolConsistency, setEditStoolConsistency] = useState<StoolConsistency>('soft');
   const [editStoolAmount, setEditStoolAmount] = useState<StoolAmount>('medium');
+  const [editBathType, setEditBathType] = useState<BathType>('full');
+  const [editBathDuration, setEditBathDuration] = useState(10);
+  const [editWeight, setEditWeight] = useState('');
 
   // Time state inputs
   const [editHour, setEditHour] = useState('0');
   const [editMin, setEditMin] = useState('0');
+  const [editEndedAt, setEditEndedAt] = useState<number | undefined>();
+  const [editEndHour, setEditEndHour] = useState('0');
+  const [editEndMin, setEditEndMin] = useState('0');
 
   const handleEditPress = (log: BabyLogEntry) => {
     setEditingLog(log);
@@ -93,6 +234,16 @@ export const Dashboard: React.FC<DashboardProps> = ({
     const dateObj = new Date(log.timestamp);
     setEditHour(dateObj.getHours().toString());
     setEditMin(dateObj.getMinutes().toString().padStart(2, '0'));
+
+    if (isTimedType(log.type)) {
+      const timedLog = log as TimedLog;
+      setEditEndedAt(timedLog.endedAt);
+      const endDate = new Date(timedLog.endedAt ?? Date.now());
+      setEditEndHour(endDate.getHours().toString());
+      setEditEndMin(endDate.getMinutes().toString().padStart(2, '0'));
+    } else {
+      setEditEndedAt(undefined);
+    }
 
     if (log.type === 'formula') {
       setEditFeedingType(log.feedingType || 'formula');
@@ -104,6 +255,11 @@ export const Dashboard: React.FC<DashboardProps> = ({
       setEditStoolColor(log.color);
       setEditStoolConsistency(log.consistency);
       setEditStoolAmount(log.amount);
+    } else if (log.type === 'bath') {
+      setEditBathType(log.bathType);
+      setEditBathDuration(log.durationMinutes);
+    } else if (log.type === 'weight') {
+      setEditWeight(String(log.weightKg));
     }
   };
 
@@ -135,6 +291,24 @@ export const Dashboard: React.FC<DashboardProps> = ({
       dateObj.setMinutes(m);
       setEditTimestamp(dateObj.getTime());
     }
+  };
+
+  const updateTimedEndTime = (hourText: string, minuteText: string) => {
+    if (!editingLog || !isTimedType(editingLog.type) || editEndedAt === undefined) return;
+    const hour = Math.min(23, Math.max(0, parseInt(hourText) || 0));
+    const minute = Math.min(59, Math.max(0, parseInt(minuteText) || 0));
+    const date = new Date(editEndedAt);
+    date.setHours(hour, minute, 0, 0);
+    setEditEndedAt(date.getTime());
+  };
+
+  const handleEndOffsetTime = (minutesOffset: number) => {
+    if (editEndedAt === undefined) return;
+    const newTimestamp = editEndedAt + minutesOffset * 60_000;
+    const date = new Date(newTimestamp);
+    setEditEndedAt(newTimestamp);
+    setEditEndHour(String(date.getHours()));
+    setEditEndMin(String(date.getMinutes()).padStart(2, '0'));
   };
 
   const handleSaveEdit = async () => {
@@ -172,6 +346,25 @@ export const Dashboard: React.FC<DashboardProps> = ({
         consistency: editStoolConsistency,
         amount: editStoolAmount,
       } as StoolLog;
+    } else if (editingLog.type === 'bath') {
+      updatedLog = {
+        ...updatedLog,
+        bathType: editBathType,
+        durationMinutes: editBathDuration,
+      } as BathLog;
+    } else if (editingLog.type === 'weight') {
+      const weightKg = Number(editWeight.replace(',', '.'));
+      if (!Number.isFinite(weightKg) || weightKg < 0.5 || weightKg > 50) {
+        Alert.alert('체중 확인', '0.5~50kg 사이의 체중을 입력해 주세요.');
+        return;
+      }
+      updatedLog = { ...updatedLog, weightKg } as WeightLog;
+    } else if (isTimedType(editingLog.type)) {
+      if (editEndedAt !== undefined && editEndedAt <= editTimestamp) {
+        Alert.alert('시간 확인', '종료 시간은 시작 시간보다 늦어야 해요.');
+        return;
+      }
+      updatedLog = { ...updatedLog, endedAt: editEndedAt } as TimedLog as BabyLogEntry;
     }
     
     await onUpdateLog(updatedLog);
@@ -179,7 +372,8 @@ export const Dashboard: React.FC<DashboardProps> = ({
   };
 
   const handleDeletePress = (id: string, logType: string) => {
-    const typeKorean = logType === 'formula' ? '수유' : logType === 'stool' ? '대변' : '소변';
+    const typeKorean = isTimedType(logType) ? TIMED_META[logType].label
+      : logType === 'formula' ? '수유' : logType === 'stool' ? '대변' : logType === 'bath' ? '목욕' : logType === 'weight' ? '체중' : '소변';
     Alert.alert(
       '기록 삭제',
       `이 ${typeKorean} 기록을 삭제하시겠습니까?`,
@@ -250,6 +444,35 @@ export const Dashboard: React.FC<DashboardProps> = ({
             <Text style={styles.logDescSub}>기저귀 교체함</Text>
           </View>
         );
+      case 'bath':
+        return (
+          <View>
+            <Text style={styles.logDescTitle}>
+              {log.bathType === 'full' ? '목욕 🛁' : '간단 씻기 🧼'}{' '}
+              <Text style={[styles.logHighlight, { color: COLORS.bath }]}>{log.durationMinutes}분</Text>
+            </Text>
+            <Text style={styles.logDescSub}>깨끗하게 씻기 완료</Text>
+          </View>
+        );
+      case 'weight':
+        return (
+          <View>
+            <Text style={styles.logDescTitle}>체중 ⚖️ <Text style={[styles.logHighlight, { color: '#5F7FA3' }]}>{log.weightKg} kg</Text></Text>
+            <Text style={styles.logDescSub}>성장 기록</Text>
+          </View>
+        );
+      case 'sleep':
+      case 'tummyTime':
+      case 'play': {
+        const meta = TIMED_META[log.type];
+        const duration = formatDuration(getElapsedMinutes(log));
+        return (
+          <View>
+            <Text style={styles.logDescTitle}>{meta.label} {meta.icon} <Text style={[styles.logHighlight, { color: meta.color }]}>{duration}</Text></Text>
+            <Text style={styles.logDescSub}>{typeof log.endedAt === 'number' ? `${formatTime(log.timestamp)} ~ ${formatTime(log.endedAt)}` : meta.ongoingText}</Text>
+          </View>
+        );
+      }
     }
   };
 
@@ -257,18 +480,21 @@ export const Dashboard: React.FC<DashboardProps> = ({
   const getLogDotColor = (type: string) => {
     if (type === 'formula') return COLORS.primary;
     if (type === 'stool') return COLORS.accent;
+    if (type === 'bath') return COLORS.bath;
+    if (type === 'weight') return '#7C9CBF';
+    if (isTimedType(type)) return TIMED_META[type].color;
     return COLORS.secondary;
   };
 
   // Group all logs by day
-  const groupedLogs: { [key: string]: BabyLogEntry[] } = {};
-  logs.forEach(log => {
+  // 첫 화면에서 수천 개 기록을 한꺼번에 렌더링하지 않도록 최근 기록만 그립니다.
+  const [visibleCount, setVisibleCount] = useState(60);
+  const visibleLogs = useMemo(() => logs.slice(0, visibleCount), [logs, visibleCount]);
+  const groupedLogs = useMemo(() => visibleLogs.reduce<Record<string, BabyLogEntry[]>>((groups, log) => {
     const dayStr = getRelativeDateString(log.timestamp);
-    if (!groupedLogs[dayStr]) {
-      groupedLogs[dayStr] = [];
-    }
-    groupedLogs[dayStr].push(log);
-  });
+    (groups[dayStr] ||= []).push(log);
+    return groups;
+  }, {}), [visibleLogs]);
 
   const poopColorGuides: Record<StoolColor, string> = {
     yellow: '황금',
@@ -307,23 +533,78 @@ export const Dashboard: React.FC<DashboardProps> = ({
               <Text style={styles.ddayText}>D+{dday}</Text>
             </View>
           </View>
-          <Text style={styles.babyInfo}>
-            생일: {profile.birthDate} | 출생 체중: {profile.birthWeight}kg
+          <Text style={styles.currentWeight}>
+            현재 체중: {latestWeight ? `${latestWeight.weightKg}kg` : '기록 없음'}
           </Text>
-          <Text style={styles.babyQuote}>
-            {dday <= 30 ? '새근새근 세상에 적응 중이에요 🍼' : '오늘 하루도 쑥쑥 건강하게 자라고 있어요! ❤️'}
-          </Text>
-          <Text style={styles.editIndicator}>✏️ 터치하여 수정하기</Text>
+          <Text style={styles.babyBirthDate}>생일: {profile.birthDate}</Text>
+          <Text style={styles.editIndicator}>아기 정보 수정 ›</Text>
         </TouchableOpacity>
 
+        {/* Quick Action Logging Buttons */}
+        <Text style={styles.sectionHeader}>빠른 기록</Text>
+        <View style={styles.quickActionsContainer}>
+          <TouchableOpacity 
+            style={[styles.quickButton, { backgroundColor: COLORS.primary }]}
+            onPress={() => onNavigate('formula')}
+          >
+            <Text style={styles.quickButtonIcon}>🍼</Text>
+            <Text style={styles.quickButtonText}>수유 기록</Text>
+          </TouchableOpacity>
+
+          <TouchableOpacity
+            style={[styles.quickButton, { backgroundColor: COLORS.bath }]}
+            onPress={() => onNavigate('bath')}
+            accessibilityLabel="목욕 기록 추가"
+          >
+            <Text style={styles.quickButtonIcon}>🛁</Text>
+            <Text style={styles.quickButtonText}>목욕 기록</Text>
+          </TouchableOpacity>
+
+          <TouchableOpacity 
+            style={[styles.quickButton, { backgroundColor: COLORS.accent }]}
+            onPress={() => onNavigate('diaper')}
+          >
+            <Text style={styles.quickButtonIcon}>💩/💧</Text>
+            <Text style={styles.quickButtonText}>기저귀 기록</Text>
+          </TouchableOpacity>
+          <TouchableOpacity style={[styles.quickButton, { backgroundColor: '#7C9CBF' }]} onPress={() => onNavigate('weight')}>
+            <Text style={styles.quickButtonIcon}>⚖️</Text>
+            <Text style={styles.quickButtonText}>체중 기록</Text>
+          </TouchableOpacity>
+          {TIMED_TYPES.map(type => {
+            const meta = TIMED_META[type];
+            const active = findActiveTimed(type);
+            return (
+              <TouchableOpacity
+                key={type}
+                style={[
+                  styles.timedQuickButton,
+                  { backgroundColor: active ? meta.activeBg : meta.bg, borderColor: active ? meta.activeBorder : meta.border },
+                ]}
+                onPress={() => handleTimedAction(type)}
+                accessibilityLabel={active ? `${meta.endCta} 기록` : `${meta.startCta} 기록`}
+              >
+                <View>
+                  <Text style={styles.timedQuickTitle}>{active ? meta.activeTitle : meta.idleTitle}</Text>
+                  <Text style={styles.timedQuickSub}>{active ? `${formatDuration(getElapsedMinutes(active))} 경과` : meta.idleSub}</Text>
+                </View>
+                <View style={[styles.timedQuickAction, { backgroundColor: meta.color }]}>
+                  <Text style={styles.timedQuickActionText}>{active ? meta.endCta : meta.startCta}</Text>
+                </View>
+              </TouchableOpacity>
+            );
+          })}
+        </View>
+
         {/* Summary Cards */}
+        <Text style={styles.sectionHeader}>오늘의 기록 요약</Text>
         <View style={styles.summaryContainer}>
           {latestFeeding && nextFeedingAt && (
-            <TouchableOpacity style={styles.nextFeedingCard} onPress={() => onNavigate('formula')}>
+            <TouchableOpacity style={styles.nextFeedingCard} onPress={openNextFeedingModal}>
               <View>
                 <Text style={styles.nextFeedingTitle}>⏰ 다음 수유</Text>
                 <Text style={styles.nextFeedingSub}>
-                  마지막 {formatTime(latestFeeding.timestamp)} · {profile.feedingIntervalMinutes || 180}분 간격
+                  마지막 {formatTime(latestFeeding.timestamp)} · 터치하여 시간 변경
                 </Text>
               </View>
               <View style={styles.nextFeedingRight}>
@@ -368,25 +649,12 @@ export const Dashboard: React.FC<DashboardProps> = ({
               <Text style={styles.summaryValue}>{totalUrines} <Text style={styles.summaryUnit}>회</Text></Text>
             </TouchableOpacity>
           </View>
-        </View>
-
-        {/* Quick Action Logging Buttons */}
-        <Text style={styles.sectionHeader}>빠른 기록</Text>
-        <View style={styles.quickActionsContainer}>
-          <TouchableOpacity 
-            style={[styles.quickButton, { backgroundColor: COLORS.primary }]}
-            onPress={() => onNavigate('formula')}
+          <TouchableOpacity
+            style={[styles.summaryCard, { backgroundColor: COLORS.lightMint }]}
+            onPress={() => onNavigate('statistics')}
           >
-            <Text style={styles.quickButtonIcon}>🍼</Text>
-            <Text style={styles.quickButtonText}>수유 기록</Text>
-          </TouchableOpacity>
-
-          <TouchableOpacity 
-            style={[styles.quickButton, { backgroundColor: COLORS.accent }]}
-            onPress={() => onNavigate('diaper')}
-          >
-            <Text style={styles.quickButtonIcon}>💩/💧</Text>
-            <Text style={styles.quickButtonText}>기저귀 기록</Text>
+            <Text style={styles.summaryTitle}>🛁 오늘 목욕</Text>
+            <Text style={styles.summaryValue}>{totalBaths} <Text style={styles.summaryUnit}>회</Text></Text>
           </TouchableOpacity>
         </View>
 
@@ -396,7 +664,7 @@ export const Dashboard: React.FC<DashboardProps> = ({
           <View style={styles.emptyContainer}>
             <Text style={styles.emptyIcon}>🧸</Text>
             <Text style={styles.emptyText}>아직 기록된 활동이 없습니다.</Text>
-            <Text style={styles.emptySubText}>분유 수유나 대소변을 먼저 기록해보세요!</Text>
+            <Text style={styles.emptySubText}>수유, 기저귀, 목욕 기록을 시작해보세요!</Text>
           </View>
         ) : (
           <View style={styles.timelineContainer}>
@@ -426,12 +694,14 @@ export const Dashboard: React.FC<DashboardProps> = ({
                         <TouchableOpacity 
                           style={styles.actionButton}
                           onPress={() => handleEditPress(log)}
+                          accessibilityRole="button" accessibilityLabel={`${formatTime(log.timestamp)} 기록 수정`}
                         >
                           <Text style={styles.actionButtonText}>✏️</Text>
                         </TouchableOpacity>
                         <TouchableOpacity 
                           style={styles.actionButton}
                           onPress={() => handleDeletePress(log.id, log.type)}
+                          accessibilityRole="button" accessibilityLabel={`${formatTime(log.timestamp)} 기록 삭제`}
                         >
                           <Text style={[styles.actionButtonText, { color: '#FF5252' }]}>✕</Text>
                         </TouchableOpacity>
@@ -441,9 +711,57 @@ export const Dashboard: React.FC<DashboardProps> = ({
                 ))}
               </View>
             ))}
+            {logs.length > visibleLogs.length && (
+              <TouchableOpacity onPress={() => setVisibleCount(count => count + 60)} accessibilityRole="button" style={{ paddingVertical: 16 }}>
+                <Text style={styles.timelineLimitText}>이전 기록 더 보기 · {visibleLogs.length} / {logs.length}건</Text>
+              </TouchableOpacity>
+            )}
           </View>
         )}
       </ScrollView>
+
+      <Modal visible={showNextFeedingModal} transparent animationType="fade" onRequestClose={() => setShowNextFeedingModal(false)}>
+        <View style={styles.nextTimeModalOverlay}>
+          <View style={styles.nextTimeModalCard}>
+            <Text style={styles.nextTimeModalTitle}>⏰ 다음 수유 시간 정하기</Text>
+            <Text style={styles.nextTimeModalDesc}>현재 시각보다 이전으로 설정하면 내일 시간으로 저장됩니다.</Text>
+            <View style={styles.nextTimeInputRow}>
+              <TextInput
+                style={styles.nextTimeInput}
+                value={nextFeedingHour}
+                onChangeText={value => setNextFeedingHour(value.replace(/[^0-9]/g, '').slice(0, 2))}
+                keyboardType="number-pad"
+                maxLength={2}
+              />
+              <Text style={styles.nextTimeColon}>:</Text>
+              <TextInput
+                style={styles.nextTimeInput}
+                value={nextFeedingMinute}
+                onChangeText={value => setNextFeedingMinute(value.replace(/[^0-9]/g, '').slice(0, 2))}
+                keyboardType="number-pad"
+                maxLength={2}
+              />
+            </View>
+            <TouchableOpacity
+              style={styles.nextTimeAutoButton}
+              onPress={async () => {
+                await onSetNextFeedingTime(null);
+                setShowNextFeedingModal(false);
+              }}
+            >
+              <Text style={styles.nextTimeAutoText}>설정된 수유 간격으로 자동 계산</Text>
+            </TouchableOpacity>
+            <View style={styles.modalFooter}>
+              <TouchableOpacity style={[styles.modalButton, styles.modalCancelBtn]} onPress={() => setShowNextFeedingModal(false)}>
+                <Text style={styles.modalCancelBtnText}>취소</Text>
+              </TouchableOpacity>
+              <TouchableOpacity style={[styles.modalButton, styles.modalSaveBtn]} onPress={saveNextFeedingTime}>
+                <Text style={styles.modalSaveBtnText}>시간 저장</Text>
+              </TouchableOpacity>
+            </View>
+          </View>
+        </View>
+      </Modal>
 
       {/* Interactive Edit Modal */}
       {editingLog && (
@@ -460,7 +778,7 @@ export const Dashboard: React.FC<DashboardProps> = ({
             <View style={styles.modalContent}>
               {/* Modal Header */}
               <View style={styles.modalHeader}>
-                <Text style={styles.modalTitle}>기록 수정 ({editingLog.type === 'formula' ? '수유' : editingLog.type === 'stool' ? '대변' : '소변'})</Text>
+                <Text style={styles.modalTitle}>기록 수정 ({isTimedType(editingLog.type) ? TIMED_META[editingLog.type].modalTitleWord : editingLog.type === 'formula' ? '수유' : editingLog.type === 'stool' ? '대변' : editingLog.type === 'bath' ? '목욕' : editingLog.type === 'weight' ? '체중' : '소변'})</Text>
                 <TouchableOpacity onPress={() => setEditingLog(null)} style={styles.modalCloseButton}>
                   <Text style={styles.modalCloseText}>✕</Text>
                 </TouchableOpacity>
@@ -469,7 +787,7 @@ export const Dashboard: React.FC<DashboardProps> = ({
               <ScrollView style={styles.modalScrollView} showsVerticalScrollIndicator={false}>
                 {/* 1. Time edit section */}
                 <View style={styles.modalSection}>
-                  <Text style={styles.modalSectionTitle}>⏰ 시간 설정</Text>
+                  <Text style={styles.modalSectionTitle}>{isTimedType(editingLog.type) ? TIMED_META[editingLog.type].startSectionTitle : '⏰ 시간 설정'}</Text>
                   <Text style={styles.timeDisplay}>{formatDateTime(editTimestamp)}</Text>
                   
                   {/* Offset Buttons */}
@@ -507,6 +825,45 @@ export const Dashboard: React.FC<DashboardProps> = ({
                     />
                   </View>
                 </View>
+
+                {isTimedType(editingLog.type) && editEndedAt !== undefined && (
+                  <View style={styles.modalSection}>
+                    <Text style={styles.modalSectionTitle}>{TIMED_META[editingLog.type].endSectionTitle}</Text>
+                    <Text style={styles.timeDisplay}>{formatDateTime(editEndedAt)}</Text>
+                    <View style={styles.timeOffsetRow}>
+                      {[-30, -10, 10, 30].map(offset => (
+                        <TouchableOpacity key={offset} style={styles.offsetButton} onPress={() => handleEndOffsetTime(offset)}>
+                          <Text style={styles.offsetButtonText}>{offset > 0 ? '+' : ''}{offset}분</Text>
+                        </TouchableOpacity>
+                      ))}
+                    </View>
+                    <View style={styles.timeInputRow}>
+                      <TextInput
+                        style={styles.timeInput}
+                        value={editEndHour}
+                        onChangeText={text => {
+                          const filtered = text.replace(/[^0-9]/g, '');
+                          setEditEndHour(filtered);
+                          if (filtered !== '') updateTimedEndTime(filtered, editEndMin);
+                        }}
+                        keyboardType="number-pad"
+                        maxLength={2}
+                      />
+                      <Text style={styles.timeSeparator}>:</Text>
+                      <TextInput
+                        style={styles.timeInput}
+                        value={editEndMin}
+                        onChangeText={text => {
+                          const filtered = text.replace(/[^0-9]/g, '');
+                          setEditEndMin(filtered);
+                          if (filtered !== '') updateTimedEndTime(editEndHour, filtered);
+                        }}
+                        keyboardType="number-pad"
+                        maxLength={2}
+                      />
+                    </View>
+                  </View>
+                )}
 
                 {/* 2. Values edit section (Dynamic based on LogType) */}
                 {editingLog.type === 'formula' && (
@@ -585,7 +942,7 @@ export const Dashboard: React.FC<DashboardProps> = ({
                                 onPress={() => setEditTemperature(t)}
                               >
                                 <Text style={[styles.modalTempButtonText, isSelected && styles.modalTempButtonTextActive]}>
-                                  {t === 'warm' ? '따뜻' : t === 'room' ? '실온' : '차감'}
+                                  {t === 'warm' ? '따뜻' : t === 'room' ? '실온' : '차갑게'}
                                 </Text>
                               </TouchableOpacity>
                             );
@@ -655,6 +1012,40 @@ export const Dashboard: React.FC<DashboardProps> = ({
                         );
                       })}
                     </View>
+                  </View>
+                )}
+
+                {editingLog.type === 'bath' && (
+                  <View style={styles.modalSection}>
+                    <Text style={styles.modalSectionTitle}>🛁 목욕 상세 내용</Text>
+                    <View style={styles.modalSelectorRow}>
+                      {(['full', 'quick'] as BathType[]).map(type => {
+                        const isSelected = editBathType === type;
+                        return (
+                          <TouchableOpacity key={type} style={[styles.modalSelectorBtn, isSelected && styles.modalSelectorBtnActive]} onPress={() => setEditBathType(type)}>
+                            <Text style={[styles.modalSelectorBtnText, isSelected && styles.modalSelectorBtnTextActive]}>{type === 'full' ? '목욕' : '간단 씻기'}</Text>
+                          </TouchableOpacity>
+                        );
+                      })}
+                    </View>
+                    <Text style={[styles.modalSubLabel, { marginTop: 14 }]}>소요 시간</Text>
+                    <View style={styles.modalSelectorRow}>
+                      {[5, 10, 15, 20].map(duration => {
+                        const isSelected = editBathDuration === duration;
+                        return (
+                          <TouchableOpacity key={duration} style={[styles.modalSelectorBtn, isSelected && styles.modalSelectorBtnActive]} onPress={() => setEditBathDuration(duration)}>
+                            <Text style={[styles.modalSelectorBtnText, isSelected && styles.modalSelectorBtnTextActive]}>{duration}분</Text>
+                          </TouchableOpacity>
+                        );
+                      })}
+                    </View>
+                  </View>
+                )}
+
+                {editingLog.type === 'weight' && (
+                  <View style={styles.modalSection}>
+                    <Text style={styles.modalSectionTitle}>⚖️ 체중</Text>
+                    <TextInput style={styles.modalNotesInput} value={editWeight} onChangeText={value => setEditWeight(value.replace(/[^0-9.,]/g, ''))} keyboardType="decimal-pad" placeholder="예: 5.4kg" />
                   </View>
                 )}
 
@@ -742,7 +1133,18 @@ const styles = StyleSheet.create({
   babyInfo: {
     fontSize: 14,
     color: COLORS.textMuted,
-    marginBottom: 10,
+    marginBottom: 3,
+  },
+  currentWeight: {
+    fontSize: 16,
+    color: COLORS.text,
+    fontWeight: 'bold',
+    marginBottom: 5,
+  },
+  babyBirthDate: {
+    fontSize: 13,
+    color: COLORS.textMuted,
+    marginBottom: 12,
   },
   babyQuote: {
     fontSize: 13,
@@ -751,7 +1153,7 @@ const styles = StyleSheet.create({
     fontStyle: 'italic',
   },
   editIndicator: {
-    fontSize: 10,
+    fontSize: 12,
     color: COLORS.textMuted,
     textAlign: 'right',
     marginTop: 4,
@@ -802,9 +1204,11 @@ const styles = StyleSheet.create({
   doubleCardRow: {
     flexDirection: 'row',
     justifyContent: 'space-between',
+    gap: 10,
+    marginBottom: 10,
   },
   halfCard: {
-    flex: 0.485,
+    flex: 1,
     marginBottom: 0,
   },
   sectionHeader: {
@@ -816,13 +1220,18 @@ const styles = StyleSheet.create({
   },
   quickActionsContainer: {
     flexDirection: 'row',
-    justifyContent: 'space-between',
+    flexWrap: 'wrap',
+    gap: 10,
     marginBottom: 20,
   },
   quickButton: {
-    flex: 0.485,
+    flexBasis: '47%',
+    flexGrow: 1,
     borderRadius: 18,
-    paddingVertical: 15,
+    paddingVertical: 16,
+    minHeight: 76,
+    flexDirection: 'row',
+    gap: 8,
     alignItems: 'center',
     justifyContent: 'center',
     shadowColor: '#000',
@@ -836,10 +1245,24 @@ const styles = StyleSheet.create({
     marginBottom: 4,
   },
   quickButtonText: {
-    color: '#FFFFFF',
+    color: '#30343B',
     fontWeight: 'bold',
     fontSize: 14,
   },
+  timedQuickButton: {
+    flexBasis: '100%',
+    borderRadius: 18,
+    borderWidth: 1,
+    paddingVertical: 14,
+    paddingHorizontal: 16,
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+  },
+  timedQuickTitle: { color: COLORS.text, fontWeight: 'bold', fontSize: 15 },
+  timedQuickSub: { color: COLORS.textMuted, fontSize: 11, marginTop: 3 },
+  timedQuickAction: { borderRadius: 12, paddingHorizontal: 12, paddingVertical: 9 },
+  timedQuickActionText: { color: '#FFFFFF', fontWeight: 'bold', fontSize: 12 },
   emptyContainer: {
     backgroundColor: COLORS.card,
     borderRadius: 20,
@@ -852,6 +1275,7 @@ const styles = StyleSheet.create({
     fontSize: 40,
     marginBottom: 10,
   },
+  timelineLimitText: { marginTop: 12, textAlign: 'center', color: COLORS.textMuted, fontSize: 11, lineHeight: 17 },
   emptyText: {
     fontSize: 16,
     fontWeight: 'bold',
@@ -1320,5 +1744,60 @@ const styles = StyleSheet.create({
   },
   overdueText: {
     color: '#D95D5D',
+  },
+  nextTimeModalOverlay: {
+    flex: 1,
+    backgroundColor: 'rgba(0,0,0,0.35)',
+    justifyContent: 'center',
+    padding: 24,
+  },
+  nextTimeModalCard: {
+    backgroundColor: COLORS.card,
+    borderRadius: 22,
+    padding: 22,
+  },
+  nextTimeModalTitle: {
+    fontSize: 20,
+    fontWeight: 'bold',
+    color: COLORS.text,
+  },
+  nextTimeModalDesc: {
+    color: COLORS.textMuted,
+    fontSize: 12,
+    lineHeight: 18,
+    marginTop: 8,
+  },
+  nextTimeInputRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    marginVertical: 22,
+  },
+  nextTimeInput: {
+    width: 82,
+    borderWidth: 1.5,
+    borderColor: COLORS.primary,
+    borderRadius: 14,
+    paddingVertical: 12,
+    textAlign: 'center',
+    fontSize: 24,
+    fontWeight: 'bold',
+    color: COLORS.primary,
+  },
+  nextTimeColon: {
+    fontSize: 26,
+    fontWeight: 'bold',
+    color: COLORS.text,
+    marginHorizontal: 12,
+  },
+  nextTimeAutoButton: {
+    alignItems: 'center',
+    paddingVertical: 11,
+    marginBottom: 16,
+  },
+  nextTimeAutoText: {
+    color: COLORS.textMuted,
+    fontSize: 13,
+    textDecorationLine: 'underline',
   },
 });
