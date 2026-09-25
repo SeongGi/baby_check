@@ -22,7 +22,6 @@ import { cancelFamilyDeletion, deleteFamilyCloudData, getFamilyDeletionStatus, p
 import { withSyncDeadline } from './src/database/syncDeadline';
 import { refreshFeedingReminder } from './src/utils/feedingReminder';
 import { Dashboard } from './src/screens/Dashboard';
-import { DashboardSample } from './src/screens/DashboardSample';
 import { LogFormula } from './src/screens/LogFormula';
 import { LogDiaper } from './src/screens/LogDiaper';
 import { LogBath } from './src/screens/LogBath';
@@ -40,7 +39,7 @@ type SyncState = 'idle' | 'syncing' | 'error';
 function MainApp() {
   const [logs, setLogs] = useState<BabyLogEntry[]>([]);
   const [profile, setProfile] = useState<BabyProfile | null>(null);
-  const [activeScreen, setActiveScreen] = useState<'dashboard' | 'sample' | 'formula' | 'diaper' | 'bath' | 'weight' | 'statistics' | 'profile'>('dashboard');
+  const [activeScreen, setActiveScreen] = useState<'dashboard' | 'formula' | 'diaper' | 'bath' | 'weight' | 'statistics' | 'profile'>('dashboard');
   const [isLoading, setIsLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
   const [syncState, setSyncState] = useState<SyncState>('idle');
@@ -649,10 +648,6 @@ function MainApp() {
             }}
           />
         );
-      case 'sample':
-        return (
-          <DashboardSample onBackToCurrent={() => setActiveScreen('dashboard')} />
-        );
       case 'formula':
         return (
           <LogFormula 
@@ -707,8 +702,8 @@ function MainApp() {
     return { color: '#D9534F', label: `${Math.floor(minutes / 60)}시간 전 동기화` };
   })();
 
-  // Only show bottom tabs on main pages (Dashboard, Sample, Statistics, Profile)
-  const showTabs = activeScreen === 'dashboard' || activeScreen === 'sample' || activeScreen === 'statistics' || activeScreen === 'profile';
+  // Only show bottom tabs on main pages (Dashboard, Statistics, Profile)
+  const showTabs = activeScreen === 'dashboard' || activeScreen === 'statistics' || activeScreen === 'profile';
   
   // Calculate dynamic bottom tab bar spacing
   const bottomPadding = insets.bottom > 0 ? insets.bottom : 8;
@@ -729,21 +724,6 @@ function MainApp() {
           <View style={styles.headerBrand}>
             <Image source={require('./assets/icon.png')} style={styles.headerLogo} />
             <Text style={styles.headerTitle}>아기기록</Text>
-            {__DEV__ && activeScreen === 'dashboard' ? (
-              <TouchableOpacity
-                style={styles.sampleBadgeButton}
-                onPress={() => setActiveScreen('sample')}
-              >
-                <Text style={styles.sampleBadgeButtonText}>✨ 새 디자인 샘플 보기</Text>
-              </TouchableOpacity>
-            ) : activeScreen === 'sample' ? (
-              <TouchableOpacity
-                style={[styles.sampleBadgeButton, styles.sampleBadgeButtonActive]}
-                onPress={() => setActiveScreen('dashboard')}
-              >
-                <Text style={styles.sampleBadgeButtonActiveText}>🔙 기존 디자인</Text>
-              </TouchableOpacity>
-            ) : null}
           </View>
           <View style={styles.headerStatus}>
             <Text style={styles.headerSubtitle}>{profile.name} 일기</Text>
@@ -857,29 +837,6 @@ const styles = StyleSheet.create({
     fontSize: 18,
     fontWeight: 'bold',
     color: COLORS.primary,
-  },
-  sampleBadgeButton: {
-    marginLeft: 10,
-    backgroundColor: '#FFF0F2',
-    borderColor: '#FF8E9C',
-    borderWidth: 1,
-    paddingHorizontal: 8,
-    paddingVertical: 4,
-    borderRadius: 12,
-  },
-  sampleBadgeButtonText: {
-    fontSize: 11,
-    fontWeight: '800',
-    color: '#FF4D6D',
-  },
-  sampleBadgeButtonActive: {
-    backgroundColor: '#2D3142',
-    borderColor: '#2D3142',
-  },
-  sampleBadgeButtonActiveText: {
-    fontSize: 11,
-    fontWeight: '800',
-    color: '#FFFFFF',
   },
   headerBrand: { flexDirection: 'row', alignItems: 'center', flexShrink: 1 },
   headerStatus: { alignItems: 'flex-end' },
