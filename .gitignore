@@ -32,6 +32,7 @@ yarn-error.*
 
 # local env files
 .env*.local
+credentials.json
 
 # typescript
 *.tsbuildinfo
@@ -40,9 +41,72 @@ yarn-error.*
 /ios
 /android
 
+# Android 홈 화면 위젯은 Expo가 생성하지 않는 네이티브 소스이므로 보존합니다.
+!/android/
+/android/*
+!/android/app/
+/android/app/*
+!/android/app/build.gradle
+!/android/app/src/
+/android/app/src/*
+!/android/app/src/main/
+/android/app/src/main/*
+!/android/app/src/main/java/
+/android/app/src/main/java/*
+!/android/app/src/main/java/com/
+/android/app/src/main/java/com/*
+!/android/app/src/main/java/com/seonggi/
+/android/app/src/main/java/com/seonggi/*
+!/android/app/src/main/java/com/seonggi/babycheck/
+/android/app/src/main/java/com/seonggi/babycheck/*
+!/android/app/src/main/java/com/seonggi/babycheck/MainApplication.kt
+!/android/app/src/main/java/com/seonggi/babycheck/BabyStatusWidgetProvider.kt
+!/android/app/src/main/java/com/seonggi/babycheck/BabyWidgetModule.kt
+!/android/app/src/main/java/com/seonggi/babycheck/BabyWidgetPackage.kt
+!/android/app/src/main/res/
+/android/app/src/main/res/*
+!/android/app/src/main/res/layout/
+/android/app/src/main/res/layout/*
+!/android/app/src/main/res/layout/baby_status_widget.xml
+!/android/app/src/main/res/drawable/
+/android/app/src/main/res/drawable/*
+!/android/app/src/main/res/drawable/baby_widget_background.xml
+!/android/app/src/main/res/xml/
+/android/app/src/main/res/xml/*
+!/android/app/src/main/res/xml/baby_status_widget_info.xml
+!/android/app/src/main/res/values/
+/android/app/src/main/res/values/*
+!/android/app/src/main/res/values/strings.xml
+!/android/app/src/main/res/values/styles.xml
+!/android/app/src/main/res/values/baby_widget.xml
+
+# 로컬 테스트 계정과 Play Console 자동화 산출물
+/TESTING_MEMORY.md
+/tester_credentials.md
+/tester_emails.txt
+/gws_*.csv
+/*.py
+/inspect_terms.js
+/optin_single_test.js
+/scratch/
+
 # built binaries at root
 /*.apk
 /*.aab
 /*.keystore
 
 
+# 동기화 검증 하네스가 만드는 기기별 임시 저장소
+tools/sync-harness/storage-*.json
+
+# Claude Code 세션 메모리(앱 소스 아님)
+/.claude/context/
+
+# expo export --platform web 빌드 산출물
+/dist-web/
+
+# Play 스토어 자산 제작용 중간 산출물(최종본만 커밋, crop/source는 로컬 보관)
+/play-feature-graphic-crop.png
+/play-feature-graphic-source.png
+/play-screenshot-home-crop.png
+/play-screenshot-statistics-crop.png
