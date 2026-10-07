@@ -557,6 +557,7 @@ function MainApp() {
         }).catch(error => console.warn('Background update sync failed', error));
       }
     }
+    return success;
   };
 
   const handleDeleteFamilyData = async (targetSyncKey: string) => {

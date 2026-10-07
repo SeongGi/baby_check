@@ -1,6 +1,6 @@
 {
   "name": "baby_check",
-  "version": "1.7.0",
+  "version": "1.7.1",
   "main": "index.ts",
   "dependencies": {
     "@expo/ui": "~56.0.26",
@@ -13,6 +13,7 @@
     "expo-intent-launcher": "~56.0.4",
     "expo-notifications": "~56.0.25",
     "expo-sharing": "~56.0.26",
+    "expo-speech-recognition": "^56.0.4",
     "expo-splash-screen": "~56.0.15",
     "expo-status-bar": "~56.0.4",
     "expo-updates": "~56.0.27",

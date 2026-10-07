@@ -2,7 +2,7 @@
   "expo": {
     "name": "아기기록",
     "slug": "baby_check",
-    "version": "1.7.0",
+    "version": "1.7.1",
     "scheme": "babycheck",
     "orientation": "portrait",
     "icon": "./assets/icon.png",
@@ -26,7 +26,7 @@
     },
     "android": {
       "package": "com.seonggi.babycheck",
-      "versionCode": 17,
+      "versionCode": 18,
       "adaptiveIcon": {
         "backgroundColor": "#E6F4FE",
         "foregroundImage": "./assets/android-icon-foreground.png",
@@ -46,6 +46,13 @@
     "owner": "seonggi",
     "plugins": [
       "./plugins/withBabyStatusWidget",
+      [
+        "expo-speech-recognition",
+        {
+          "microphonePermission": "음성 기록을 위해 마이크를 사용합니다.",
+          "speechRecognitionPermission": "말한 내용을 수유와 수면 기록으로 입력하기 위해 음성을 인식합니다."
+        }
+      ],
       "expo-notifications",
       [
         "expo-widgets",
