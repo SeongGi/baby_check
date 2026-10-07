@@ -14,6 +14,7 @@ import {
 } from 'react-native';
 import { StatusBar } from 'expo-status-bar';
 import * as Notifications from 'expo-notifications';
+import AsyncStorage from '@react-native-async-storage/async-storage';
 import { SafeAreaProvider, useSafeAreaInsets } from 'react-native-safe-area-context';
 import { COLORS } from './src/theme/colors';
 import { BabyLogEntry, BabyProfile } from './src/types';
@@ -33,6 +34,7 @@ import { Profile } from './src/screens/Profile';
 const SYNC_TIMEOUT_MS = 20_000;
 // 실시간 알림이 조용히 끊겨도 상대방 기록이 결국 들어오도록 하는 안전망입니다.
 const SYNC_POLL_INTERVAL_MS = 90_000;
+const AUTO_VOICE_ON_OPEN_KEY = '@babycheck/autoVoiceOnOpen';
 
 type SyncState = 'idle' | 'syncing' | 'error';
 
@@ -40,7 +42,15 @@ function MainApp() {
   const [logs, setLogs] = useState<BabyLogEntry[]>([]);
   const [profile, setProfile] = useState<BabyProfile | null>(null);
   const [activeScreen, setActiveScreen] = useState<'dashboard' | 'formula' | 'diaper' | 'bath' | 'weight' | 'statistics' | 'profile'>('dashboard');
+  const activeScreenRef = useRef(activeScreen);
+  activeScreenRef.current = activeScreen;
   const [isLoading, setIsLoading] = useState(true);
+  const [autoVoiceEnabled, setAutoVoiceEnabled] = useState(false);
+  const [autoVoiceReady, setAutoVoiceReady] = useState(false);
+  const [voiceLaunchCandidate, setVoiceLaunchCandidate] = useState(1);
+  const [voiceStartRequest, setVoiceStartRequest] = useState(0);
+  const consumedVoiceCandidateRef = useRef(0);
+  const previousAppStateRef = useRef(AppState.currentState);
   const [refreshing, setRefreshing] = useState(false);
   const [syncState, setSyncState] = useState<SyncState>('idle');
   const [lastSyncedAt, setLastSyncedAt] = useState<number | null>(null);
@@ -55,6 +65,55 @@ function MainApp() {
   const [syncError, setSyncError] = useState<string | null>(null);
 
   const insets = useSafeAreaInsets();
+
+  useEffect(() => {
+    let mounted = true;
+    AsyncStorage.getItem(AUTO_VOICE_ON_OPEN_KEY)
+      .then(value => { if (mounted) setAutoVoiceEnabled(value === 'true'); })
+      .catch(() => undefined)
+      .finally(() => { if (mounted) setAutoVoiceReady(true); });
+    return () => { mounted = false; };
+  }, []);
+
+  useEffect(() => {
+    const subscription = AppState.addEventListener('change', state => {
+      const previous = previousAppStateRef.current;
+      previousAppStateRef.current = state;
+      if (previous === 'background' && state === 'active' && activeScreenRef.current === 'dashboard') {
+        setVoiceLaunchCandidate(candidate => candidate + 1);
+      }
+    });
+    return () => subscription.remove();
+  }, []);
+
+  useEffect(() => {
+    if (!autoVoiceReady || isLoading || !profile || voiceLaunchCandidate <= consumedVoiceCandidateRef.current) return;
+    if (activeScreen !== 'dashboard' || !autoVoiceEnabled) {
+      consumedVoiceCandidateRef.current = voiceLaunchCandidate;
+      return;
+    }
+    const timer = setTimeout(() => {
+      consumedVoiceCandidateRef.current = voiceLaunchCandidate;
+      if (AppState.currentState === 'active') setVoiceStartRequest(voiceLaunchCandidate);
+    }, 800);
+    return () => clearTimeout(timer);
+  }, [autoVoiceReady, isLoading, profile, voiceLaunchCandidate, activeScreen, autoVoiceEnabled]);
+
+  useEffect(() => {
+    if (activeScreen !== 'dashboard') setVoiceStartRequest(0);
+  }, [activeScreen]);
+
+  const handleAutoVoiceEnabledChange = async (enabled: boolean) => {
+    consumedVoiceCandidateRef.current = voiceLaunchCandidate;
+    setAutoVoiceEnabled(enabled);
+    if (!enabled) setVoiceStartRequest(0);
+    try {
+      await AsyncStorage.setItem(AUTO_VOICE_ON_OPEN_KEY, enabled ? 'true' : 'false');
+    } catch {
+      setAutoVoiceEnabled(!enabled);
+      Alert.alert('설정 저장 실패', '다시 시도해 주세요.');
+    }
+  };
 
   // 자동 동기화, 당겨서 새로고침, 저장 직후 업로드가 겹치지 않도록 한 줄로 실행합니다.
   const isSyncRunningRef = useRef(false);
@@ -638,6 +697,10 @@ function MainApp() {
             onAddLog={handleAddLog} 
             onDeleteLog={handleDeleteLog} 
             onUpdateLog={handleUpdateLog}
+            autoVoiceEnabled={autoVoiceEnabled}
+            onAutoVoiceEnabledChange={handleAutoVoiceEnabledChange}
+            autoStartVoiceRequest={voiceStartRequest}
+            onAutoStartVoiceHandled={() => setVoiceStartRequest(0)}
             onNavigate={setActiveScreen}
             refreshing={refreshing}
             onRefresh={profile.syncKey ? handleRefresh : undefined}

@@ -106,6 +106,10 @@ interface DashboardProps {
   onAddLog: (log: Omit<BabyLogEntry, 'id'>) => Promise<unknown>;
   onDeleteLog: (id: string) => Promise<void>;
   onUpdateLog: (log: BabyLogEntry) => Promise<boolean>;
+  autoVoiceEnabled: boolean;
+  onAutoVoiceEnabledChange: (enabled: boolean) => Promise<void>;
+  autoStartVoiceRequest: number;
+  onAutoStartVoiceHandled: () => void;
   onNavigate: (screen: 'dashboard' | 'formula' | 'diaper' | 'bath' | 'weight' | 'statistics' | 'profile') => void;
   refreshing?: boolean;
   onRefresh?: () => void;
@@ -117,7 +121,11 @@ export const Dashboard: React.FC<DashboardProps> = ({
   profile, 
   onAddLog,
   onDeleteLog, 
-  onUpdateLog, 
+  onUpdateLog,
+  autoVoiceEnabled,
+  onAutoVoiceEnabledChange,
+  autoStartVoiceRequest,
+  onAutoStartVoiceHandled,
   onNavigate,
   refreshing,
   onRefresh,
@@ -543,7 +551,15 @@ export const Dashboard: React.FC<DashboardProps> = ({
 
         {/* Quick Action Logging Buttons */}
         <Text style={styles.sectionHeader}>빠른 기록</Text>
-        <VoiceLogButton logs={logs} onAddLog={onAddLog} onUpdateLog={onUpdateLog} />
+        <VoiceLogButton
+          logs={logs}
+          onAddLog={onAddLog}
+          onUpdateLog={onUpdateLog}
+          autoVoiceEnabled={autoVoiceEnabled}
+          onAutoVoiceEnabledChange={onAutoVoiceEnabledChange}
+          autoStartRequest={autoStartVoiceRequest}
+          onAutoStartHandled={onAutoStartVoiceHandled}
+        />
         <View style={styles.quickActionsContainer}>
           <TouchableOpacity 
             style={[styles.quickButton, { backgroundColor: COLORS.primary }]}

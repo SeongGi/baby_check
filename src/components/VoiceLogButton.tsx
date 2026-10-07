@@ -1,5 +1,5 @@
-import React, { useRef, useState } from 'react';
-import { Alert, StyleSheet, Text, TouchableOpacity, View } from 'react-native';
+import React, { useEffect, useRef, useState } from 'react';
+import { Alert, AppState, StyleSheet, Text, TouchableOpacity, View } from 'react-native';
 import { ExpoSpeechRecognitionModule, useSpeechRecognitionEvent } from 'expo-speech-recognition';
 import { BabyLogEntry, SleepLog } from '../types';
 import { parseVoiceCommand, VoiceCommand } from '../utils/voiceCommand';
@@ -8,20 +8,53 @@ type Props = {
   logs: BabyLogEntry[];
   onAddLog: (log: Omit<BabyLogEntry, 'id'>) => Promise<unknown>;
   onUpdateLog: (log: BabyLogEntry) => Promise<boolean>;
+  autoVoiceEnabled: boolean;
+  onAutoVoiceEnabledChange: (enabled: boolean) => Promise<void>;
+  autoStartRequest: number;
+  onAutoStartHandled: () => void;
 };
 
-export const VoiceLogButton: React.FC<Props> = ({ logs, onAddLog, onUpdateLog }) => {
+export const VoiceLogButton: React.FC<Props> = ({ logs, onAddLog, onUpdateLog, autoVoiceEnabled, onAutoVoiceEnabledChange, autoStartRequest, onAutoStartHandled }) => {
   const [listening, setListening] = useState(false);
   const [busy, setBusy] = useState(false);
   const [transcript, setTranscript] = useState('');
   const [command, setCommand] = useState<VoiceCommand | null>(null);
   const [spokenAt, setSpokenAt] = useState<number | null>(null);
   const starting = useRef(false);
+  const mounted = useRef(true);
+  const interrupted = useRef(false);
+  const listeningRef = useRef(false);
+  const startGeneration = useRef(0);
 
-  useSpeechRecognitionEvent('start', () => setListening(true));
-  useSpeechRecognitionEvent('end', () => { setListening(false); starting.current = false; });
+  useEffect(() => {
+    mounted.current = true;
+    const subscription = AppState.addEventListener('change', state => {
+      if (state === 'active') return;
+      interrupted.current = true;
+      startGeneration.current += 1;
+      if (starting.current || listeningRef.current) ExpoSpeechRecognitionModule.abort();
+      starting.current = false;
+    });
+    return () => {
+      mounted.current = false;
+      interrupted.current = true;
+      startGeneration.current += 1;
+      subscription.remove();
+      if (starting.current || listeningRef.current) ExpoSpeechRecognitionModule.abort();
+    };
+  }, []);
+
+  useSpeechRecognitionEvent('start', () => {
+    if (interrupted.current || AppState.currentState !== 'active') {
+      ExpoSpeechRecognitionModule.abort();
+      return;
+    }
+    listeningRef.current = true;
+    setListening(true);
+  });
+  useSpeechRecognitionEvent('end', () => { listeningRef.current = false; setListening(false); starting.current = false; });
   useSpeechRecognitionEvent('result', event => {
-    if (!event.isFinal) return;
+    if (!event.isFinal || interrupted.current) return;
     const recognized = event.results[0]?.transcript?.trim() || '';
     setTranscript(recognized);
     setCommand(parseVoiceCommand(recognized));
@@ -34,8 +67,10 @@ export const VoiceLogButton: React.FC<Props> = ({ logs, onAddLog, onUpdateLog })
   });
 
   const start = async () => {
-    if (starting.current || listening) return;
+    if (starting.current || listening || AppState.currentState !== 'active') return;
     starting.current = true;
+    interrupted.current = false;
+    const generation = ++startGeneration.current;
     setTranscript('');
     setCommand(null);
     setSpokenAt(null);
@@ -46,6 +81,10 @@ export const VoiceLogButton: React.FC<Props> = ({ logs, onAddLog, onUpdateLog })
         return;
       }
       const permission = await ExpoSpeechRecognitionModule.requestPermissionsAsync();
+      if (!mounted.current || interrupted.current || generation !== startGeneration.current || AppState.currentState !== 'active') {
+        if (generation === startGeneration.current) starting.current = false;
+        return;
+      }
       if (!permission.granted) {
         Alert.alert('마이크 권한 필요', '음성 기록을 사용하려면 마이크 권한을 허용해 주세요.');
         starting.current = false;
@@ -53,10 +92,18 @@ export const VoiceLogButton: React.FC<Props> = ({ logs, onAddLog, onUpdateLog })
       }
       ExpoSpeechRecognitionModule.start({ lang: 'ko-KR', interimResults: false, continuous: false });
     } catch {
-      starting.current = false;
-      Alert.alert('음성 인식 불가', '이 기기에서 음성 인식을 시작하지 못했습니다.');
+      if (generation === startGeneration.current) {
+        starting.current = false;
+        if (mounted.current) Alert.alert('음성 인식 불가', '이 기기에서 음성 인식을 시작하지 못했습니다.');
+      }
     }
   };
+
+  useEffect(() => {
+    if (!autoStartRequest) return;
+    onAutoStartHandled();
+    if (autoVoiceEnabled && !transcript && !command && mounted.current && AppState.currentState === 'active') void start();
+  }, [autoStartRequest]);
 
   const activeSleep = logs
     .filter((log): log is SleepLog => log.type === 'sleep' && log.endedAt == null)
@@ -102,6 +149,17 @@ export const VoiceLogButton: React.FC<Props> = ({ logs, onAddLog, onUpdateLog })
       <TouchableOpacity style={styles.button} onPress={listening ? () => ExpoSpeechRecognitionModule.stop() : start} accessibilityLabel={listening ? '음성 입력 끝내기' : '음성으로 기록하기'}>
         <Text style={styles.buttonText}>{listening ? '듣는 중… 탭하여 끝내기' : '🎤 음성으로 기록하기'}</Text>
       </TouchableOpacity>
+      <TouchableOpacity
+        style={styles.autoSetting}
+        onPress={() => void onAutoVoiceEnabledChange(!autoVoiceEnabled)}
+        accessibilityRole="switch"
+        accessibilityState={{ checked: autoVoiceEnabled }}
+        accessibilityLabel="앱을 열 때 음성 입력 자동 시작"
+      >
+        <Text style={styles.autoSettingText}>앱을 열 때 바로 듣기</Text>
+        <Text style={styles.autoSettingValue}>{autoVoiceEnabled ? '켜짐' : '꺼짐'}</Text>
+      </TouchableOpacity>
+      <Text style={styles.autoHelp}>Google이 아기기록을 열어 주거나 평소 앱을 열 때 작동해요. 기록은 확인 후 저장됩니다.</Text>
       <Text style={styles.privacy}>음성은 기기의 음성 인식 서비스에서 처리합니다. 앱은 녹음 파일을 저장하지 않습니다.</Text>
       {transcript ? <Text style={styles.transcript}>인식: {transcript}</Text> : null}
       {command?.kind === 'unknown' ? <Text style={styles.help}>명령을 이해하지 못했어요. “분유 120ml 먹었어”, “지금 자”, “지금 깼어”처럼 말해 주세요.</Text> : null}
@@ -120,6 +178,10 @@ const styles = StyleSheet.create({
   container: { marginVertical: 12, padding: 14, backgroundColor: '#F3F6FF', borderRadius: 16 },
   button: { backgroundColor: '#4569A8', padding: 14, borderRadius: 12, alignItems: 'center' },
   buttonText: { color: '#fff', fontWeight: '700', fontSize: 16 },
+  autoSetting: { marginTop: 12, flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', paddingVertical: 8 },
+  autoSettingText: { color: '#17243D', fontSize: 14, fontWeight: '600' },
+  autoSettingValue: { color: '#4569A8', fontSize: 14, fontWeight: '700' },
+  autoHelp: { color: '#64748B', fontSize: 12 },
   privacy: { marginTop: 8, color: '#64748B', fontSize: 12 },
   transcript: { marginTop: 12, color: '#334155' },
   help: { marginTop: 8, color: '#8A4317' },
