@@ -1,4 +1,5 @@
 import AsyncStorage from '@react-native-async-storage/async-storage';
+import * as Crypto from 'expo-crypto';
 import { BabyLogEntry, BabyProfile } from '../types';
 
 const LOGS_STORAGE_KEY = '@baby_logs';
@@ -464,18 +465,36 @@ export const importDataWithoutLoss = async (
     logs: currentLogs,
     profile: currentProfile,
   }));
-  const logsById = new Map<string, BabyLogEntry>();
-  [...currentLogs, ...importedLogs].forEach(log => {
-    if (!log || typeof log.id !== 'string' || typeof log.timestamp !== 'number') return;
-    const existing = logsById.get(log.id);
-    const existingUpdated = existing?.updatedAt || existing?.timestamp || 0;
-    const candidateUpdated = log.updatedAt || log.timestamp;
-    if (!existing || candidateUpdated >= existingUpdated) logsById.set(log.id, log);
-  });
   const deletedIds = new Set([
     ...(currentProfile.deletedLogIds || []),
     ...(importedProfile.deletedLogIds || []),
   ]);
+  const logsById = new Map<string, BabyLogEntry>();
+  for (const log of currentLogs) {
+    if (!log || typeof log.id !== 'string' || typeof log.timestamp !== 'number') continue;
+    logsById.set(log.id, log);
+  }
+  for (const imported of importedLogs) {
+    if (!imported || typeof imported.id !== 'string' || typeof imported.timestamp !== 'number') continue;
+    // A backed-up record is an explicit restore request. Give a locally deleted
+    // record a stable new ID so its old cloud tombstone cannot remove it again.
+    let log = imported;
+    if (deletedIds.has(imported.id) && !(importedProfile.deletedLogIds || []).includes(imported.id)) {
+      const digest = await Crypto.digestStringAsync(
+        Crypto.CryptoDigestAlgorithm.SHA256,
+        JSON.stringify(imported),
+      );
+      const baseId = `restored-${digest}`;
+      let id = baseId;
+      let suffix = 1;
+      while (deletedIds.has(id)) id = `${baseId}-${suffix++}`;
+      log = { ...imported, id };
+    }
+    const existing = logsById.get(log.id);
+    const existingUpdated = existing?.updatedAt || existing?.timestamp || 0;
+    const candidateUpdated = log.updatedAt || log.timestamp;
+    if (!existing || candidateUpdated >= existingUpdated) logsById.set(log.id, log);
+  }
   const logs = Array.from(logsById.values())
     .filter(log => !deletedIds.has(log.id))
     .sort((a, b) => b.timestamp - a.timestamp);

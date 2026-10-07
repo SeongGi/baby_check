@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useState } from 'react';
+import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { 
   View, 
   Text, 
@@ -132,6 +132,9 @@ export const Dashboard: React.FC<DashboardProps> = ({
   onSetNextFeedingTime,
 }) => {
   const [now, setNow] = useState(Date.now());
+  const timedPendingRef = useRef(new Set<TimedType>());
+  const editSavingRef = useRef(false);
+  const [isSavingEdit, setIsSavingEdit] = useState(false);
   useEffect(() => {
     const timer = setInterval(() => setNow(Date.now()), 30_000);
     return () => clearInterval(timer);
@@ -147,12 +150,19 @@ export const Dashboard: React.FC<DashboardProps> = ({
   };
 
   const handleTimedAction = async (type: TimedType) => {
-    const active = findActiveTimed(type);
-    if (active) {
-      await onUpdateLog({ ...active, endedAt: Date.now() } as BabyLogEntry);
-      return;
+    if (timedPendingRef.current.has(type)) return;
+    timedPendingRef.current.add(type);
+    try {
+      const active = findActiveTimed(type);
+      const saved = active
+        ? await onUpdateLog({ ...active, endedAt: Date.now() } as BabyLogEntry)
+        : await onAddLog({ type, timestamp: Date.now() } as Omit<BabyLogEntry, 'id'>);
+      if (!saved) Alert.alert('기록 실패', '기록을 저장하지 못했습니다. 다시 시도해 주세요.');
+    } catch {
+      Alert.alert('기록 실패', '기록을 저장하지 못했습니다. 다시 시도해 주세요.');
+    } finally {
+      timedPendingRef.current.delete(type);
     }
-    await onAddLog({ type, timestamp: Date.now() } as Omit<BabyLogEntry, 'id'>);
   };
 
   // Filter logs for today
@@ -321,7 +331,7 @@ export const Dashboard: React.FC<DashboardProps> = ({
   };
 
   const handleSaveEdit = async () => {
-    if (!editingLog) return;
+    if (!editingLog || editSavingRef.current) return;
     
     let updatedLog: BabyLogEntry = { ...editingLog };
     updatedLog.timestamp = editTimestamp;
@@ -376,8 +386,18 @@ export const Dashboard: React.FC<DashboardProps> = ({
       updatedLog = { ...updatedLog, endedAt: editEndedAt } as TimedLog as BabyLogEntry;
     }
     
-    await onUpdateLog(updatedLog);
-    setEditingLog(null);
+    editSavingRef.current = true;
+    setIsSavingEdit(true);
+    try {
+      const saved = await onUpdateLog(updatedLog);
+      if (saved) setEditingLog(null);
+      else Alert.alert('수정 실패', '기록을 저장하지 못했습니다. 입력한 내용을 확인하고 다시 시도해 주세요.');
+    } catch {
+      Alert.alert('수정 실패', '기록을 저장하지 못했습니다. 입력한 내용을 확인하고 다시 시도해 주세요.');
+    } finally {
+      editSavingRef.current = false;
+      setIsSavingEdit(false);
+    }
   };
 
   const handleDeletePress = (id: string, logType: string) => {
@@ -599,7 +619,8 @@ export const Dashboard: React.FC<DashboardProps> = ({
                   styles.timedQuickButton,
                   { backgroundColor: active ? meta.activeBg : meta.bg, borderColor: active ? meta.activeBorder : meta.border },
                 ]}
-                onPress={() => handleTimedAction(type)}
+                  onPress={() => handleTimedAction(type)}
+                  disabled={timedPendingRef.current.has(type)}
                 accessibilityLabel={active ? `${meta.endCta} 기록` : `${meta.startCta} 기록`}
               >
                 <View>
@@ -1092,8 +1113,9 @@ export const Dashboard: React.FC<DashboardProps> = ({
                 <TouchableOpacity 
                   style={[styles.modalButton, styles.modalSaveBtn]} 
                   onPress={handleSaveEdit}
+                  disabled={isSavingEdit}
                 >
-                  <Text style={styles.modalSaveBtnText}>수정 완료</Text>
+                  <Text style={styles.modalSaveBtnText}>{isSavingEdit ? '저장 중...' : '수정 완료'}</Text>
                 </TouchableOpacity>
               </View>
             </View>
