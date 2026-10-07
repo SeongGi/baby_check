@@ -109,7 +109,7 @@ interface DashboardProps {
   autoVoiceEnabled: boolean;
   onAutoVoiceEnabledChange: (enabled: boolean) => Promise<void>;
   autoStartVoiceRequest: number;
-  onAutoStartVoiceHandled: () => void;
+  onAutoStartVoiceHandled: (request: number) => void;
   onNavigate: (screen: 'dashboard' | 'formula' | 'diaper' | 'bath' | 'weight' | 'statistics' | 'profile') => void;
   refreshing?: boolean;
   onRefresh?: () => void;
