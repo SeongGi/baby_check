@@ -16,7 +16,7 @@ import {
 } from 'react-native';
 import { Directory, File, Paths } from 'expo-file-system';
 import * as Sharing from 'expo-sharing';
-import { checkForAppUpdate, downloadAndInstallApk } from '../utils/appUpdater';
+import { getInstalledAppVersion, openGooglePlayListing } from '../utils/appUpdater';
 import { BabyProfile, BabyLogEntry } from '../types';
 import { COLORS } from '../theme/colors';
 import { getLogs, getLocalBackup, restoreFromLocalBackup } from '../database/storage';
@@ -420,59 +420,11 @@ export const Profile: React.FC<ProfileProps> = ({
   };
 
   const handleCheckUpdates = async () => {
-    // GitHub Releases 기반 자체 업데이트 – 디버그/릴리즈 모드 모두 작동.
-    // 정식 스토어 출시 전까지의 임시 배포 경로입니다.
     setIsCheckingUpdates(true);
     try {
-      const info = await checkForAppUpdate();
-
-      if (!info.hasUpdate) {
-        Alert.alert('최신 버전', `현재 최신 버전(${info.currentVersion})을 사용하고 있습니다.`);
-        return;
-      }
-
-      if (!info.apkDownloadUrl) {
-        Alert.alert(
-          '업데이트 안내',
-          `새 버전(${info.latestVersion})이 있지만 APK 파일을 찾을 수 없습니다.\nGitHub에서 직접 다운로드해 주세요.`
-        );
-        return;
-      }
-
-      Alert.alert(
-        `새 버전 발견: ${info.latestVersion}`,
-        `현재 버전: ${info.currentVersion}\n\n${info.releaseNotes ? info.releaseNotes.slice(0, 200) : '새 업데이트가 준비되었습니다.'}\n\nAPK를 다운로드하고 설치하시겠습니까?`,
-        [
-          { text: '나중에', style: 'cancel' },
-          {
-            text: '지금 업데이트',
-            onPress: async () => {
-              setIsCheckingUpdates(true);
-              try {
-                await downloadAndInstallApk(
-                  info.apkDownloadUrl!,
-                  (pct) => console.log(`다운로드 중: ${pct}%`)
-                );
-              } catch (err) {
-                Alert.alert(
-                  '설치 실패',
-                  '업데이트 설치 중 오류가 발생했습니다: ' +
-                    (err instanceof Error ? err.message : String(err))
-                );
-              } finally {
-                setIsCheckingUpdates(false);
-              }
-            },
-          },
-        ]
-      );
+      await openGooglePlayListing();
     } catch (e) {
-      console.error(e);
-      const errMsg = e instanceof Error ? e.message : String(e);
-      Alert.alert(
-        '업데이트 확인 실패',
-        `GitHub에서 업데이트 정보를 가져오지 못했습니다.\n\n[상세 오류]: ${errMsg}`
-      );
+      Alert.alert('Google Play 열기 실패', 'Play 스토어 앱이나 인터넷 연결을 확인한 뒤 다시 시도해 주세요.');
     } finally {
       setIsCheckingUpdates(false);
     }
@@ -827,18 +779,18 @@ export const Profile: React.FC<ProfileProps> = ({
           </View>
         </View>
 
-        {/* GitHub Releases 기반 자체 업데이트. APK 설치는 Android 전용입니다. */}
+        {/* Google Play가 이 테스터에게 제공되는 최신 빌드를 판단합니다. */}
         {Platform.OS === 'android' && (
           <View style={styles.backupCard}>
             <Text style={styles.backupTitle}>⚡ 앱 업데이트 확인</Text>
-            <Text style={styles.backupDesc}>새로운 기능이나 버그 수정사항이 배포되면 앱을 무선(OTA)으로 최신 상태로 업데이트합니다.</Text>
+            <Text style={styles.backupDesc}>설치된 버전: {getInstalledAppVersion()}{'\n'}Google Play에서 업데이트를 확인합니다. 비공개 테스트 버전은 Alpha 테스터 계정에서만 보일 수 있습니다.</Text>
             <TouchableOpacity
               style={[styles.updateButton, isCheckingUpdates && styles.updateButtonDisabled]}
               onPress={handleCheckUpdates}
               disabled={isCheckingUpdates}
             >
               <Text style={styles.updateButtonText}>
-                {isCheckingUpdates ? '업데이트 확인 중...' : '앱 자동 업데이트 확인 🔄'}
+                {isCheckingUpdates ? 'Google Play 여는 중...' : 'Google Play에서 업데이트 확인'}
               </Text>
             </TouchableOpacity>
           </View>
