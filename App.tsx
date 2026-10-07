@@ -22,6 +22,7 @@ import { getLogs, getProfile, addLog, deleteLog, updateLog, saveProfile, migrate
 import { cancelFamilyDeletion, deleteFamilyCloudData, getFamilyDeletionStatus, parseFamilySyncId, readFamilyChangeToken, refreshCloudConnection, scheduleFamilyDeletion, subscribeToCloudChanges, syncWithCloud } from './src/database/sync';
 import { withSyncDeadline } from './src/database/syncDeadline';
 import { refreshFeedingReminder } from './src/utils/feedingReminder';
+import { canDispatchAutoVoiceLaunch, getAutoVoiceLaunchAction } from './src/utils/autoVoiceLaunch';
 import { Dashboard } from './src/screens/Dashboard';
 import { LogFormula } from './src/screens/LogFormula';
 import { LogDiaper } from './src/screens/LogDiaper';
@@ -49,6 +50,7 @@ function MainApp() {
   const [autoVoiceReady, setAutoVoiceReady] = useState(false);
   const [voiceLaunchCandidate, setVoiceLaunchCandidate] = useState(1);
   const [voiceStartRequest, setVoiceStartRequest] = useState(0);
+  const [foregroundRevision, setForegroundRevision] = useState(0);
   const consumedVoiceCandidateRef = useRef(0);
   const previousAppStateRef = useRef(AppState.currentState);
   const [refreshing, setRefreshing] = useState(false);
@@ -79,7 +81,8 @@ function MainApp() {
     const subscription = AppState.addEventListener('change', state => {
       const previous = previousAppStateRef.current;
       previousAppStateRef.current = state;
-      if (previous === 'background' && state === 'active' && activeScreenRef.current === 'dashboard') {
+      if (state === 'active') setForegroundRevision(revision => revision + 1);
+      if (previous !== 'active' && state === 'active' && activeScreenRef.current === 'dashboard') {
         setVoiceLaunchCandidate(candidate => candidate + 1);
       }
     });
@@ -87,17 +90,31 @@ function MainApp() {
   }, []);
 
   useEffect(() => {
-    if (!autoVoiceReady || isLoading || !profile || voiceLaunchCandidate <= consumedVoiceCandidateRef.current) return;
-    if (activeScreen !== 'dashboard' || !autoVoiceEnabled) {
+    if (!autoVoiceReady || isLoading || !profile) return;
+    const action = getAutoVoiceLaunchAction(
+      voiceLaunchCandidate,
+      consumedVoiceCandidateRef.current,
+      activeScreen === 'dashboard',
+      autoVoiceEnabled,
+      AppState.currentState,
+    );
+    if (action === 'none') return;
+    if (action === 'discard') {
       consumedVoiceCandidateRef.current = voiceLaunchCandidate;
       return;
     }
+    if (action === 'defer') {
+      // currentState can be unknown during a cold launch before native state arrives.
+      const retry = setTimeout(() => setForegroundRevision(revision => revision + 1), 1000);
+      return () => clearTimeout(retry);
+    }
     const timer = setTimeout(() => {
+      if (!canDispatchAutoVoiceLaunch(AppState.currentState)) return;
       consumedVoiceCandidateRef.current = voiceLaunchCandidate;
-      if (AppState.currentState === 'active') setVoiceStartRequest(voiceLaunchCandidate);
+      setVoiceStartRequest(voiceLaunchCandidate);
     }, 800);
     return () => clearTimeout(timer);
-  }, [autoVoiceReady, isLoading, profile, voiceLaunchCandidate, activeScreen, autoVoiceEnabled]);
+  }, [autoVoiceReady, isLoading, profile, voiceLaunchCandidate, activeScreen, autoVoiceEnabled, foregroundRevision]);
 
   useEffect(() => {
     if (activeScreen !== 'dashboard') setVoiceStartRequest(0);
@@ -700,7 +717,7 @@ function MainApp() {
             autoVoiceEnabled={autoVoiceEnabled}
             onAutoVoiceEnabledChange={handleAutoVoiceEnabledChange}
             autoStartVoiceRequest={voiceStartRequest}
-            onAutoStartVoiceHandled={() => setVoiceStartRequest(0)}
+            onAutoStartVoiceHandled={request => setVoiceStartRequest(current => current === request ? 0 : current)}
             onNavigate={setActiveScreen}
             refreshing={refreshing}
             onRefresh={profile.syncKey ? handleRefresh : undefined}

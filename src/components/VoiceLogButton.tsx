@@ -11,7 +11,7 @@ type Props = {
   autoVoiceEnabled: boolean;
   onAutoVoiceEnabledChange: (enabled: boolean) => Promise<void>;
   autoStartRequest: number;
-  onAutoStartHandled: () => void;
+  onAutoStartHandled: (request: number) => void;
 };
 
 export const VoiceLogButton: React.FC<Props> = ({ logs, onAddLog, onUpdateLog, autoVoiceEnabled, onAutoVoiceEnabledChange, autoStartRequest, onAutoStartHandled }) => {
@@ -20,20 +20,34 @@ export const VoiceLogButton: React.FC<Props> = ({ logs, onAddLog, onUpdateLog, a
   const [transcript, setTranscript] = useState('');
   const [command, setCommand] = useState<VoiceCommand | null>(null);
   const [spokenAt, setSpokenAt] = useState<number | null>(null);
+  const [statusMessage, setStatusMessage] = useState<string | null>(null);
+  const [foregroundRevision, setForegroundRevision] = useState(0);
+  const [attemptRevision, setAttemptRevision] = useState(0);
   const starting = useRef(false);
   const mounted = useRef(true);
   const interrupted = useRef(false);
   const listeningRef = useRef(false);
   const startGeneration = useRef(0);
+  const handledAutoRequestRef = useRef(0);
+
+  const completeAutoRequest = (request: number) => {
+    if (handledAutoRequestRef.current === request) return;
+    handledAutoRequestRef.current = request;
+    onAutoStartHandled(request);
+  };
 
   useEffect(() => {
     mounted.current = true;
     const subscription = AppState.addEventListener('change', state => {
-      if (state === 'active') return;
+      if (state === 'active') {
+        setForegroundRevision(revision => revision + 1);
+        return;
+      }
       interrupted.current = true;
       startGeneration.current += 1;
       if (starting.current || listeningRef.current) ExpoSpeechRecognitionModule.abort();
       starting.current = false;
+      setAttemptRevision(revision => revision + 1);
     });
     return () => {
       mounted.current = false;
@@ -51,8 +65,9 @@ export const VoiceLogButton: React.FC<Props> = ({ logs, onAddLog, onUpdateLog, a
     }
     listeningRef.current = true;
     setListening(true);
+    setStatusMessage(null);
   });
-  useSpeechRecognitionEvent('end', () => { listeningRef.current = false; setListening(false); starting.current = false; });
+  useSpeechRecognitionEvent('end', () => { listeningRef.current = false; setListening(false); starting.current = false; setAttemptRevision(revision => revision + 1); });
   useSpeechRecognitionEvent('result', event => {
     if (!event.isFinal || interrupted.current) return;
     const recognized = event.results[0]?.transcript?.trim() || '';
@@ -63,47 +78,81 @@ export const VoiceLogButton: React.FC<Props> = ({ logs, onAddLog, onUpdateLog, a
   useSpeechRecognitionEvent('error', event => {
     setListening(false);
     starting.current = false;
-    if (event.error !== 'aborted') Alert.alert('음성 인식 실패', '다시 말하거나 직접 기록해 주세요.');
+    setAttemptRevision(revision => revision + 1);
+    if (event.error !== 'aborted') {
+      const message = `음성 인식 오류 (${event.error}): ${event.message || '기기의 음성 인식 서비스를 확인해 주세요.'}`;
+      setStatusMessage(message);
+      Alert.alert('음성 인식 실패', message);
+    }
   });
 
-  const start = async () => {
-    if (starting.current || listening || AppState.currentState !== 'active') return;
+  const start = async (): Promise<'handled' | 'deferred'> => {
+    if (starting.current || listeningRef.current || AppState.currentState !== 'active') return 'deferred';
     starting.current = true;
     interrupted.current = false;
     const generation = ++startGeneration.current;
     setTranscript('');
     setCommand(null);
     setSpokenAt(null);
+    setStatusMessage(null);
     try {
       if (!ExpoSpeechRecognitionModule.isRecognitionAvailable()) {
-        Alert.alert('음성 인식 서비스 없음', '기기의 음성 인식 서비스를 사용할 수 없습니다. 직접 기록해 주세요.');
+        const message = '기기의 음성 인식 서비스를 사용할 수 없습니다. Google 음성 인식 서비스가 설치·활성화되어 있는지 확인해 주세요.';
+        setStatusMessage(message);
+        Alert.alert('음성 인식 서비스 없음', message);
         starting.current = false;
-        return;
+        return 'handled';
       }
       const permission = await ExpoSpeechRecognitionModule.requestPermissionsAsync();
       if (!mounted.current || interrupted.current || generation !== startGeneration.current || AppState.currentState !== 'active') {
         if (generation === startGeneration.current) starting.current = false;
-        return;
+        return 'deferred';
       }
       if (!permission.granted) {
-        Alert.alert('마이크 권한 필요', '음성 기록을 사용하려면 마이크 권한을 허용해 주세요.');
+        const message = '음성 기록을 사용하려면 앱 설정에서 마이크 권한을 허용해 주세요.';
+        setStatusMessage(message);
+        Alert.alert('마이크 권한 필요', message);
         starting.current = false;
-        return;
+        return 'handled';
       }
       ExpoSpeechRecognitionModule.start({ lang: 'ko-KR', interimResults: false, continuous: false });
+      return 'handled';
     } catch {
+      if (!mounted.current || interrupted.current || generation !== startGeneration.current || AppState.currentState !== 'active') {
+        if (generation === startGeneration.current) starting.current = false;
+        return 'deferred';
+      }
       if (generation === startGeneration.current) {
         starting.current = false;
-        if (mounted.current) Alert.alert('음성 인식 불가', '이 기기에서 음성 인식을 시작하지 못했습니다.');
+        if (mounted.current) {
+          const message = '이 기기에서 음성 인식을 시작하지 못했습니다. 마이크 권한과 음성 인식 서비스를 확인해 주세요.';
+          setStatusMessage(message);
+          Alert.alert('음성 인식 불가', message);
+        }
       }
+      return 'handled';
+    } finally {
+      if (!starting.current && mounted.current) setAttemptRevision(revision => revision + 1);
     }
   };
 
   useEffect(() => {
     if (!autoStartRequest) return;
-    onAutoStartHandled();
-    if (autoVoiceEnabled && !transcript && !command && mounted.current && AppState.currentState === 'active') void start();
-  }, [autoStartRequest]);
+    if (handledAutoRequestRef.current === autoStartRequest) return;
+    if (!autoVoiceEnabled || transcript || command) {
+      completeAutoRequest(autoStartRequest);
+      return;
+    }
+    if (!mounted.current || AppState.currentState !== 'active') return;
+    if (listeningRef.current) {
+      completeAutoRequest(autoStartRequest);
+      return;
+    }
+    if (starting.current) return;
+    void start().then(result => {
+      if (result === 'handled' && mounted.current) completeAutoRequest(autoStartRequest);
+    });
+  }, [autoStartRequest, autoVoiceEnabled, foregroundRevision, attemptRevision]);
 
   const activeSleep = logs
     .filter((log): log is SleepLog => log.type === 'sleep' && log.endedAt == null)
@@ -146,7 +195,14 @@ export const VoiceLogButton: React.FC<Props> = ({ logs, onAddLog, onUpdateLog, a
 
   return (
     <View style={styles.container}>
-      <TouchableOpacity style={styles.button} onPress={listening ? () => ExpoSpeechRecognitionModule.stop() : start} accessibilityLabel={listening ? '음성 입력 끝내기' : '음성으로 기록하기'}>
+      <TouchableOpacity
+        style={styles.button}
+        onPress={listening ? () => ExpoSpeechRecognitionModule.stop() : () => {
+          if (autoStartRequest) completeAutoRequest(autoStartRequest);
+          void start();
+        }}
+        accessibilityLabel={listening ? '음성 입력 끝내기' : '음성으로 기록하기'}
+      >
         <Text style={styles.buttonText}>{listening ? '듣는 중… 탭하여 끝내기' : '🎤 음성으로 기록하기'}</Text>
       </TouchableOpacity>
       <TouchableOpacity
@@ -161,6 +217,7 @@ export const VoiceLogButton: React.FC<Props> = ({ logs, onAddLog, onUpdateLog, a
       </TouchableOpacity>
       <Text style={styles.autoHelp}>Google이 아기기록을 열어 주거나 평소 앱을 열 때 작동해요. 기록은 확인 후 저장됩니다.</Text>
       <Text style={styles.privacy}>음성은 기기의 음성 인식 서비스에서 처리합니다. 앱은 녹음 파일을 저장하지 않습니다.</Text>
+      {statusMessage ? <Text style={styles.help}>{statusMessage}</Text> : null}
       {transcript ? <Text style={styles.transcript}>인식: {transcript}</Text> : null}
       {command?.kind === 'unknown' ? <Text style={styles.help}>명령을 이해하지 못했어요. “분유 120ml 먹었어”, “지금 자”, “지금 깼어”처럼 말해 주세요.</Text> : null}
       {description ? (
