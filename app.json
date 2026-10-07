@@ -26,7 +26,7 @@
     },
     "android": {
       "package": "com.seonggi.babycheck",
-      "versionCode": 18,
+      "versionCode": 19,
       "adaptiveIcon": {
         "backgroundColor": "#E6F4FE",
         "foregroundImage": "./assets/android-icon-foreground.png",
@@ -53,6 +53,7 @@
           "speechRecognitionPermission": "말한 내용을 수유와 수면 기록으로 입력하기 위해 음성을 인식합니다."
         }
       ],
+      "./plugins/withOptionalMicrophone",
       "expo-notifications",
       [
         "expo-widgets",
