@@ -12,6 +12,7 @@ import {
   Switch,
   Share,
   Linking,
+  AppState,
 } from 'react-native';
 import { Directory, File, Paths } from 'expo-file-system';
 import * as Sharing from 'expo-sharing';
@@ -108,30 +109,60 @@ export const Profile: React.FC<ProfileProps> = ({
   const [deleteFamilyConfirmText, setDeleteFamilyConfirmText] = useState('');
   const [isProcessingDeletion, setIsProcessingDeletion] = useState(false);
   const [deletionStatus, setDeletionStatus] = useState<FamilyDeletionStatus | null>(null);
+  const [deletionRefreshRequest, setDeletionRefreshRequest] = useState(0);
+  const deletionInFlightRef = useRef(false);
+  const completedDeletionKeyRef = useRef<string | null>(null);
+  const deletionActionVersionRef = useRef(0);
   const DELETE_FAMILY_CONFIRM_PHRASE = '삭제합니다';
 
-  // 가족 서버 데이터 삭제 예약 상태 로드. 냉각 기간이 이미 지났다면 별도
-  // 확인 없이 바로 실행합니다 — 사용자가 예약할 때 이미 한 번 확인했고,
-  // 그 뒤로 계속 취소할 기회가 있었기 때문입니다(휴지통 자동 비우기와 동일한 방식).
+  // 예약 기한과 앱 복귀 시 서버 상태를 다시 확인합니다. 앱이 종료된 동안에는
+  // 이 기기의 JavaScript가 실행되지 않으므로 서버 삭제를 수행할 수 없습니다.
   useEffect(() => {
     if (!profile.syncKey) {
+      completedDeletionKeyRef.current = null;
       setDeletionStatus(null);
       return;
     }
+    if (completedDeletionKeyRef.current === profile.syncKey) return;
     let cancelled = false;
+    let timer: ReturnType<typeof setTimeout> | undefined;
     const key = profile.syncKey;
-    onGetFamilyDeletionStatus(key).then(async status => {
-      if (cancelled) return;
+    const check = async () => {
+      if (deletionInFlightRef.current) return;
+      const actionVersion = deletionActionVersionRef.current;
+      let status: FamilyDeletionStatus;
+      try {
+        status = await onGetFamilyDeletionStatus(key);
+      } catch {
+        status = { scheduled: false, canDeleteNow: false, error: '서버 상태를 확인하지 못했습니다.' };
+      }
+      if (cancelled || deletionInFlightRef.current || actionVersion !== deletionActionVersionRef.current) return;
+      if (status.error) {
+        setDeletionStatus(status);
+        return;
+      }
       if (status.scheduled && status.canDeleteNow) {
-        const result = await onDeleteFamilyData(key);
+        deletionActionVersionRef.current += 1;
+        deletionInFlightRef.current = true;
+        setIsProcessingDeletion(true);
+        let result: { success: boolean; error?: string; partiallyDeleted?: boolean };
+        try {
+          result = await onDeleteFamilyData(key);
+        } catch {
+          result = { success: false, error: '서버 데이터를 삭제하지 못했습니다.' };
+        } finally {
+          deletionInFlightRef.current = false;
+        }
         if (cancelled) return;
+        setIsProcessingDeletion(false);
         if (result.success) {
+          completedDeletionKeyRef.current = key;
           setSyncKey('');
           setDeletionStatus(null);
           Alert.alert('삭제 완료', '예약된 가족 서버 데이터 영구 삭제가 자동으로 실행됐습니다. 이 휴대폰의 기록은 그대로 남아 있습니다.');
         } else {
           // 실행이 실패하면(예: 오프라인) 수동으로 다시 시도할 수 있게 상태를 보여줍니다.
-          setDeletionStatus(status);
+          setDeletionStatus({ ...status, error: result.error });
           if (result.partiallyDeleted) {
             Alert.alert(
               '일부만 삭제됨',
@@ -142,9 +173,17 @@ export const Profile: React.FC<ProfileProps> = ({
         return;
       }
       setDeletionStatus(status);
-    }).catch(() => undefined);
-    return () => { cancelled = true; };
-  }, [profile.syncKey]);
+      if (timer) clearTimeout(timer);
+      if (status.scheduled && status.readyAt) {
+        timer = setTimeout(() => { void check(); }, Math.max(0, status.readyAt - Date.now() + 1000));
+      }
+    };
+    void check();
+    const subscription = AppState.addEventListener('change', state => {
+      if (state === 'active') void check();
+    });
+    return () => { cancelled = true; if (timer) clearTimeout(timer); subscription.remove(); };
+  }, [profile.syncKey, deletionRefreshRequest]);
 
   // 최근 백업 시간 로드
   useEffect(() => {
@@ -190,13 +229,16 @@ export const Profile: React.FC<ProfileProps> = ({
     if (deleteFamilyConfirmText.trim() !== DELETE_FAMILY_CONFIRM_PHRASE) return;
     Alert.alert(
       '마지막 확인',
-      '가족 서버 데이터 영구 삭제를 예약합니다. 1시간 뒤에 별도 확인 없이 자동으로 지워지며, 그 전까지는 취소할 수 있습니다. 배우자의 기록도 함께 지워집니다. 예약하시겠습니까?',
+      '가족 서버 데이터 영구 삭제를 예약합니다. 1시간 뒤부터 이 기기에서 설정 화면이 열려 있고 인터넷에 연결되면 삭제됩니다. 그 전까지는 취소할 수 있습니다. 배우자의 기록도 함께 지워집니다. 예약하시겠습니까?',
       [
         { text: '취소', style: 'cancel' },
         {
           text: '삭제 예약',
           style: 'destructive',
           onPress: async () => {
+            if (deletionInFlightRef.current) return;
+            deletionActionVersionRef.current += 1;
+            deletionInFlightRef.current = true;
             setIsProcessingDeletion(true);
             try {
               const result = await onScheduleFamilyDeletion(profile.syncKey!);
@@ -204,12 +246,16 @@ export const Profile: React.FC<ProfileProps> = ({
                 setDeletionStatus({ scheduled: true, readyAt: result.readyAt, canDeleteNow: false });
                 setShowDeleteFamilyConfirm(false);
                 setDeleteFamilyConfirmText('');
-                Alert.alert('삭제 예약됨', '1시간 뒤에 가족 서버 데이터가 자동으로 영구 삭제됩니다. 그 전까지는 이 화면에서 취소할 수 있습니다.');
+                Alert.alert('삭제 예약됨', '1시간 뒤부터 이 기기에서 설정 화면을 열고 인터넷에 연결하면 가족 서버 데이터가 삭제됩니다. 그 전까지는 이 화면에서 취소할 수 있습니다.');
               } else {
                 Alert.alert('예약 실패', result.error || '알 수 없는 오류가 발생했습니다.');
               }
+            } catch {
+              Alert.alert('예약 실패', '서버에 연결하지 못했습니다. 다시 시도해 주세요.');
             } finally {
+              deletionInFlightRef.current = false;
               setIsProcessingDeletion(false);
+              setDeletionRefreshRequest(value => value + 1);
             }
           },
         },
@@ -218,7 +264,9 @@ export const Profile: React.FC<ProfileProps> = ({
   };
 
   const handleCancelFamilyDeletion = () => {
-    if (!profile.syncKey) return;
+    if (!profile.syncKey || deletionInFlightRef.current) return;
+    deletionActionVersionRef.current += 1;
+    deletionInFlightRef.current = true;
     setIsProcessingDeletion(true);
     onCancelFamilyDeletion(profile.syncKey)
       .then(result => {
@@ -229,42 +277,17 @@ export const Profile: React.FC<ProfileProps> = ({
           Alert.alert('취소 실패', result.error || '알 수 없는 오류가 발생했습니다.');
         }
       })
-      .finally(() => setIsProcessingDeletion(false));
+      .catch(() => Alert.alert('취소 실패', '서버에 연결하지 못했습니다. 다시 시도해 주세요.'))
+      .finally(() => {
+        deletionInFlightRef.current = false;
+        setIsProcessingDeletion(false);
+        setDeletionRefreshRequest(value => value + 1);
+      });
   };
 
   const handleExecuteFamilyDeletion = () => {
-    if (!profile.syncKey) return;
-    Alert.alert(
-      '마지막 확인',
-      '가족 서버 데이터를 지금 영구히 삭제합니다. 배우자의 기록을 포함해 되돌릴 수 없습니다. 정말 진행하시겠습니까?',
-      [
-        { text: '취소', style: 'cancel' },
-        {
-          text: '영구 삭제',
-          style: 'destructive',
-          onPress: async () => {
-            setIsProcessingDeletion(true);
-            try {
-              const result = await onDeleteFamilyData(profile.syncKey!);
-              if (result.success) {
-                setSyncKey('');
-                setDeletionStatus(null);
-                Alert.alert('삭제 완료', '가족 서버 데이터를 삭제했습니다. 이 휴대폰의 기록은 그대로 남아 있습니다.');
-              } else if (result.partiallyDeleted) {
-                Alert.alert(
-                  '일부만 삭제됨',
-                  `도중에 실패했지만, 이미 일부 데이터는 서버에서 지워졌습니다.\n\n[상세 오류]: ${result.error || ''}\n\n"다시 시도"를 눌러 나머지를 마저 지워주세요.`,
-                );
-              } else {
-                Alert.alert('삭제 실패', result.error || '알 수 없는 오류가 발생했습니다.');
-              }
-            } finally {
-              setIsProcessingDeletion(false);
-            }
-          },
-        },
-      ],
-    );
+    // The effect re-reads the server reservation immediately before deleting.
+    setDeletionRefreshRequest(value => value + 1);
   };
 
   const connectFamily = async (
@@ -861,12 +884,25 @@ export const Profile: React.FC<ProfileProps> = ({
 
           {!!profile.syncKey && (
             <View style={styles.dangerZone}>
-              {deletionStatus?.scheduled ? (
+              {deletionStatus?.error ? (
+                <>
+                  <Text style={styles.dangerWarningText}>⚠️ 삭제 예약 상태를 확인하지 못했습니다: {deletionStatus.error}</Text>
+                  <TouchableOpacity
+                    style={styles.backupButton}
+                    onPress={() => setDeletionRefreshRequest(value => value + 1)}
+                    disabled={isProcessingDeletion}
+                  >
+                    <Text style={styles.backupButtonText}>서버 상태 다시 확인</Text>
+                  </TouchableOpacity>
+                </>
+              ) : deletionStatus === null ? (
+                <Text style={styles.dangerWarningText}>삭제 예약 상태를 확인하고 있습니다.</Text>
+              ) : deletionStatus.scheduled ? (
                 <>
                   <Text style={styles.dangerWarningText}>
                     {deletionStatus.canDeleteNow
                       ? '⚠️ 예약 시각이 지나 자동 삭제를 시도했지만 실패했습니다(오프라인 등). 아래 버튼으로 다시 시도할 수 있습니다.'
-                      : `⏳ 가족 서버 데이터 삭제가 예약되어 있습니다. ${deletionStatus.readyAt ? new Date(deletionStatus.readyAt).toLocaleString('ko-KR') : ''}에 별도 확인 없이 자동으로 삭제됩니다. 그 전까지는 취소할 수 있습니다.`}
+                      : `⏳ 가족 서버 데이터 삭제가 예약되어 있습니다. ${deletionStatus.readyAt ? new Date(deletionStatus.readyAt).toLocaleString('ko-KR') : ''}부터 이 기기에서 설정 화면을 열고 인터넷에 연결하면 삭제됩니다. 그 전까지는 취소할 수 있습니다.`}
                   </Text>
                   <View style={styles.backupButtonsRow}>
                     <TouchableOpacity
@@ -902,8 +938,8 @@ export const Profile: React.FC<ProfileProps> = ({
                     ⚠️ 배우자를 포함한 가족 전체의 서버 기록(수유·기저귀 등 모든 기록, 공유 프로필,
                     가족 연결)이 영구히 삭제됩니다. 되돌릴 수 없습니다. 이 기기의 로컬 기록은
                     지워지지 않습니다. 진행 전 "데이터 내보내기"로 백업하는 것을 권장합니다.
-                    {'\n\n'}예약을 누르면 즉시 지워지지 않고, 1시간 뒤에 별도 확인 없이 자동으로
-                    삭제됩니다. 그 전까지는 언제든 취소할 수 있습니다.
+                    {'\n\n'}예약을 누르면 즉시 지워지지 않습니다. 1시간 뒤부터 이 기기에서
+                    설정 화면을 열고 인터넷에 연결하면 삭제됩니다. 그 전까지는 취소할 수 있습니다.
                   </Text>
                   <TextInput
                     style={styles.input}
@@ -936,7 +972,7 @@ export const Profile: React.FC<ProfileProps> = ({
                       disabled={deleteFamilyConfirmText.trim() !== DELETE_FAMILY_CONFIRM_PHRASE || isProcessingDeletion}
                     >
                       <Text style={styles.dangerButtonText}>
-                        {isProcessingDeletion ? '처리 중...' : '1시간 뒤 자동 삭제 예약'}
+                        {isProcessingDeletion ? '처리 중...' : '1시간 뒤 삭제 예약'}
                       </Text>
                     </TouchableOpacity>
                   </View>

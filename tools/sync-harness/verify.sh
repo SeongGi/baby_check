@@ -21,12 +21,18 @@ run_regression() {
     node --import "$LOADER_IMPORT" "$DIR/regression.mjs"
 }
 
+run_reminder() {
+  rm -f "$DIR/storage-reminder.json"
+  HARNESS_STORAGE_FILE="$DIR/storage-reminder.json" node --import "$LOADER_IMPORT" "$DIR/reminder.mjs"
+}
+
 case "${1:-all}" in
   unit)       run_unit ;;
   regression) run_regression ;;
-  offline)    run_unit && run_regression ;;
+  reminder)   run_reminder ;;
+  offline)    run_unit && run_regression && run_reminder ;;
   compat)     node "$DIR/compat.mjs" ;;
   full)       node "$DIR/run.mjs" ;;
-  all)        run_unit && run_regression && node "$DIR/compat.mjs" && node "$DIR/run.mjs" ;;
+  all)        run_unit && run_regression && run_reminder && node "$DIR/compat.mjs" && node "$DIR/run.mjs" ;;
   *)          echo "usage: $0 [unit|regression|offline|compat|full|all]" >&2; exit 2 ;;
 esac

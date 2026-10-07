@@ -13,6 +13,7 @@ const STUBS = {
   'expo-crypto': path.join(HARNESS_DIR, 'stubs/expo-crypto.mjs'),
   '@react-native-async-storage/async-storage': path.join(HARNESS_DIR, 'stubs/async-storage.mjs'),
   'react-native': path.join(HARNESS_DIR, 'stubs/react-native.mjs'),
+  'expo-notifications': path.join(HARNESS_DIR, 'stubs/expo-notifications.mjs'),
 };
 
 const EXTENSIONS = ['.ts', '.tsx', '.js', '.mjs'];

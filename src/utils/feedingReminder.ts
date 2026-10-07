@@ -165,7 +165,9 @@ export const requestFeedingReminderPermission = async (): Promise<boolean> => {
   return requested.status === 'granted';
 };
 
-export const refreshFeedingReminder = async (
+let reminderRefreshQueue: Promise<void> = Promise.resolve();
+
+const performFeedingReminderRefresh = async (
   logs: BabyLogEntry[],
   profile: BabyProfile,
   askPermission = false,
@@ -215,4 +217,15 @@ export const refreshFeedingReminder = async (
   });
   await AsyncStorage.setItem(NOTIFICATION_ID_KEY, id);
   return true;
+};
+
+export const refreshFeedingReminder = (
+  logs: BabyLogEntry[],
+  profile: BabyProfile,
+  askPermission = false,
+): Promise<boolean> => {
+  const next = reminderRefreshQueue.catch(() => undefined)
+    .then(() => performFeedingReminderRefresh(logs, profile, askPermission));
+  reminderRefreshQueue = next.then(() => undefined, () => undefined);
+  return next;
 };

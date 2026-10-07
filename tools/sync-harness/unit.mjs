@@ -127,6 +127,35 @@ check('동기화와 겹친 삭제가 되살아나지 않는다',
   !racedLogs.some(log => log.id === remoteLog.id) && (p.deletedLogIds || []).includes(remoteLog.id),
   `logs=${JSON.stringify(racedLogs.map(log => log.id))}, deleted=${JSON.stringify(p.deletedLogIds)}`);
 
+// 15. 백업을 내보낸 후 삭제한 기록은 명시적으로 다시 가져오면 복원돼야 합니다.
+const original = await storage.addLog({ type: 'formula', amount: 90, timestamp: Date.now() });
+const exportedLogs = await storage.getLogs();
+const exportedProfile = await storage.getProfile();
+await storage.deleteLog(original.id);
+await storage.importDataWithoutLoss(exportedLogs, exportedProfile);
+let restoredLogs = await storage.getLogs();
+let restored = restoredLogs.filter(log => log.type === 'formula' && log.amount === 90 && log.timestamp === original.timestamp);
+check('백업 가져오기로 삭제된 기록을 다시 복원', restored.length === 1 && restored[0].id !== original.id,
+  JSON.stringify(restored.map(log => log.id)));
+check('원본 삭제 표식은 유지', (await storage.getProfile()).deletedLogIds.includes(original.id));
+
+// 16. 같은 백업을 반복해서 가져와도 중복을 만들지 않고, 같은 원본 ID의
+// 수정된 백업 기록은 별개의 복원본으로 남깁니다.
+await storage.importDataWithoutLoss(exportedLogs, exportedProfile);
+restoredLogs = await storage.getLogs();
+restored = restoredLogs.filter(log => log.type === 'formula' && log.amount === 90 && log.timestamp === original.timestamp);
+check('같은 백업 반복 가져오기는 중복 기록을 만들지 않는다', restored.length === 1,
+  JSON.stringify(restored.map(log => log.id)));
+await storage.importDataWithoutLoss(
+  exportedLogs.map(log => log.id === original.id ? { ...log, amount: 110 } : log),
+  exportedProfile,
+);
+restoredLogs = await storage.getLogs();
+check('원본 ID가 같아도 내용이 다른 백업 기록을 보존',
+  restoredLogs.some(log => log.id === restored[0]?.id)
+    && restoredLogs.some(log => log.type === 'formula' && log.amount === 110 && log.id !== original.id),
+  JSON.stringify(restoredLogs.filter(log => log.type === 'formula').map(log => ({ id: log.id, amount: log.amount }))));
+
 const failed = results.filter((r) => !r.passed);
 console.log(`\n==== 단위 검증: ${results.length - failed.length}/${results.length} 통과 ====`);
 process.exit(failed.length ? 1 : 0);
