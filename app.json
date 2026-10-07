@@ -46,6 +46,13 @@
     "owner": "seonggi",
     "plugins": [
       "./plugins/withBabyStatusWidget",
+      [
+        "expo-speech-recognition",
+        {
+          "microphonePermission": "음성 기록을 위해 마이크를 사용합니다.",
+          "speechRecognitionPermission": "말한 내용을 수유와 수면 기록으로 입력하기 위해 음성을 인식합니다."
+        }
+      ],
       "expo-notifications",
       [
         "expo-widgets",
