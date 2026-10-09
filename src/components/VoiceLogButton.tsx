@@ -1,7 +1,7 @@
 import React, { useEffect, useRef, useState } from 'react';
 import { Alert, AppState, StyleSheet, Text, TouchableOpacity, View } from 'react-native';
 import { ExpoSpeechRecognitionModule, useSpeechRecognitionEvent } from 'expo-speech-recognition';
-import { BabyLogEntry, SleepLog } from '../types';
+import { BabyLogEntry } from '../types';
 import { parseVoiceCommand, VoiceCommand } from '../utils/voiceCommand';
 
 type Props = {
@@ -29,6 +29,9 @@ export const VoiceLogButton: React.FC<Props> = ({ logs, onAddLog, onUpdateLog, a
   const listeningRef = useRef(false);
   const startGeneration = useRef(0);
   const handledAutoRequestRef = useRef(0);
+  const savePendingRef = useRef(false);
+  const logsRef = useRef(logs);
+  logsRef.current = logs;
 
   const completeAutoRequest = (request: number) => {
     if (handledAutoRequestRef.current === request) return;
@@ -154,33 +157,48 @@ export const VoiceLogButton: React.FC<Props> = ({ logs, onAddLog, onUpdateLog, a
     });
   }, [autoStartRequest, autoVoiceEnabled, foregroundRevision, attemptRevision]);
 
-  const activeSleep = logs
-    .filter((log): log is SleepLog => log.type === 'sleep' && log.endedAt == null)
-    .sort((a, b) => b.timestamp - a.timestamp)[0];
-
   const description = command?.kind === 'formula'
-    ? `분유 ${command.amount}ml 기록`
+    ? `${command.feedingType === 'breast' ? '모유' : command.feedingType === 'mixed' ? '혼합 수유' : '분유'} ${command.amount}ml 기록`
+    : command?.kind === 'urine' ? `소변 기록 · 젖은 정도 ${command.wetness ? { light: '적음', medium: '보통', heavy: '많음' }[command.wetness] : '미입력'} · 색 ${command.color ? { clear: '맑음', normal: '보통', dark: '진함' }[command.color] : '미입력'}`
+    : command?.kind === 'stool' ? `대변 기록 · 색 ${command.color ? { yellow: '노란색', green: '녹색', brown: '갈색', red: '빨간색', black: '검은색', grey: '회색' }[command.color] : '미입력'} · 형태 ${command.consistency ? { soft: '보통', watery: '묽음', hard: '단단함' }[command.consistency] : '미입력'} · 양 ${command.amount ? { small: '적음', medium: '보통', large: '많음' }[command.amount] : '미입력'}`
+    : command?.kind === 'bath' ? `${command.bathType === 'quick' ? '간단 씻기' : '목욕'} ${command.durationMinutes === undefined ? '시간 미입력' : `${command.durationMinutes}분`} 기록`
+    : command?.kind === 'weight' ? `몸무게 ${command.weightKg}kg 기록`
     : command?.kind === 'sleepStart' ? '지금 수면 시작'
     : command?.kind === 'sleepEnd' ? '지금 수면 종료'
+    : command?.kind === 'tummyStart' ? '터미타임 시작'
+    : command?.kind === 'tummyEnd' ? '터미타임 종료'
+    : command?.kind === 'playStart' ? '놀기시간 시작'
+    : command?.kind === 'playEnd' ? '놀기시간 종료'
     : null;
 
+  const editCommand = (patch: Partial<VoiceCommand>) => setCommand(current => current && current.kind !== 'unknown' ? { ...current, ...patch } as VoiceCommand : current);
+
   const save = async () => {
-    if (!command || command.kind === 'unknown' || spokenAt === null || busy) return;
-    if (command.kind === 'sleepStart' && activeSleep) {
-      Alert.alert('이미 자는 중', '진행 중인 수면을 먼저 종료해 주세요.');
+    if (!command || command.kind === 'unknown' || spokenAt === null || savePendingRef.current) return;
+    if ((command.kind === 'urine' && (!command.wetness || !command.color)) ||
+        (command.kind === 'stool' && (!command.color || !command.consistency || !command.amount)) ||
+        (command.kind === 'bath' && command.durationMinutes === undefined)) {
+      Alert.alert('정보 입력 필요', '미입력 항목을 선택한 뒤 기록해 주세요.');
       return;
     }
-    if (command.kind === 'sleepEnd' && !activeSleep) {
-      Alert.alert('진행 중인 수면 없음', '먼저 수면 시작을 기록해 주세요.');
+    const timedType = command.kind.startsWith('sleep') ? 'sleep' : command.kind.startsWith('tummy') ? 'tummyTime' : command.kind.startsWith('play') ? 'play' : null;
+    const ending = command.kind.endsWith('End');
+    const active = timedType ? logsRef.current.filter(log => log.type === timedType && log.endedAt == null).sort((a, b) => b.timestamp - a.timestamp)[0] : undefined;
+    if (timedType && ((ending && (!active || active.timestamp > spokenAt)) || (!ending && active))) {
+      Alert.alert('상태 확인', ending ? '종료할 진행 중 기록이 없습니다. 새로고침 후 다시 시도해 주세요.' : '이미 진행 중인 기록이 있습니다.');
       return;
     }
+    savePendingRef.current = true;
     setBusy(true);
     try {
       const result = command.kind === 'formula'
-        ? await onAddLog({ type: 'formula', feedingType: 'formula', amount: command.amount, timestamp: spokenAt } as Omit<BabyLogEntry, 'id'>)
-        : command.kind === 'sleepStart'
-          ? await onAddLog({ type: 'sleep', timestamp: spokenAt })
-          : await onUpdateLog({ ...activeSleep!, endedAt: Math.max(activeSleep!.timestamp, spokenAt) });
+        ? await onAddLog({ type: 'formula', feedingType: command.feedingType ?? 'formula', amount: command.amount, formulaAmount: command.formulaAmount, breastAmount: command.breastAmount, temperature: command.temperature, timestamp: spokenAt } as Omit<BabyLogEntry, 'id'>)
+        : command.kind === 'urine' ? await onAddLog({ type: 'urine', wetness: command.wetness, color: command.color, timestamp: spokenAt } as Omit<BabyLogEntry, 'id'>)
+        : command.kind === 'stool' ? await onAddLog({ type: 'stool', color: command.color, consistency: command.consistency, amount: command.amount, timestamp: spokenAt } as Omit<BabyLogEntry, 'id'>)
+        : command.kind === 'bath' ? await onAddLog({ type: 'bath', bathType: command.bathType, durationMinutes: command.durationMinutes, timestamp: spokenAt } as Omit<BabyLogEntry, 'id'>)
+        : command.kind === 'weight' ? await onAddLog({ type: 'weight', weightKg: command.weightKg, timestamp: spokenAt } as Omit<BabyLogEntry, 'id'>)
+        : ending ? await onUpdateLog({ ...active!, endedAt: spokenAt } as BabyLogEntry)
+        : await onAddLog({ type: timedType!, timestamp: spokenAt } as Omit<BabyLogEntry, 'id'>);
       if (result === null || result === false) throw new Error('save failed');
       setTranscript('');
       setCommand(null);
@@ -189,6 +207,7 @@ export const VoiceLogButton: React.FC<Props> = ({ logs, onAddLog, onUpdateLog, a
     } catch {
       Alert.alert('저장 실패', '기록을 저장하지 못했습니다. 다시 시도해 주세요.');
     } finally {
+      savePendingRef.current = false;
       setBusy(false);
     }
   };
@@ -219,10 +238,20 @@ export const VoiceLogButton: React.FC<Props> = ({ logs, onAddLog, onUpdateLog, a
       <Text style={styles.privacy}>음성은 기기의 음성 인식 서비스에서 처리합니다. 앱은 녹음 파일을 저장하지 않습니다.</Text>
       {statusMessage ? <Text style={styles.help}>{statusMessage}</Text> : null}
       {transcript ? <Text style={styles.transcript}>인식: {transcript}</Text> : null}
-      {command?.kind === 'unknown' ? <Text style={styles.help}>명령을 이해하지 못했어요. “분유 120ml 먹었어”, “지금 자”, “지금 깼어”처럼 말해 주세요.</Text> : null}
+      {command?.kind === 'unknown' ? <Text style={styles.help}>명령을 이해하지 못했어요. “분유 120ml 먹었어”, “소변 봤어”, “대변 봤어”, “목욕 10분”, “몸무게 5.2kg”, “터미타임 시작”처럼 말해 주세요.</Text> : null}
       {description ? (
         <View style={styles.confirm}>
           <Text style={styles.description}>{description}</Text>
+          {command?.kind === 'bath' ? <View style={styles.editRow}>{[5, 10, 15, 20].map(minutes => <TouchableOpacity key={minutes} style={styles.editButton} onPress={() => editCommand({ durationMinutes: minutes } as Partial<VoiceCommand>)}><Text>{minutes}분</Text></TouchableOpacity>)}</View> : null}
+          {command?.kind === 'urine' ? <View style={styles.editRow}>
+            <TouchableOpacity style={styles.editButton} onPress={() => editCommand({ wetness: !command.wetness ? 'medium' : command.wetness === 'light' ? 'medium' : command.wetness === 'medium' ? 'heavy' : 'light' } as Partial<VoiceCommand>)}><Text>젖은 정도 선택</Text></TouchableOpacity>
+            <TouchableOpacity style={styles.editButton} onPress={() => editCommand({ color: !command.color ? 'normal' : command.color === 'clear' ? 'normal' : command.color === 'normal' ? 'dark' : 'clear' } as Partial<VoiceCommand>)}><Text>색 선택</Text></TouchableOpacity>
+          </View> : null}
+          {command?.kind === 'stool' ? <View style={styles.editRow}>
+            <TouchableOpacity style={styles.editButton} onPress={() => editCommand({ color: command.color ? ({ yellow: 'green', green: 'brown', brown: 'red', red: 'black', black: 'grey', grey: 'yellow' } as const)[command.color] : 'yellow' } as Partial<VoiceCommand>)}><Text>색 선택</Text></TouchableOpacity>
+            <TouchableOpacity style={styles.editButton} onPress={() => editCommand({ consistency: !command.consistency ? 'soft' : command.consistency === 'soft' ? 'watery' : command.consistency === 'watery' ? 'hard' : 'soft' } as Partial<VoiceCommand>)}><Text>형태 선택</Text></TouchableOpacity>
+            <TouchableOpacity style={styles.editButton} onPress={() => editCommand({ amount: !command.amount ? 'medium' : command.amount === 'small' ? 'medium' : command.amount === 'medium' ? 'large' : 'small' } as Partial<VoiceCommand>)}><Text>양 선택</Text></TouchableOpacity>
+          </View> : null}
           <TouchableOpacity onPress={save} disabled={busy} style={styles.save}><Text style={styles.saveText}>{busy ? '저장 중…' : '기록 확인'}</Text></TouchableOpacity>
           <TouchableOpacity onPress={() => { setTranscript(''); setCommand(null); setSpokenAt(null); }}><Text style={styles.cancel}>취소</Text></TouchableOpacity>
         </View>
@@ -243,6 +272,8 @@ const styles = StyleSheet.create({
   transcript: { marginTop: 12, color: '#334155' },
   help: { marginTop: 8, color: '#8A4317' },
   confirm: { marginTop: 12, gap: 10 },
+  editRow: { flexDirection: 'row', flexWrap: 'wrap', gap: 8 },
+  editButton: { padding: 9, backgroundColor: '#E0EAFB', borderRadius: 8 },
   description: { fontSize: 16, fontWeight: '700', color: '#17243D' },
   save: { backgroundColor: '#243F72', borderRadius: 10, padding: 11, alignItems: 'center' },
   saveText: { color: '#fff', fontWeight: '700' },
