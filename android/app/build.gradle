@@ -104,10 +104,19 @@ android {
             keyAlias 'androiddebugkey'
             keyPassword 'android'
         }
+        release {
+            def releaseStoreFile = findProperty('BABY_CHECK_RELEASE_STORE_FILE')
+            if (releaseStoreFile) {
+                storeFile file(releaseStoreFile)
+                storePassword findProperty('BABY_CHECK_RELEASE_STORE_PASSWORD')
+                keyAlias findProperty('BABY_CHECK_RELEASE_KEY_ALIAS')
+                keyPassword findProperty('BABY_CHECK_RELEASE_KEY_PASSWORD')
+            }
+        }
     }
     buildTypes {
         debug {
-            signingConfig signingConfigs.debug
+            signingConfig signingConfigs.release
         }
         release {
             // Caution! In production, you need to generate your own keystore file.
