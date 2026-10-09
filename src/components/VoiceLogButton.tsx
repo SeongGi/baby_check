@@ -12,9 +12,10 @@ type Props = {
   onAutoVoiceEnabledChange: (enabled: boolean) => Promise<void>;
   autoStartRequest: number;
   onAutoStartHandled: (request: number) => void;
+  onRecognitionActivity: (active: boolean) => void;
 };
 
-export const VoiceLogButton: React.FC<Props> = ({ logs, onAddLog, onUpdateLog, autoVoiceEnabled, onAutoVoiceEnabledChange, autoStartRequest, onAutoStartHandled }) => {
+export const VoiceLogButton: React.FC<Props> = ({ logs, onAddLog, onUpdateLog, autoVoiceEnabled, onAutoVoiceEnabledChange, autoStartRequest, onAutoStartHandled, onRecognitionActivity }) => {
   const [listening, setListening] = useState(false);
   const [busy, setBusy] = useState(false);
   const [transcript, setTranscript] = useState('');
@@ -70,7 +71,7 @@ export const VoiceLogButton: React.FC<Props> = ({ logs, onAddLog, onUpdateLog, a
     setListening(true);
     setStatusMessage(null);
   });
-  useSpeechRecognitionEvent('end', () => { listeningRef.current = false; setListening(false); starting.current = false; setAttemptRevision(revision => revision + 1); });
+  useSpeechRecognitionEvent('end', () => { onRecognitionActivity(false); listeningRef.current = false; setListening(false); starting.current = false; setAttemptRevision(revision => revision + 1); });
   useSpeechRecognitionEvent('result', event => {
     if (!event.isFinal || interrupted.current) return;
     const recognized = event.results[0]?.transcript?.trim() || '';
@@ -79,6 +80,7 @@ export const VoiceLogButton: React.FC<Props> = ({ logs, onAddLog, onUpdateLog, a
     setSpokenAt(Date.now());
   });
   useSpeechRecognitionEvent('error', event => {
+    onRecognitionActivity(false);
     setListening(false);
     starting.current = false;
     setAttemptRevision(revision => revision + 1);
@@ -92,6 +94,7 @@ export const VoiceLogButton: React.FC<Props> = ({ logs, onAddLog, onUpdateLog, a
   const start = async (): Promise<'handled' | 'deferred'> => {
     if (starting.current || listeningRef.current || AppState.currentState !== 'active') return 'deferred';
     starting.current = true;
+    onRecognitionActivity(true);
     interrupted.current = false;
     const generation = ++startGeneration.current;
     setTranscript('');
@@ -104,11 +107,13 @@ export const VoiceLogButton: React.FC<Props> = ({ logs, onAddLog, onUpdateLog, a
         setStatusMessage(message);
         Alert.alert('음성 인식 서비스 없음', message);
         starting.current = false;
+        onRecognitionActivity(false);
         return 'handled';
       }
       const permission = await ExpoSpeechRecognitionModule.requestPermissionsAsync();
       if (!mounted.current || interrupted.current || generation !== startGeneration.current || AppState.currentState !== 'active') {
         if (generation === startGeneration.current) starting.current = false;
+        onRecognitionActivity(false);
         return 'deferred';
       }
       if (!permission.granted) {
@@ -116,6 +121,7 @@ export const VoiceLogButton: React.FC<Props> = ({ logs, onAddLog, onUpdateLog, a
         setStatusMessage(message);
         Alert.alert('마이크 권한 필요', message);
         starting.current = false;
+        onRecognitionActivity(false);
         return 'handled';
       }
       ExpoSpeechRecognitionModule.start({ lang: 'ko-KR', interimResults: false, continuous: false });
@@ -123,10 +129,12 @@ export const VoiceLogButton: React.FC<Props> = ({ logs, onAddLog, onUpdateLog, a
     } catch {
       if (!mounted.current || interrupted.current || generation !== startGeneration.current || AppState.currentState !== 'active') {
         if (generation === startGeneration.current) starting.current = false;
+        onRecognitionActivity(false);
         return 'deferred';
       }
       if (generation === startGeneration.current) {
         starting.current = false;
+        onRecognitionActivity(false);
         if (mounted.current) {
           const message = '이 기기에서 음성 인식을 시작하지 못했습니다. 마이크 권한과 음성 인식 서비스를 확인해 주세요.';
           setStatusMessage(message);
@@ -151,10 +159,14 @@ export const VoiceLogButton: React.FC<Props> = ({ logs, onAddLog, onUpdateLog, a
       completeAutoRequest(autoStartRequest);
       return;
     }
-    if (starting.current) return;
-    void start().then(result => {
-      if (result === 'handled' && mounted.current) completeAutoRequest(autoStartRequest);
-    });
+    if (starting.current) {
+      completeAutoRequest(autoStartRequest);
+      return;
+    }
+    // Consume the automatic request before opening the system recognizer. Its UI can
+    // briefly change AppState, but that must never retry the same request.
+    completeAutoRequest(autoStartRequest);
+    void start();
   }, [autoStartRequest, autoVoiceEnabled, foregroundRevision, attemptRevision]);
 
   const description = command?.kind === 'formula'
