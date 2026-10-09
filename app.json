@@ -2,7 +2,7 @@
   "expo": {
     "name": "아기기록",
     "slug": "baby_check",
-    "version": "1.7.3",
+    "version": "1.7.4",
     "scheme": "babycheck",
     "orientation": "portrait",
     "icon": "./assets/icon.png",
@@ -26,7 +26,7 @@
     },
     "android": {
       "package": "com.seonggi.babycheck",
-      "versionCode": 21,
+      "versionCode": 22,
       "adaptiveIcon": {
         "backgroundColor": "#E6F4FE",
         "foregroundImage": "./assets/android-icon-foreground.png",
