@@ -52,6 +52,7 @@ function MainApp() {
   const [voiceStartRequest, setVoiceStartRequest] = useState(0);
   const [foregroundRevision, setForegroundRevision] = useState(0);
   const consumedVoiceCandidateRef = useRef(0);
+  const suppressAutoVoiceUntilRef = useRef(0);
   const previousAppStateRef = useRef(AppState.currentState);
   const [refreshing, setRefreshing] = useState(false);
   const [syncState, setSyncState] = useState<SyncState>('idle');
@@ -82,7 +83,7 @@ function MainApp() {
       const previous = previousAppStateRef.current;
       previousAppStateRef.current = state;
       if (state === 'active') setForegroundRevision(revision => revision + 1);
-      if (previous !== 'active' && state === 'active' && activeScreenRef.current === 'dashboard') {
+      if (previous !== 'active' && state === 'active' && activeScreenRef.current === 'dashboard' && Date.now() >= suppressAutoVoiceUntilRef.current) {
         setVoiceLaunchCandidate(candidate => candidate + 1);
       }
     });
@@ -718,6 +719,10 @@ function MainApp() {
             onAutoVoiceEnabledChange={handleAutoVoiceEnabledChange}
             autoStartVoiceRequest={voiceStartRequest}
             onAutoStartVoiceHandled={request => setVoiceStartRequest(current => current === request ? 0 : current)}
+            onVoiceRecognitionActivity={active => {
+              // The system recognizer may briefly background this Activity. Its return is not a new app launch.
+              suppressAutoVoiceUntilRef.current = Date.now() + (active ? 60_000 : 5_000);
+            }}
             onNavigate={setActiveScreen}
             refreshing={refreshing}
             onRefresh={profile.syncKey ? handleRefresh : undefined}

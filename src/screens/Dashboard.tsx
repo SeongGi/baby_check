@@ -110,6 +110,7 @@ interface DashboardProps {
   onAutoVoiceEnabledChange: (enabled: boolean) => Promise<void>;
   autoStartVoiceRequest: number;
   onAutoStartVoiceHandled: (request: number) => void;
+  onVoiceRecognitionActivity: (active: boolean) => void;
   onNavigate: (screen: 'dashboard' | 'formula' | 'diaper' | 'bath' | 'weight' | 'statistics' | 'profile') => void;
   refreshing?: boolean;
   onRefresh?: () => void;
@@ -126,6 +127,7 @@ export const Dashboard: React.FC<DashboardProps> = ({
   onAutoVoiceEnabledChange,
   autoStartVoiceRequest,
   onAutoStartVoiceHandled,
+  onVoiceRecognitionActivity,
   onNavigate,
   refreshing,
   onRefresh,
@@ -579,6 +581,7 @@ export const Dashboard: React.FC<DashboardProps> = ({
           onAutoVoiceEnabledChange={onAutoVoiceEnabledChange}
           autoStartRequest={autoStartVoiceRequest}
           onAutoStartHandled={onAutoStartVoiceHandled}
+          onRecognitionActivity={onVoiceRecognitionActivity}
         />
         <View style={styles.quickActionsContainer}>
           <TouchableOpacity 
