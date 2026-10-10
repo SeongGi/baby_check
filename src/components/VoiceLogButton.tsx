@@ -1,8 +1,9 @@
 import React, { useEffect, useRef, useState } from 'react';
-import { Alert, AppState, StyleSheet, Text, TouchableOpacity, View } from 'react-native';
+import { AccessibilityInfo, Alert, AppState, Platform, StyleSheet, Text, TouchableOpacity, View } from 'react-native';
 import { ExpoSpeechRecognitionModule, useSpeechRecognitionEvent } from 'expo-speech-recognition';
 import { BabyLogEntry } from '../types';
 import { parseVoiceCommand, VoiceCommand } from '../utils/voiceCommand';
+import { getVoiceStatusText, VoicePhase } from '../utils/voiceFeedback';
 
 type Props = {
   logs: BabyLogEntry[];
@@ -16,6 +17,7 @@ type Props = {
 };
 
 export const VoiceLogButton: React.FC<Props> = ({ logs, onAddLog, onUpdateLog, autoVoiceEnabled, onAutoVoiceEnabledChange, autoStartRequest, onAutoStartHandled, onRecognitionActivity }) => {
+  const [phase, setPhase] = useState<VoicePhase>('idle');
   const [listening, setListening] = useState(false);
   const [busy, setBusy] = useState(false);
   const [transcript, setTranscript] = useState('');
@@ -28,6 +30,11 @@ export const VoiceLogButton: React.FC<Props> = ({ logs, onAddLog, onUpdateLog, a
   const mounted = useRef(true);
   const interrupted = useRef(false);
   const listeningRef = useRef(false);
+  const nativeSessionOpenRef = useRef(false);
+  const terminalEventRef = useRef<'none' | 'result' | 'error'>('none');
+  const permissionPromptRef = useRef(false);
+  const resumeAfterPermissionRef = useRef(false);
+  const processingTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const startGeneration = useRef(0);
   const handledAutoRequestRef = useRef(0);
   const savePendingRef = useRef(false);
@@ -47,10 +54,20 @@ export const VoiceLogButton: React.FC<Props> = ({ logs, onAddLog, onUpdateLog, a
         setForegroundRevision(revision => revision + 1);
         return;
       }
-      interrupted.current = true;
-      startGeneration.current += 1;
-      if (starting.current || listeningRef.current) ExpoSpeechRecognitionModule.abort();
+      if (state !== 'background' || permissionPromptRef.current) return;
+      const hasFinalResult = terminalEventRef.current === 'result';
+      if (!hasFinalResult) {
+        interrupted.current = true;
+        startGeneration.current += 1;
+      }
+      if (nativeSessionOpenRef.current) ExpoSpeechRecognitionModule.abort();
       starting.current = false;
+      if (nativeSessionOpenRef.current && !hasFinalResult) {
+        terminalEventRef.current = 'error';
+        setPhase('error');
+        setStatusMessage('앱이 뒤로 이동해 음성 입력을 중단했어요. 홈에서 다시 눌러 주세요.');
+      }
+      onRecognitionActivity(false);
       setAttemptRevision(revision => revision + 1);
     });
     return () => {
@@ -58,60 +75,104 @@ export const VoiceLogButton: React.FC<Props> = ({ logs, onAddLog, onUpdateLog, a
       interrupted.current = true;
       startGeneration.current += 1;
       subscription.remove();
-      if (starting.current || listeningRef.current) ExpoSpeechRecognitionModule.abort();
+      if (processingTimerRef.current) clearTimeout(processingTimerRef.current);
+      if (nativeSessionOpenRef.current) ExpoSpeechRecognitionModule.abort();
     };
   }, []);
 
   useSpeechRecognitionEvent('start', () => {
-    if (interrupted.current || AppState.currentState !== 'active') {
+    if (!nativeSessionOpenRef.current) return;
+    if (interrupted.current || AppState.currentState === 'background') {
       ExpoSpeechRecognitionModule.abort();
       return;
     }
     listeningRef.current = true;
     setListening(true);
+    setPhase('listening');
     setStatusMessage(null);
   });
-  useSpeechRecognitionEvent('end', () => { onRecognitionActivity(false); listeningRef.current = false; setListening(false); starting.current = false; setAttemptRevision(revision => revision + 1); });
+  useSpeechRecognitionEvent('end', () => {
+    if (!nativeSessionOpenRef.current) return;
+    nativeSessionOpenRef.current = false;
+    onRecognitionActivity(false);
+    listeningRef.current = false;
+    setListening(false);
+    starting.current = false;
+    if (terminalEventRef.current === 'none') {
+      setPhase('error');
+      setStatusMessage('말소리를 듣지 못했어요. 음성 버튼을 다시 눌러 주세요.');
+    }
+    setAttemptRevision(revision => revision + 1);
+  });
   useSpeechRecognitionEvent('result', event => {
-    if (!event.isFinal || interrupted.current) return;
+    if (!event.isFinal || interrupted.current || !nativeSessionOpenRef.current || terminalEventRef.current !== 'none') return;
+    terminalEventRef.current = 'result';
     const recognized = event.results[0]?.transcript?.trim() || '';
+    const parsed = parseVoiceCommand(recognized);
     setTranscript(recognized);
-    setCommand(parseVoiceCommand(recognized));
+    setCommand(parsed);
     setSpokenAt(Date.now());
+    setPhase('processing');
+    setStatusMessage('명령을 처리 중이에요…');
+    const generation = startGeneration.current;
+    processingTimerRef.current = setTimeout(() => {
+      processingTimerRef.current = null;
+      if (!mounted.current || generation !== startGeneration.current) return;
+      setPhase(parsed.kind === 'unknown' ? 'error' : 'ready');
+      setStatusMessage(parsed.kind === 'unknown' ? '명령을 이해하지 못했어요. 아래 예시처럼 다시 말해 주세요.' : null);
+    }, 300);
   });
   useSpeechRecognitionEvent('error', event => {
+    if (!nativeSessionOpenRef.current || terminalEventRef.current !== 'none') return;
+    terminalEventRef.current = 'error';
     onRecognitionActivity(false);
     setListening(false);
     starting.current = false;
+    setPhase('error');
     setAttemptRevision(revision => revision + 1);
-    if (event.error !== 'aborted') {
-      const message = `음성 인식 오류 (${event.error}): ${event.message || '기기의 음성 인식 서비스를 확인해 주세요.'}`;
-      setStatusMessage(message);
-      Alert.alert('음성 인식 실패', message);
-    }
+    setStatusMessage(event.error === 'aborted'
+      ? '음성 입력이 중단됐어요. 다시 눌러 주세요.'
+      : event.error === 'no-speech' || event.error === 'speech-timeout'
+        ? '말소리를 듣지 못했어요. 음성 버튼을 다시 눌러 주세요.'
+        : `음성 인식 오류 (${event.error}): ${event.message || '기기의 음성 인식 서비스를 확인해 주세요.'}`);
   });
 
   const start = async (): Promise<'handled' | 'deferred'> => {
-    if (starting.current || listeningRef.current || AppState.currentState !== 'active') return 'deferred';
+    if (savePendingRef.current || starting.current || nativeSessionOpenRef.current) return 'deferred';
+    if (AppState.currentState !== 'active') {
+      setPhase('error');
+      setStatusMessage('앱이 화면에 있을 때 음성 버튼을 다시 눌러 주세요.');
+      return 'deferred';
+    }
     starting.current = true;
     onRecognitionActivity(true);
     interrupted.current = false;
     const generation = ++startGeneration.current;
+    if (processingTimerRef.current) clearTimeout(processingTimerRef.current);
+    processingTimerRef.current = null;
+    terminalEventRef.current = 'none';
+    resumeAfterPermissionRef.current = false;
+    setPhase('starting');
     setTranscript('');
     setCommand(null);
     setSpokenAt(null);
-    setStatusMessage(null);
+    setStatusMessage('음성 인식을 준비하고 있어요…');
     try {
       if (!ExpoSpeechRecognitionModule.isRecognitionAvailable()) {
         const message = '기기의 음성 인식 서비스를 사용할 수 없습니다. Google 음성 인식 서비스가 설치·활성화되어 있는지 확인해 주세요.';
         setStatusMessage(message);
-        Alert.alert('음성 인식 서비스 없음', message);
+        setPhase('error');
         starting.current = false;
         onRecognitionActivity(false);
         return 'handled';
       }
-      const permission = await ExpoSpeechRecognitionModule.requestPermissionsAsync();
-      if (!mounted.current || interrupted.current || generation !== startGeneration.current || AppState.currentState !== 'active') {
+      let permission = await ExpoSpeechRecognitionModule.getPermissionsAsync();
+      if (!permission.granted) {
+        permissionPromptRef.current = true;
+        permission = await ExpoSpeechRecognitionModule.requestPermissionsAsync();
+        permissionPromptRef.current = false;
+      }
+      if (!mounted.current || interrupted.current || generation !== startGeneration.current) {
         if (generation === startGeneration.current) starting.current = false;
         onRecognitionActivity(false);
         return 'deferred';
@@ -119,26 +180,43 @@ export const VoiceLogButton: React.FC<Props> = ({ logs, onAddLog, onUpdateLog, a
       if (!permission.granted) {
         const message = '음성 기록을 사용하려면 앱 설정에서 마이크 권한을 허용해 주세요.';
         setStatusMessage(message);
-        Alert.alert('마이크 권한 필요', message);
+        setPhase('error');
         starting.current = false;
         onRecognitionActivity(false);
         return 'handled';
       }
+      if (AppState.currentState !== 'active') {
+        starting.current = false;
+        resumeAfterPermissionRef.current = true;
+        setStatusMessage('앱으로 돌아오면 음성 입력을 시작할게요…');
+        onRecognitionActivity(false);
+        return 'deferred';
+      }
+      nativeSessionOpenRef.current = true;
       ExpoSpeechRecognitionModule.start({ lang: 'ko-KR', interimResults: false, continuous: false });
       return 'handled';
     } catch {
-      if (!mounted.current || interrupted.current || generation !== startGeneration.current || AppState.currentState !== 'active') {
+      permissionPromptRef.current = false;
+      if (!mounted.current || interrupted.current || generation !== startGeneration.current) {
         if (generation === startGeneration.current) starting.current = false;
         onRecognitionActivity(false);
         return 'deferred';
       }
+      if (AppState.currentState !== 'active') {
+        starting.current = false;
+        resumeAfterPermissionRef.current = true;
+        setStatusMessage('앱으로 돌아오면 음성 입력을 다시 시도할게요…');
+        onRecognitionActivity(false);
+        return 'deferred';
+      }
       if (generation === startGeneration.current) {
+        nativeSessionOpenRef.current = false;
         starting.current = false;
         onRecognitionActivity(false);
         if (mounted.current) {
           const message = '이 기기에서 음성 인식을 시작하지 못했습니다. 마이크 권한과 음성 인식 서비스를 확인해 주세요.';
           setStatusMessage(message);
-          Alert.alert('음성 인식 불가', message);
+          setPhase('error');
         }
       }
       return 'handled';
@@ -148,14 +226,21 @@ export const VoiceLogButton: React.FC<Props> = ({ logs, onAddLog, onUpdateLog, a
   };
 
   useEffect(() => {
+    if (!resumeAfterPermissionRef.current || AppState.currentState !== 'active') return;
+    resumeAfterPermissionRef.current = false;
+    void start();
+  }, [foregroundRevision]);
+
+  useEffect(() => {
     if (!autoStartRequest) return;
     if (handledAutoRequestRef.current === autoStartRequest) return;
+    if (savePendingRef.current) return;
     if (!autoVoiceEnabled || transcript || command) {
       completeAutoRequest(autoStartRequest);
       return;
     }
     if (!mounted.current || AppState.currentState !== 'active') return;
-    if (listeningRef.current) {
+    if (nativeSessionOpenRef.current) {
       completeAutoRequest(autoStartRequest);
       return;
     }
@@ -167,7 +252,7 @@ export const VoiceLogButton: React.FC<Props> = ({ logs, onAddLog, onUpdateLog, a
     // briefly change AppState, but that must never retry the same request.
     completeAutoRequest(autoStartRequest);
     void start();
-  }, [autoStartRequest, autoVoiceEnabled, foregroundRevision, attemptRevision]);
+  }, [autoStartRequest, autoVoiceEnabled, foregroundRevision, attemptRevision, busy]);
 
   const description = command?.kind === 'formula'
     ? `${command.feedingType === 'breast' ? '모유' : command.feedingType === 'mixed' ? '혼합 수유' : '분유'} ${command.amount}ml 기록`
@@ -184,6 +269,12 @@ export const VoiceLogButton: React.FC<Props> = ({ logs, onAddLog, onUpdateLog, a
     : null;
 
   const editCommand = (patch: Partial<VoiceCommand>) => setCommand(current => current && current.kind !== 'unknown' ? { ...current, ...patch } as VoiceCommand : current);
+
+  const voiceStatusText = getVoiceStatusText(phase, statusMessage);
+
+  useEffect(() => {
+    if (Platform.OS === 'ios' && phase !== 'idle') AccessibilityInfo.announceForAccessibility(voiceStatusText);
+  }, [phase, voiceStatusText]);
 
   const save = async () => {
     if (!command || command.kind === 'unknown' || spokenAt === null || savePendingRef.current) return;
@@ -215,6 +306,8 @@ export const VoiceLogButton: React.FC<Props> = ({ logs, onAddLog, onUpdateLog, a
       setTranscript('');
       setCommand(null);
       setSpokenAt(null);
+      setPhase('idle');
+      setStatusMessage(null);
       Alert.alert('기록 완료', description || '저장되었습니다.');
     } catch {
       Alert.alert('저장 실패', '기록을 저장하지 못했습니다. 다시 시도해 주세요.');
@@ -228,14 +321,20 @@ export const VoiceLogButton: React.FC<Props> = ({ logs, onAddLog, onUpdateLog, a
     <View style={styles.container}>
       <TouchableOpacity
         style={styles.button}
-        onPress={listening ? () => ExpoSpeechRecognitionModule.stop() : () => {
+        disabled={busy || phase === 'starting' || phase === 'processing'}
+        onPress={listening ? () => {
+          setPhase('processing');
+          setStatusMessage('명령을 처리 중이에요…');
+          ExpoSpeechRecognitionModule.stop();
+        } : () => {
           if (autoStartRequest) completeAutoRequest(autoStartRequest);
           void start();
         }}
         accessibilityLabel={listening ? '음성 입력 끝내기' : '음성으로 기록하기'}
       >
-        <Text style={styles.buttonText}>{listening ? '듣는 중… 탭하여 끝내기' : '🎤 음성으로 기록하기'}</Text>
+        <Text style={styles.buttonText}>{phase === 'starting' ? '마이크 준비 중…' : listening ? '듣고 있어요… 탭하여 끝내기' : phase === 'processing' ? '명령 처리 중…' : '🎤 음성으로 기록하기'}</Text>
       </TouchableOpacity>
+      <Text accessibilityLiveRegion="polite" style={styles.voiceStatus}>{voiceStatusText}</Text>
       <TouchableOpacity
         style={styles.autoSetting}
         onPress={() => void onAutoVoiceEnabledChange(!autoVoiceEnabled)}
@@ -248,10 +347,9 @@ export const VoiceLogButton: React.FC<Props> = ({ logs, onAddLog, onUpdateLog, a
       </TouchableOpacity>
       <Text style={styles.autoHelp}>Google이 아기기록을 열어 주거나 평소 앱을 열 때 작동해요. 기록은 확인 후 저장됩니다.</Text>
       <Text style={styles.privacy}>음성은 기기의 음성 인식 서비스에서 처리합니다. 앱은 녹음 파일을 저장하지 않습니다.</Text>
-      {statusMessage ? <Text style={styles.help}>{statusMessage}</Text> : null}
       {transcript ? <Text style={styles.transcript}>인식: {transcript}</Text> : null}
       {command?.kind === 'unknown' ? <Text style={styles.help}>명령을 이해하지 못했어요. “분유 120ml 먹었어”, “소변 봤어”, “대변 봤어”, “목욕 10분”, “몸무게 5.2kg”, “터미타임 시작”처럼 말해 주세요.</Text> : null}
-      {description ? (
+      {phase === 'ready' && description ? (
         <View style={styles.confirm}>
           <Text style={styles.description}>{description}</Text>
           {command?.kind === 'bath' ? <View style={styles.editRow}>{[5, 10, 15, 20].map(minutes => <TouchableOpacity key={minutes} style={styles.editButton} onPress={() => editCommand({ durationMinutes: minutes } as Partial<VoiceCommand>)}><Text>{minutes}분</Text></TouchableOpacity>)}</View> : null}
@@ -265,7 +363,7 @@ export const VoiceLogButton: React.FC<Props> = ({ logs, onAddLog, onUpdateLog, a
             <TouchableOpacity style={styles.editButton} onPress={() => editCommand({ amount: !command.amount ? 'medium' : command.amount === 'small' ? 'medium' : command.amount === 'medium' ? 'large' : 'small' } as Partial<VoiceCommand>)}><Text>양 선택</Text></TouchableOpacity>
           </View> : null}
           <TouchableOpacity onPress={save} disabled={busy} style={styles.save}><Text style={styles.saveText}>{busy ? '저장 중…' : '기록 확인'}</Text></TouchableOpacity>
-          <TouchableOpacity onPress={() => { setTranscript(''); setCommand(null); setSpokenAt(null); }}><Text style={styles.cancel}>취소</Text></TouchableOpacity>
+          <TouchableOpacity onPress={() => { setTranscript(''); setCommand(null); setSpokenAt(null); setPhase('idle'); setStatusMessage(null); }}><Text style={styles.cancel}>취소</Text></TouchableOpacity>
         </View>
       ) : null}
     </View>
@@ -276,6 +374,7 @@ const styles = StyleSheet.create({
   container: { marginVertical: 12, padding: 14, backgroundColor: '#F3F6FF', borderRadius: 16 },
   button: { backgroundColor: '#4569A8', padding: 14, borderRadius: 12, alignItems: 'center' },
   buttonText: { color: '#fff', fontWeight: '700', fontSize: 16 },
+  voiceStatus: { marginTop: 10, color: '#243F72', fontSize: 13, fontWeight: '600' },
   autoSetting: { marginTop: 12, flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', paddingVertical: 8 },
   autoSettingText: { color: '#17243D', fontSize: 14, fontWeight: '600' },
   autoSettingValue: { color: '#4569A8', fontSize: 14, fontWeight: '700' },
