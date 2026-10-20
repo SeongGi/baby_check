@@ -30,8 +30,16 @@ export const LogWeight: React.FC<LogWeightProps> = ({ onAddLog, onNavigate }) =>
   };
 
   return (
-    <KeyboardAvoidingView style={styles.container} behavior={Platform.OS === 'ios' ? 'padding' : undefined}>
-      <ScrollView contentContainerStyle={styles.content} keyboardShouldPersistTaps="handled">
+    <KeyboardAvoidingView 
+      style={styles.container} 
+      behavior={Platform.OS === 'ios' ? 'padding' : undefined}
+      keyboardVerticalOffset={Platform.OS === 'ios' ? 64 : 0}
+    >
+      <ScrollView 
+        contentContainerStyle={styles.content} 
+        keyboardShouldPersistTaps="handled"
+        keyboardDismissMode="on-drag"
+      >
         <View style={styles.header}>
           <TouchableOpacity onPress={() => onNavigate('dashboard')} style={styles.backButton}><Text style={styles.backText}>‹</Text></TouchableOpacity>
           <Text style={styles.title}>체중 기록</Text><View style={styles.backButton} />
@@ -56,7 +64,7 @@ export const LogWeight: React.FC<LogWeightProps> = ({ onAddLog, onNavigate }) =>
 
 const styles = StyleSheet.create({
   container: { flex: 1, backgroundColor: COLORS.background },
-  content: { padding: 20, paddingBottom: 40 },
+  content: { padding: 20, paddingBottom: 140 },
   header: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', marginBottom: 20 },
   backButton: { width: 44, height: 44, justifyContent: 'center' },
   backText: { fontSize: 36, color: COLORS.text },
