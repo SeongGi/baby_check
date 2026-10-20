@@ -93,11 +93,14 @@ export const LogFormula: React.FC<LogFormulaProps> = ({ onAddLog, onNavigate }) 
     <KeyboardAvoidingView 
       style={styles.keyboardView}
       behavior={Platform.OS === 'ios' ? 'padding' : undefined}
+      keyboardVerticalOffset={Platform.OS === 'ios' ? 64 : 0}
     >
       <ScrollView 
         style={styles.container} 
         contentContainerStyle={styles.contentContainer}
         scrollEnabled={scrollEnabled}
+        keyboardShouldPersistTaps="handled"
+        keyboardDismissMode="on-drag"
       >
         {/* Header Title */}
         <View style={styles.header}>
@@ -253,7 +256,7 @@ const styles = StyleSheet.create({
   },
   contentContainer: {
     padding: 20,
-    paddingBottom: 40,
+    paddingBottom: 140,
   },
   header: {
     flexDirection: 'row',

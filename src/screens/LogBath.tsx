@@ -50,8 +50,17 @@ export const LogBath: React.FC<LogBathProps> = ({ onAddLog, onNavigate }) => {
   };
 
   return (
-    <KeyboardAvoidingView style={styles.keyboardView} behavior={Platform.OS === 'ios' ? 'padding' : undefined}>
-      <ScrollView style={styles.container} contentContainerStyle={styles.contentContainer}>
+    <KeyboardAvoidingView 
+      style={styles.keyboardView} 
+      behavior={Platform.OS === 'ios' ? 'padding' : undefined}
+      keyboardVerticalOffset={Platform.OS === 'ios' ? 64 : 0}
+    >
+      <ScrollView 
+        style={styles.container} 
+        contentContainerStyle={styles.contentContainer}
+        keyboardShouldPersistTaps="handled"
+        keyboardDismissMode="on-drag"
+      >
         <View style={styles.header}>
           <TouchableOpacity onPress={() => onNavigate('dashboard')} style={styles.backButton} accessibilityLabel="홈으로 돌아가기">
             <Text style={styles.backButtonText}>← 뒤로</Text>
@@ -113,7 +122,7 @@ export const LogBath: React.FC<LogBathProps> = ({ onAddLog, onNavigate }) => {
 const styles = StyleSheet.create({
   keyboardView: { flex: 1, backgroundColor: COLORS.background },
   container: { flex: 1 },
-  contentContainer: { padding: 20, paddingBottom: 40 },
+  contentContainer: { padding: 20, paddingBottom: 140 },
   header: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', marginBottom: 20 },
   backButton: { paddingVertical: 10, paddingHorizontal: 8, minHeight: 44, justifyContent: 'center' },
   backButtonText: { fontSize: 15, fontWeight: 'bold', color: COLORS.bath },
