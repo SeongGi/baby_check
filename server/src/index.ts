@@ -30,6 +30,10 @@ const CORS_HEADERS = {
   'Access-Control-Allow-Headers': 'Content-Type, Authorization, X-Client-Id',
 };
 
+const MAX_PAYLOAD_BYTES = 1_048_576; // 1MB
+const MAX_BATCH_ITEMS = 500;
+const D1_BATCH_CHUNK_SIZE = 100;
+
 function jsonResponse(data: any, status = 200): Response {
   return new Response(JSON.stringify(data), {
     status,
@@ -53,12 +57,13 @@ async function sha256Hex(message: string): Promise<string> {
 
 async function getAuthContext(request: Request): Promise<{ familyId: string; clientId: string } | null> {
   const authHeader = request.headers.get('Authorization') || '';
-  const match = authHeader.match(/^Bearer\s+([a-fA-F0-9]{32})$/);
+  const match = authHeader.match(/^Bearer\s+([a-zA-Z0-9_-]{16,64})$/i);
   if (!match) return null;
 
   const syncKey = match[1].toLowerCase();
   const familyId = await sha256Hex(`babycheck:family:v2:${syncKey}`);
-  const clientId = request.headers.get('X-Client-Id')?.trim() || 'unknown-client';
+  const rawClientId = request.headers.get('X-Client-Id')?.trim() || 'unknown-client';
+  const clientId = rawClientId.replace(/[^a-zA-Z0-9_-]/g, '').slice(0, 64) || 'unknown-client';
 
   return { familyId, clientId };
 }
@@ -67,6 +72,11 @@ export default {
   async fetch(request: Request, env: Env): Promise<Response> {
     if (request.method === 'OPTIONS') {
       return new Response(null, { status: 204, headers: CORS_HEADERS });
+    }
+
+    const contentLength = Number(request.headers.get('content-length')) || 0;
+    if (contentLength > MAX_PAYLOAD_BYTES) {
+      return errorResponse('payload_too_large', 413);
     }
 
     const url = new URL(request.url);
@@ -200,7 +210,7 @@ export default {
         return jsonResponse({ ok: true });
       }
 
-      // 6. POST /api/family/delete (영구 삭제)
+      // 6. POST /api/family/delete (영구 삭제: 냉각 기간 검증 강제)
       if (request.method === 'POST' && path === '/api/family/delete') {
         const family = await env.DB.prepare('SELECT * FROM families WHERE id = ?')
           .bind(familyId)
@@ -208,6 +218,11 @@ export default {
 
         if (!family) {
           return errorResponse('family_not_found', 404);
+        }
+
+        const now = Date.now();
+        if (!family.deletion_ready_at || family.deletion_ready_at > now) {
+          return errorResponse('cooling_period_active', 400);
         }
 
         // 배치로 완전 삭제
@@ -230,6 +245,13 @@ export default {
           pushDeletedIds?: string[];
         };
 
+        const pushLogs = Array.isArray(body.pushLogs) ? body.pushLogs : [];
+        const pushDeletedIds = Array.isArray(body.pushDeletedIds) ? body.pushDeletedIds : [];
+
+        if (pushLogs.length + pushDeletedIds.length > MAX_BATCH_ITEMS) {
+          return errorResponse('batch_size_exceeded', 413);
+        }
+
         const family = await env.DB.prepare('SELECT * FROM families WHERE id = ?')
           .bind(familyId)
           .first<FamilyRow>();
@@ -240,8 +262,6 @@ export default {
 
         const serverTime = Date.now();
         const lastSyncedAt = Number(body.lastSyncedAt) || 0;
-        const pushLogs = Array.isArray(body.pushLogs) ? body.pushLogs : [];
-        const pushDeletedIds = Array.isArray(body.pushDeletedIds) ? body.pushDeletedIds : [];
         const pushProfile = body.pushProfile || null;
 
         const writeStatements: D1PreparedStatement[] = [];
@@ -290,7 +310,7 @@ export default {
         };
 
         if (pushProfile && typeof pushProfile.sharedUpdatedAt === 'number') {
-          if (pushProfile.sharedUpdatedAt > (family.profile_updated_at || 0)) {
+          if (pushProfile.sharedUpdatedAt > (family.profile_updated_at || 0) || family.profile_updated_at === 0) {
             const nextName = pushProfile.name ?? family.shared_name;
             const nextBirthDate = pushProfile.birthDate ?? family.shared_birth_date;
             const nextBirthWeight = pushProfile.birthWeight ?? family.shared_birth_weight;
@@ -326,23 +346,27 @@ export default {
           }
         }
 
-        // 4) 변경 발생 시 family updated_at 및 last_client_id 갱신
+        // 4) 변경 발생 시 D1 배치 분할(100개 단위) 및 family updated_at / last_client_id 갱신
         if (hasWrites) {
           writeStatements.push(
             env.DB.prepare(
               `UPDATE families SET updated_at = ?1, last_client_id = ?2 WHERE id = ?3`
             ).bind(serverTime, clientId, familyId)
           );
-          await env.DB.batch(writeStatements);
+
+          for (let i = 0; i < writeStatements.length; i += D1_BATCH_CHUNK_SIZE) {
+            await env.DB.batch(writeStatements.slice(i, i + D1_BATCH_CHUNK_SIZE));
+          }
         }
 
-        // 5) 증분 풀 (Pull)
+        // 5) 증분 풀 (Pull) - 직전 동기화 이후의 새 변경만 조회 (updated_at > lastSyncedAt)
         let queryStr = '';
         let queryParams: any[] = [];
 
         if (lastSyncedAt === 0) {
-          // 전체 풀: 활성 로그만 조회
-          queryStr = 'SELECT raw_json, deleted_at FROM logs WHERE family_id = ?1 AND deleted_at IS NULL ORDER BY client_updated_at ASC';
+          // 전체 풀: 활성 로그와 삭제 표식(tombstone) 모두 조회하여
+          // 오프라인 클라이언트나 백업 복원 시 지워진 기록이 부활하는 것을 원천 차단
+          queryStr = 'SELECT raw_json, deleted_at, log_id FROM logs WHERE family_id = ?1 ORDER BY client_updated_at ASC';
           queryParams = [familyId];
         } else {
           // 증분 풀: lastSyncedAt 이후 갱신된 행 조회
@@ -374,18 +398,21 @@ export default {
           }
         }
 
+        // 6) 밀린 기록(supersededIds) 판별
         const supersededIds: string[] = [];
         for (const log of pushLogs) {
           if (!log || typeof log.id !== 'string') continue;
           const clientUpdatedAt = Number(log.updatedAt || log.timestamp) || serverTime;
+          if (remoteDeletedIds.includes(log.id)) {
+            supersededIds.push(log.id);
+            continue;
+          }
           const matchingRemote = remoteLogs.find(r => r.id === log.id);
           if (matchingRemote) {
             const remoteClientUpdated = Number(matchingRemote.updatedAt || matchingRemote.timestamp) || 0;
             if (remoteClientUpdated > clientUpdatedAt) {
               supersededIds.push(log.id);
             }
-          } else if (remoteDeletedIds.includes(log.id)) {
-            supersededIds.push(log.id);
           }
         }
 

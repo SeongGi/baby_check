@@ -78,7 +78,11 @@ globalThis.fetch = async function fakeFetch(url, options = {}) {
 
   // 3. POST /api/family/sync
   if (pathname === '/api/family/sync' && method === 'POST') {
-    if (state.beforeRead) await state.beforeRead();
+    if (state.beforeRead) {
+      const hook = state.beforeRead;
+      state.beforeRead = null;
+      await hook();
+    }
     if (!state.docs.has(familyPath)) {
       return makeJsonResponse({ ok: false, error: 'family_not_found' }, 404);
     }
@@ -123,7 +127,7 @@ globalThis.fetch = async function fakeFetch(url, options = {}) {
     // Push profile
     if (pushProfile && typeof pushProfile.sharedUpdatedAt === 'number') {
       const fam = state.docs.get(familyPath);
-      if (pushProfile.sharedUpdatedAt > (fam?.profile?.sharedUpdatedAt || 0)) {
+      if (pushProfile.sharedUpdatedAt > (fam?.profile?.sharedUpdatedAt || 0) || (fam?.profile?.sharedUpdatedAt || 0) === 0) {
         writes.push({ ref: { path: familyPath }, type: 'profile', profile: pushProfile });
       }
     }
@@ -175,7 +179,9 @@ globalThis.fetch = async function fakeFetch(url, options = {}) {
       const docUpdated = doc.updatedAt || 0;
       if (lastSyncedAt === 0) {
         readDocsCount++;
-        if (!doc.deleted && doc.payload) {
+        if (doc.deleted) {
+          remoteDeletedIds.push(doc.payload?.id || key.split('/').at(-1));
+        } else if (doc.payload) {
           remoteLogs.push(doc.payload);
         }
       } else {
@@ -187,6 +193,13 @@ globalThis.fetch = async function fakeFetch(url, options = {}) {
             remoteLogs.push(doc.payload);
           }
         }
+      }
+    }
+
+    // Ensure pushed logs that match server tombstones are marked as superseded
+    for (const log of pushLogs) {
+      if (remoteDeletedIds.includes(log.id) && !supersededIds.includes(log.id)) {
+        supersededIds.push(log.id);
       }
     }
 
@@ -229,10 +242,15 @@ globalThis.fetch = async function fakeFetch(url, options = {}) {
     return makeJsonResponse({ ok: true });
   }
 
-  // 6. POST /api/family/delete
+  // 6. POST /api/family/delete (냉각 기간 검증 강제)
   if (pathname === '/api/family/delete' && method === 'POST') {
     if (!state.docs.has(familyPath)) {
       return makeJsonResponse({ ok: false, error: 'family_not_found' }, 404);
+    }
+    const fam = state.docs.get(familyPath);
+    const now = Date.now();
+    if (!fam.pendingDeletionAt || fam.pendingDeletionAt > now) {
+      return makeJsonResponse({ ok: false, error: 'cooling_period_active' }, 400);
     }
     for (const key of [...state.docs.keys()]) {
       if (key === familyPath || key.startsWith(`${familyPath}/`)) {

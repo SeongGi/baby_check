@@ -403,9 +403,6 @@ function MainApp() {
 
     connect();
 
-    // 실시간 알림이 조용히 끊긴 경우에도 상대방 기록이 결국 들어오게 하는 안전망.
-    const pollTimer = setInterval(checkForRemoteChanges, SYNC_POLL_INTERVAL_MS);
-
     const appStateSubscription = AppState.addEventListener('change', async state => {
       if (state !== 'active') return;
       // 진행 중인 동기화 도중에 연결을 끊으면 캐시에서 읽은 낡은 값으로
@@ -423,7 +420,6 @@ function MainApp() {
       mounted = false;
       unsubscribe?.();
       if (reconnectTimer) clearTimeout(reconnectTimer);
-      clearInterval(pollTimer);
       appStateSubscription.remove();
     };
   }, [profile?.syncKey]);

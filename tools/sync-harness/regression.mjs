@@ -181,8 +181,42 @@ assert.equal((await deltaSync()).success, true);
 assert.equal(state.reads.at(-1).constraints.length, 0, '장부가 없으면 전체를 읽어야 한다');
 const afterLedgerLoss = await storage.getLogs();
 assert.ok(afterLedgerLoss.some(log => log.id === 'from-partner'));
-assert.ok(!afterLedgerLoss.some(log => log.id === 'partner-deleted'));
 console.log('PASS 장부가 사라지면 전체 읽기로 되돌아가고 기록은 그대로다');
+
+// 파트너가 서버에서 삭제한 기록이 있을 때, 내 기기가 장부를 잃고 전체 동기화(lastSyncedAt=0)를 해도
+// 서버의 묘비명(tombstone)을 받아 기록이 부활하지 않아야 합니다.
+const resKey = 't'.repeat(32);
+await AsyncStorage.clear();
+state.docs.clear();
+state.commits.length = 0;
+await storage.saveProfile({ ...await storage.getProfile(), syncKey: resKey, name: '묘비명 테스트' });
+const tLog = await storage.addLog({ type: 'formula', amount: 150, timestamp: 3000 });
+assert.equal((await syncWithCloud(resKey, await storage.getLogs(), await storage.getProfile())).success, true);
+// 서버에서 파트너가 tLog를 삭제함
+const resFamPath = `families/${resKey}`;
+state.docs.set(`${resFamPath}/logs/${tLog.id}`, {
+  deleted: true,
+  updatedAt: Date.now() + 5000,
+});
+// 내 기기가 장부를 리셋하고 전체 동기화(lastSyncedAt=0)를 수행
+await AsyncStorage.removeItem('@baby_sync_ledger_v1');
+assert.equal((await syncWithCloud(resKey, await storage.getLogs(), await storage.getProfile(), false, undefined, true, true)).success, true);
+const logsAfterFullSync = await storage.getLogs();
+assert.ok(!logsAfterFullSync.some(l => l.id === tLog.id), '전체 동기화 시 서버의 묘비명으로 인해 삭제된 기록이 부활하지 않아야 한다');
+assert.ok((await storage.getProfile()).deletedLogIds.includes(tLog.id), '로컬 tombstone에 기록 id가 보존되어야 한다');
+console.log('PASS 전체 동기화(lastSyncedAt=0)에서도 파트너가 지운 기록이 부활하지 않음');
+
+// 복구 후 deltaKey 환경 복원
+await AsyncStorage.clear();
+state.docs.clear();
+await storage.saveProfile({ ...await storage.getProfile(), syncKey: deltaKey, name: '증분 아기' });
+state.docs.set(`${familyPath}/logs/from-partner`, {
+  payload: { id: 'from-partner', type: 'formula', amount: 222, timestamp: 9_000, updatedAt: Date.now() + 1000 },
+  deleted: false,
+  updatedAt: Date.now() + 1000,
+  updatedBy: 'partner-device',
+});
+await storage.addLog({ id: 'from-partner', type: 'formula', amount: 222, timestamp: 9_000 });
 
 // 당겨서 새로고침은 증분을 건너뛰고 전체를 대조합니다.
 state.reads.length = 0;
@@ -238,13 +272,19 @@ assert.equal(state.docs.get(familyPath)?.pendingDeletionAt, null,
   '취소 후에는 삭제 예약 표시가 남아 있으면 안 된다');
 console.log('PASS 삭제 예약을 취소하면 표시가 지워진다');
 
-// 가족 데이터 영구 삭제는 그 가족 경로의 모든 문서(기록·회원·프로필·가족 문서)를 지워야 합니다.
-// (가짜 클라우드는 firestore.rules를 평가하지 않으므로, 여기서는 냉각 기간이
-// 지난 뒤 클라이언트가 실제로 batch delete를 수행하는지만 검증합니다. 냉각
-// 기간이 지나기 전에는 규칙이 delete 자체를 거부한다는 서버 쪽 보장은
-// firestore.rules 파일과 별도로 확인해야 합니다.)
+// 냉각 기간이 지나지 않은 상태에서는 서버가 영구 삭제를 거부해야 합니다.
+await scheduleFamilyDeletion(deltaKey);
+const prematureDelete = await deleteFamilyCloudData(deltaKey);
+assert.equal(prematureDelete.success, false, '냉각 기간 이전에는 영구 삭제가 거부되어야 한다');
 assert.ok([...state.docs.keys()].some(p => p.startsWith(`${familyPath}/`)),
-  '삭제 전에는 가족 경로에 문서가 남아 있어야 한다');
+  '거부된 삭제는 문서를 지우지 않아야 한다');
+console.log('PASS 냉각 기간 이전에는 영구 삭제 요청이 서버에서 거부된다');
+
+// 냉각 기간이 지난 뒤에는 모든 문서(기록·회원·가족 문서)를 완전히 지웁니다.
+const fam = state.docs.get(familyPath);
+fam.pendingDeletionAt = Date.now() - 1000;
+state.docs.set(familyPath, fam);
+
 const deleteOutcome = await deleteFamilyCloudData(deltaKey);
 assert.equal(deleteOutcome.success, true, deleteOutcome.error);
 assert.equal([...state.docs.keys()].filter(p => p === familyPath || p.startsWith(`${familyPath}/`)).length, 0,

@@ -115,7 +115,13 @@ export const readFamilyChangeToken = async (syncKey: string): Promise<string | n
   const clientId = await getSyncClientId();
   try {
     const res = await cloudClient.getSyncToken(normalizedKey, clientId);
-    return res.changeToken || null;
+    if (!res.ok || !res.changeToken) return null;
+    // 본인이 마지막으로 쓴 변경은 null로 취급하여 불필요한 자기 풀(Self-echo pull) 차단
+    const parts = res.changeToken.split(':');
+    if (parts[1] && parts[1] === clientId) {
+      return null;
+    }
+    return res.changeToken;
   } catch {
     return null;
   }
@@ -154,12 +160,13 @@ export const syncWithCloud = async (
     if (createBackup) await backupLocalData();
     const clientId = await getSyncClientId();
 
-    // 1. 가족 연결 상태 확인 및 등록 (최초 1회만 호출)
-    if (!readyFamilyKeys.has(normalizedKey)) {
+    // 1. 가족 연결 상태 확인 및 등록 (새 가족 생성이거나 미등록 시에만 호출)
+    if (allowFamilyCreation || !readyFamilyKeys.has(normalizedKey)) {
       try {
         await cloudClient.connectFamily(normalizedKey, clientId, allowFamilyCreation);
         readyFamilyKeys.add(normalizedKey);
       } catch (connErr: any) {
+        readyFamilyKeys.delete(normalizedKey);
         if (connErr?.status === 404 || connErr?.message?.includes('family_not_found')) {
           return {
             logs: localLogs,
@@ -323,6 +330,7 @@ export const syncWithCloud = async (
     };
   } catch (error: any) {
     if (error?.status === 404 || error?.message?.includes('family_not_found')) {
+      readyFamilyKeys.delete(normalizedKey);
       return {
         logs: localLogs,
         profile: localProfile,
@@ -408,6 +416,7 @@ export const deleteFamilyCloudData = async (
   }
   const clientId = await getSyncClientId();
   try {
+    readyFamilyKeys.delete(normalizedKey);
     await cloudClient.deleteFamilyData(normalizedKey, clientId);
     return { success: true };
   } catch (error) {
