@@ -20,8 +20,8 @@ const EXTENSIONS = ['.ts', '.tsx', '.js', '.mjs'];
 
 export async function resolve(specifier, context, nextResolve) {
   if (process.env.HARNESS_FAKE_CLOUD === '1'
-    && (specifier === 'firebase/firestore' || specifier === 'firebase/auth' || specifier === './firebase')) {
-    return { url: pathToFileURL(path.join(HARNESS_DIR, 'stubs/fake-cloud.mjs')).href, shortCircuit: true };
+    && (specifier.endsWith('fake-cloud.mjs') || specifier === 'firebase/firestore' || specifier === 'firebase/auth' || specifier === './firebase')) {
+    return { url: pathToFileURL(path.join(HARNESS_DIR, 'stubs/fake-worker.mjs')).href, shortCircuit: true };
   }
   if (STUBS[specifier]) return { url: pathToFileURL(STUBS[specifier]).href, shortCircuit: true };
 

@@ -121,6 +121,8 @@ export const readFamilyChangeToken = async (syncKey: string): Promise<string | n
   }
 };
 
+const readyFamilyKeys = new Set<string>();
+
 export const syncWithCloud = async (
   syncKey: string,
   localLogs: BabyLogEntry[],
@@ -152,21 +154,24 @@ export const syncWithCloud = async (
     if (createBackup) await backupLocalData();
     const clientId = await getSyncClientId();
 
-    // 1. 가족 연결 상태 확인 및 등록
-    try {
-      await cloudClient.connectFamily(normalizedKey, clientId, allowFamilyCreation);
-    } catch (connErr: any) {
-      if (connErr?.status === 404 || connErr?.message?.includes('family_not_found')) {
-        return {
-          logs: localLogs,
-          profile: localProfile,
-          success: false,
-          merged: false,
-          familyUnavailable: true,
-          error: '가족 연결 키가 서버의 초대 정보와 일치하지 않거나, 가족 데이터가 삭제되었습니다.',
-        };
+    // 1. 가족 연결 상태 확인 및 등록 (최초 1회만 호출)
+    if (!readyFamilyKeys.has(normalizedKey)) {
+      try {
+        await cloudClient.connectFamily(normalizedKey, clientId, allowFamilyCreation);
+        readyFamilyKeys.add(normalizedKey);
+      } catch (connErr: any) {
+        if (connErr?.status === 404 || connErr?.message?.includes('family_not_found')) {
+          return {
+            logs: localLogs,
+            profile: localProfile,
+            success: false,
+            merged: false,
+            familyUnavailable: true,
+            error: '가족 연결 키가 서버의 초대 정보와 일치하지 않거나, 가족 데이터가 삭제되었습니다.',
+          };
+        }
+        throw connErr;
       }
-      throw connErr;
     }
 
     if (abortToken?.aborted) {
@@ -272,11 +277,27 @@ export const syncWithCloud = async (
     const changedLocally = canonical(mergedLogs) !== canonical(localLogs)
       || canonical(mergedProfile) !== canonical(localProfile);
 
+    // 네트워크 대기 중 로컬에 새 삭제가 발생했다면 같은 회차에 서버로 즉시 전파
+    const unpushedDeletes = (mergedProfile.deletedLogIds || []).filter(
+      id => !pushDeletedIds.includes(id) && (!canUseDelta || !tombstonedLedger.has(id))
+    );
+    if (unpushedDeletes.length > 0 && !abortToken?.aborted) {
+      await cloudClient.postSync(normalizedKey, clientId, {
+        pushDeletedIds: unpushedDeletes,
+      });
+    }
+
     // 7. 증분 장부 갱신
     if (!abortToken?.aborted && syncRes.serverTime) {
       const nextUploaded: Record<string, number> = canUseDelta ? { ...uploadedLedger } : {};
       mergedLogs.forEach(log => {
         nextUploaded[log.id] = log.updatedAt || log.timestamp;
+      });
+
+      // 서버가 더 최신이라 받아들여지지 않은 기록은 장부에서 제거해 다음 회차에 전체 대조
+      const supersededSet = new Set(syncRes.supersededIds || []);
+      supersededSet.forEach(id => {
+        delete nextUploaded[id];
       });
 
       const nextTombstoned = new Set(canUseDelta ? tombstonedLedger : []);
@@ -285,7 +306,9 @@ export const syncWithCloud = async (
       const nextLedger: FamilySyncLedger = {
         familyKey: normalizedKey,
         cursorMillis: syncRes.serverTime,
-        lastFullReadAt: canUseDelta && ledger ? ledger.lastFullReadAt : Date.now(),
+        lastFullReadAt: supersededSet.size > 0
+          ? 0
+          : canUseDelta && ledger ? ledger.lastFullReadAt : Date.now(),
         uploaded: nextUploaded,
         tombstoned: Array.from(nextTombstoned),
       };

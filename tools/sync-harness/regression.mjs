@@ -101,16 +101,14 @@ const deltaSync = async (force = false) =>
 for (let i = 0; i < 40; i += 1) {
   await storage.addLog({ type: 'formula', amount: 100 + i, timestamp: 1_000 + i });
 }
-// 1회차: 빈 가족이라 읽을 문서가 없고, 여기서 40건이 올라갑니다.
-assert.equal((await deltaSync()).success, true);
-// 2회차: 방금 올린 40건을 전부 읽으면서 증분 커서가 잡힙니다. 서버가 찍은
-// 시각은 읽어 봐야 알 수 있어서, 새 가족은 한 회차 뒤부터 증분이 됩니다.
+// 1회차: 빈 가족에 40건이 올라가고 전체 읽기(커서 없음)로 증분 커서가 잡힙니다.
 state.reads.length = 0;
 assert.equal((await deltaSync()).success, true);
 const firstReadCount = state.reads.at(-1).count;
 assert.equal(state.reads.at(-1).constraints.length, 0, '커서가 없는 회차는 전체를 읽는다');
 assert.equal(firstReadCount, 40);
 
+// 2회차: 이전 회차에서 잡힌 커서로 증분 질의를 써서 읽기와 쓰기를 줄입니다.
 state.reads.length = 0;
 state.commits.length = 0;
 assert.equal((await deltaSync()).success, true);

@@ -374,12 +374,28 @@ export default {
           }
         }
 
+        const supersededIds: string[] = [];
+        for (const log of pushLogs) {
+          if (!log || typeof log.id !== 'string') continue;
+          const clientUpdatedAt = Number(log.updatedAt || log.timestamp) || serverTime;
+          const matchingRemote = remoteLogs.find(r => r.id === log.id);
+          if (matchingRemote) {
+            const remoteClientUpdated = Number(matchingRemote.updatedAt || matchingRemote.timestamp) || 0;
+            if (remoteClientUpdated > clientUpdatedAt) {
+              supersededIds.push(log.id);
+            }
+          } else if (remoteDeletedIds.includes(log.id)) {
+            supersededIds.push(log.id);
+          }
+        }
+
         return jsonResponse({
           ok: true,
           serverTime,
           remoteLogs,
           remoteDeletedIds,
           remoteProfile: targetProfile,
+          supersededIds,
         });
       }
 
