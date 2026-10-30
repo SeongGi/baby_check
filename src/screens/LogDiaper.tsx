@@ -6,10 +6,10 @@ import {
   TouchableOpacity, 
   TextInput, 
   ScrollView, 
-  KeyboardAvoidingView, 
   Platform 
 } from 'react-native';
 import { COLORS } from '../theme/colors';
+import { KeyboardAwareScrollView } from '../components/KeyboardAwareScrollView';
 import { StoolAmount, StoolColor, StoolConsistency, UrineColor, UrineWetness } from '../types';
 
 interface LogDiaperProps {
@@ -100,16 +100,10 @@ export const LogDiaper: React.FC<LogDiaperProps> = ({ onAddLog, onNavigate }) =>
   };
 
   return (
-    <KeyboardAvoidingView
-      style={styles.keyboardView}
-      behavior={Platform.OS === 'ios' ? 'padding' : undefined}
-      keyboardVerticalOffset={Platform.OS === 'ios' ? 64 : 0}
-    >
-      <ScrollView 
+    <KeyboardAwareScrollView
+        containerStyle={styles.keyboardView}
         style={styles.container} 
         contentContainerStyle={styles.contentContainer}
-        keyboardShouldPersistTaps="handled"
-        keyboardDismissMode="on-drag"
       >
         {/* Header Title */}
         <View style={styles.header}>
@@ -266,8 +260,7 @@ export const LogDiaper: React.FC<LogDiaperProps> = ({ onAddLog, onNavigate }) =>
             {isSaving ? '저장 중...' : '기록 저장하기'}
           </Text>
         </TouchableOpacity>
-      </ScrollView>
-    </KeyboardAvoidingView>
+    </KeyboardAwareScrollView>
   );
 };
 

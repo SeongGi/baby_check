@@ -28,6 +28,7 @@ import { LogFormula } from './src/screens/LogFormula';
 import { LogDiaper } from './src/screens/LogDiaper';
 import { LogBath } from './src/screens/LogBath';
 import { LogWeight } from './src/screens/LogWeight';
+import { LogTemperature } from './src/screens/LogTemperature';
 import { Statistics } from './src/screens/Statistics';
 import { Profile } from './src/screens/Profile';
 
@@ -42,7 +43,7 @@ type SyncState = 'idle' | 'syncing' | 'error';
 function MainApp() {
   const [logs, setLogs] = useState<BabyLogEntry[]>([]);
   const [profile, setProfile] = useState<BabyProfile | null>(null);
-  const [activeScreen, setActiveScreen] = useState<'dashboard' | 'formula' | 'diaper' | 'bath' | 'weight' | 'statistics' | 'profile'>('dashboard');
+  const [activeScreen, setActiveScreen] = useState<'dashboard' | 'formula' | 'diaper' | 'bath' | 'weight' | 'temperature' | 'statistics' | 'profile'>('dashboard');
   const activeScreenRef = useRef(activeScreen);
   activeScreenRef.current = activeScreen;
   const [isLoading, setIsLoading] = useState(true);
@@ -473,6 +474,7 @@ function MainApp() {
         diaper: 'diaper',
         bath: 'bath',
         weight: 'weight',
+        temperature: 'temperature',
         statistics: 'statistics',
         profile: 'profile',
       };
@@ -757,6 +759,8 @@ function MainApp() {
         );
       case 'weight':
         return <LogWeight onAddLog={handleAddLog} onNavigate={setActiveScreen} />;
+      case 'temperature':
+        return <LogTemperature onAddLog={handleAddLog} onNavigate={setActiveScreen} />;
       case 'statistics':
         return <Statistics logs={logs} />;
       case 'profile':
@@ -799,7 +803,7 @@ function MainApp() {
     <View style={[
       styles.container, 
       { 
-        paddingTop: activeScreen === 'formula' || activeScreen === 'diaper' || activeScreen === 'bath' || activeScreen === 'weight' ? insets.top : 0
+        paddingTop: activeScreen === 'formula' || activeScreen === 'diaper' || activeScreen === 'bath' || activeScreen === 'weight' || activeScreen === 'temperature' ? insets.top : 0
       }
     ]}>
       <StatusBar style="dark" />

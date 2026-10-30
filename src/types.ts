@@ -1,4 +1,4 @@
-export type LogType = 'formula' | 'urine' | 'stool' | 'bath' | 'weight' | 'sleep' | 'tummyTime' | 'play';
+export type LogType = 'formula' | 'urine' | 'stool' | 'bath' | 'weight' | 'temperature' | 'sleep' | 'tummyTime' | 'play';
 
 export interface BaseLog {
   id: string;
@@ -53,6 +53,11 @@ export interface WeightLog extends BaseLog {
   weightKg: number;
 }
 
+export interface TemperatureLog extends BaseLog {
+  type: 'temperature';
+  temperatureC: number; // 분유 온도(temperature)와 구분하기 위한 이름
+}
+
 export interface SleepLog extends BaseLog {
   type: 'sleep';
   // 종료 전에는 비워 두며, 이 기록이 현재 진행 중인 수면임을 뜻합니다.
@@ -71,7 +76,7 @@ export interface PlayLog extends BaseLog {
   endedAt?: number;
 }
 
-export type BabyLogEntry = FormulaLog | UrineLog | StoolLog | BathLog | WeightLog | SleepLog | TummyTimeLog | PlayLog;
+export type BabyLogEntry = FormulaLog | UrineLog | StoolLog | BathLog | WeightLog | TemperatureLog | SleepLog | TummyTimeLog | PlayLog;
 
 export interface BabyProfile {
   name: string;

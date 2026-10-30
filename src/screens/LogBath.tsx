@@ -1,7 +1,6 @@
 import React, { useState } from 'react';
 import {
   Alert,
-  KeyboardAvoidingView,
   Platform,
   ScrollView,
   StyleSheet,
@@ -12,6 +11,7 @@ import {
 } from 'react-native';
 import { BathLog, BathType } from '../types';
 import { COLORS } from '../theme/colors';
+import { KeyboardAwareScrollView } from '../components/KeyboardAwareScrollView';
 
 interface LogBathProps {
   onAddLog: (log: Omit<BathLog, 'id'>) => Promise<unknown>;
@@ -50,16 +50,10 @@ export const LogBath: React.FC<LogBathProps> = ({ onAddLog, onNavigate }) => {
   };
 
   return (
-    <KeyboardAvoidingView 
-      style={styles.keyboardView} 
-      behavior={Platform.OS === 'ios' ? 'padding' : undefined}
-      keyboardVerticalOffset={Platform.OS === 'ios' ? 64 : 0}
-    >
-      <ScrollView 
+    <KeyboardAwareScrollView
+        containerStyle={styles.keyboardView}
         style={styles.container} 
         contentContainerStyle={styles.contentContainer}
-        keyboardShouldPersistTaps="handled"
-        keyboardDismissMode="on-drag"
       >
         <View style={styles.header}>
           <TouchableOpacity onPress={() => onNavigate('dashboard')} style={styles.backButton} accessibilityLabel="홈으로 돌아가기">
@@ -114,8 +108,7 @@ export const LogBath: React.FC<LogBathProps> = ({ onAddLog, onNavigate }) => {
         <TouchableOpacity style={[styles.saveButton, isSaving && styles.saveButtonDisabled]} onPress={handleSave} disabled={isSaving} accessibilityRole="button">
           <Text style={styles.saveButtonText}>{isSaving ? '저장 중...' : '목욕 기록 저장하기'}</Text>
         </TouchableOpacity>
-      </ScrollView>
-    </KeyboardAvoidingView>
+    </KeyboardAwareScrollView>
   );
 };
 

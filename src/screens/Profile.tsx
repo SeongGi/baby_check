@@ -7,7 +7,6 @@ import {
   TouchableOpacity, 
   ScrollView, 
   Alert,
-  KeyboardAvoidingView,
   Platform,
   Switch,
   Share,
@@ -16,9 +15,10 @@ import {
 } from 'react-native';
 import { Directory, File, Paths } from 'expo-file-system';
 import * as Sharing from 'expo-sharing';
-import { getInstalledAppVersion, openGooglePlayListing } from '../utils/appUpdater';
+import { DISTRIBUTION_STORE, getInstalledAppVersion, openGooglePlayListing } from '../utils/appUpdater';
 import { BabyProfile, BabyLogEntry } from '../types';
 import { COLORS } from '../theme/colors';
+import { KeyboardAwareScrollView } from '../components/KeyboardAwareScrollView';
 import { getLogs, getLocalBackup, restoreFromLocalBackup } from '../database/storage';
 import { createFamilyInviteLink, createFamilySyncId, parseFamilySyncId, FamilyDeletionStatus } from '../database/sync';
 
@@ -564,16 +564,10 @@ export const Profile: React.FC<ProfileProps> = ({
   };
 
   return (
-    <KeyboardAvoidingView 
-      style={styles.keyboardView}
-      behavior={Platform.OS === 'ios' ? 'padding' : undefined}
-      keyboardVerticalOffset={Platform.OS === 'ios' ? 64 : 0}
-    >
-      <ScrollView 
+    <KeyboardAwareScrollView
+        containerStyle={styles.keyboardView}
         style={styles.container} 
         contentContainerStyle={styles.contentContainer}
-        keyboardShouldPersistTaps="handled"
-        keyboardDismissMode="on-drag"
       >
         <Text style={styles.screenTitle}>아기 프로필 설정</Text>
         <Text style={styles.subtitle}>우리아기의 소중한 정보를 설정하고 관리합니다. ❤️</Text>
@@ -789,16 +783,22 @@ export const Profile: React.FC<ProfileProps> = ({
         {Platform.OS === 'android' && (
           <View style={styles.backupCard}>
             <Text style={styles.backupTitle}>⚡ 앱 업데이트 확인</Text>
+            {DISTRIBUTION_STORE === 'onestore' ? (
+              <Text style={styles.backupDesc}>설치된 버전: {getInstalledAppVersion()}{'\n'}원스토어 앱의 업데이트 메뉴에서 새 버전을 확인해 주세요.</Text>
+            ) : (
+              <>
             <Text style={styles.backupDesc}>설치된 버전: {getInstalledAppVersion()}{'\n'}Google Play에서 업데이트를 확인합니다. 비공개 테스트 버전은 Alpha 테스터 계정에서만 보일 수 있습니다.</Text>
-            <TouchableOpacity
-              style={[styles.updateButton, isCheckingUpdates && styles.updateButtonDisabled]}
-              onPress={handleCheckUpdates}
-              disabled={isCheckingUpdates}
-            >
-              <Text style={styles.updateButtonText}>
-                {isCheckingUpdates ? 'Google Play 여는 중...' : 'Google Play에서 업데이트 확인'}
-              </Text>
-            </TouchableOpacity>
+              <TouchableOpacity
+                style={[styles.updateButton, isCheckingUpdates && styles.updateButtonDisabled]}
+                onPress={handleCheckUpdates}
+                disabled={isCheckingUpdates}
+              >
+                <Text style={styles.updateButtonText}>
+                  {isCheckingUpdates ? 'Google Play 여는 중...' : 'Google Play에서 업데이트 확인'}
+                </Text>
+              </TouchableOpacity>
+              </>
+            )}
           </View>
         )}
         {/* 개인정보 보호 및 데이터 관리 (Apple App Store 가이드라인 준수) */}
@@ -953,8 +953,7 @@ export const Profile: React.FC<ProfileProps> = ({
             • 대소변 색상이나 횟수가 평소와 확연히 다를 땐 타임라인의 메모 기능을 활용하여 소아과 상담 시 지참하세요.
           </Text>
         </View>
-      </ScrollView>
-    </KeyboardAvoidingView>
+    </KeyboardAwareScrollView>
   );
 };
 

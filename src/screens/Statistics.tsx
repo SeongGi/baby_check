@@ -1,6 +1,6 @@
 import React, { useState } from 'react';
 import { ScrollView, StyleSheet, Text, TouchableOpacity, View } from 'react-native';
-import { BabyLogEntry, FormulaLog, SleepLog, TummyTimeLog, PlayLog, WeightLog } from '../types';
+import { BabyLogEntry, FormulaLog, SleepLog, TummyTimeLog, PlayLog, WeightLog, TemperatureLog } from '../types';
 import { COLORS } from '../theme/colors';
 
 interface StatisticsProps { logs: BabyLogEntry[]; }
@@ -95,6 +95,11 @@ export const Statistics: React.FC<StatisticsProps> = ({ logs }) => {
   const weightLogs = logs.filter((log): log is WeightLog => log.type === 'weight').sort((a, b) => a.timestamp - b.timestamp);
   const latestWeight = weightLogs[weightLogs.length - 1];
   const firstWeight = weightLogs[0];
+  const temperatureLogs = logs.filter((log): log is TemperatureLog => log.type === 'temperature').sort((a, b) => a.timestamp - b.timestamp);
+  const latestTemperature = temperatureLogs[temperatureLogs.length - 1];
+  // 선택한 기간(최근 7일/전체) 안의 최고 체온
+  const rangeTemperatures = range === 'week' ? temperatureLogs.filter(log => log.timestamp >= last7Days[0].getTime()) : temperatureLogs;
+  const maxTemperature = rangeTemperatures.length > 0 ? Math.max(...rangeTemperatures.map(log => log.temperatureC)) : undefined;
   const sortedTimestamps = logs.map(log => log.timestamp).sort((a, b) => a - b);
   const firstDay = sortedTimestamps[0];
   const lastDay = sortedTimestamps[sortedTimestamps.length - 1];
@@ -149,6 +154,7 @@ export const Statistics: React.FC<StatisticsProps> = ({ logs }) => {
           <Metric emoji="🤸" label={range === 'week' ? '평균 터미타임' : '터미타임'} value={summary.tummyTime} unit="" tint="#FDF1E4" />
           <Metric emoji="🎈" label={range === 'week' ? '평균 놀기시간' : '놀기시간'} value={summary.play} unit="" tint="#EDF7ED" />
           {latestWeight && <Metric emoji="⚖️" label="최근 체중" value={latestWeight.weightKg} unit="kg" tint="#EAF0F7" />}
+          {latestTemperature && <Metric emoji="🌡️" label="최근 체온" value={latestTemperature.temperatureC} unit="℃" tint="#FBECE7" />}
         </View>
         {range === 'all' && logs.length > 0 && <Text style={styles.averageHint}>하루 평균 수유 {Math.round(allFormula / elapsedDays)}ml · 기저귀 {((allStools + allUrines) / elapsedDays).toFixed(1)}회</Text>}
       </View>
@@ -183,6 +189,12 @@ export const Statistics: React.FC<StatisticsProps> = ({ logs }) => {
         <View style={styles.periodCard}>
           <Text style={styles.periodTitle}>⚖️ 성장 기록</Text>
           <Text style={styles.periodText}>최근 {latestWeight.weightKg}kg · {formatDate(latestWeight.timestamp)}{firstWeight && firstWeight.id !== latestWeight.id ? ` · 첫 기록보다 ${(latestWeight.weightKg - firstWeight.weightKg).toFixed(2)}kg` : ''}</Text>
+        </View>
+      )}
+      {latestTemperature && (
+        <View style={styles.periodCard}>
+          <Text style={styles.periodTitle}>🌡️ 체온 기록</Text>
+          <Text style={styles.periodText}>최근 {latestTemperature.temperatureC}℃ · {formatDate(latestTemperature.timestamp)}{maxTemperature !== undefined ? ` · 최고 ${maxTemperature}℃` : ''}</Text>
         </View>
       )}
     </ScrollView>
