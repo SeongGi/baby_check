@@ -1,5 +1,9 @@
 export interface Env {
   DB: D1Database;
+  /** 시험 전용 서버 시계. 운영(wrangler.toml)에는 이 바인딩이 없어서 항상 Date.now()를 쓴다. */
+  clock?: () => number;
+  MAX_PUSH_ITEMS?: string;
+  MAX_PAGE_ROWS?: string;
 }
 
 interface FamilyRow {
@@ -8,20 +12,8 @@ interface FamilyRow {
   updated_at: number;
   last_client_id: string | null;
   deletion_ready_at: number | null;
-  shared_name: string | null;
-  shared_birth_date: string | null;
-  shared_birth_weight: string | null;
-  shared_target_formula: number | null;
+  shared_json: string | null;
   profile_updated_at: number;
-}
-
-interface LogRow {
-  family_id: string;
-  log_id: string;
-  client_updated_at: number;
-  updated_at: number;
-  deleted_at: number | null;
-  raw_json: string;
 }
 
 const CORS_HEADERS = {
@@ -30,9 +22,27 @@ const CORS_HEADERS = {
   'Access-Control-Allow-Headers': 'Content-Type, Authorization, X-Client-Id',
 };
 
-const MAX_PAYLOAD_BYTES = 1_048_576; // 1MB
+const MAX_PAYLOAD_BYTES = 1_048_576; // 1MB (UTF-8 바이트)
 const MAX_BATCH_ITEMS = 500;
-const D1_BATCH_CHUNK_SIZE = 100;
+const D1_BATCH_CHUNK_SIZE = 100; // 배치 하나의 문장 수 상한 (토큰 갱신 문장 포함)
+const D1_MAX_BIND_PARAMS = 100;
+const CLASSIFY_ID_CHUNK = D1_MAX_BIND_PARAMS - 1; // family_id 하나를 빼고 id 99개
+const PULL_BYTE_BUDGET = 819_200; // 800KB
+const CURSOR_MARGIN_MS = 120_000; // 2분
+const MIN_PAGE_ROWS = 25;
+const DEFAULT_MAX_PUSH_ITEMS = 400;
+const DEFAULT_MAX_PAGE_ROWS = 500;
+
+const textEncoder = new TextEncoder();
+
+function now(env: Env): number {
+  return env.clock ? env.clock() : Date.now();
+}
+
+function positiveIntOr(value: string | undefined, fallback: number): number {
+  const parsed = Number(value);
+  return Number.isInteger(parsed) && parsed > 0 ? parsed : fallback;
+}
 
 function jsonResponse(data: any, status = 200): Response {
   return new Response(JSON.stringify(data), {
@@ -48,8 +58,26 @@ function errorResponse(error: string, status = 400): Response {
   return jsonResponse({ ok: false, error }, status);
 }
 
+/**
+ * canonical JSON: 키를 정렬하고 undefined 값을 뺀 JSON.stringify 결과.
+ * 클라이언트 src/database/sync.ts의 canonical, storage.ts의 stableValue와 같은 알고리즘이다.
+ * (서버는 앱 코드를 import하지 않으므로 여기에 그대로 옮겨 둔다.)
+ */
+const canonicalJson = (value: unknown): string =>
+  JSON.stringify(value, (_key, item) =>
+    item && typeof item === 'object' && !Array.isArray(item)
+      ? Object.keys(item as Record<string, unknown>)
+          .sort()
+          .reduce<Record<string, unknown>>((sorted, key) => {
+            const field = (item as Record<string, unknown>)[key];
+            if (field !== undefined) sorted[key] = field;
+            return sorted;
+          }, {})
+      : item,
+  );
+
 async function sha256Hex(message: string): Promise<string> {
-  const msgUint8 = new TextEncoder().encode(message);
+  const msgUint8 = textEncoder.encode(message);
   const hashBuffer = await crypto.subtle.digest('SHA-256', msgUint8);
   const hashArray = Array.from(new Uint8Array(hashBuffer));
   return hashArray.map(b => b.toString(16).padStart(2, '0')).join('');
@@ -67,6 +95,51 @@ async function getAuthContext(request: Request): Promise<{ familyId: string; cli
 
   return { familyId, clientId };
 }
+
+/**
+ * 가족 행이 없을 때 모든 경로가 쓰는 공통 응답.
+ * 삭제 기록이 있으면 410 family_deleted, 없으면 404 family_not_found.
+ * 가족 읽기가 "없음"을 돌려준 경우에만 부른다.
+ */
+async function familyMissingResponse(env: Env, familyId: string): Promise<Response> {
+  const deleted = await env.DB.prepare('SELECT 1 AS found FROM deleted_families WHERE id = ?1')
+    .bind(familyId)
+    .first<{ found: number }>();
+  return deleted ? errorResponse('family_deleted', 410) : errorResponse('family_not_found', 404);
+}
+
+const changesOf = (result: D1Result | undefined): number => Number(result?.meta?.changes ?? 0);
+
+/** 2.2의 둘째 문장: 가족이 있을 때만 회원을 넣거나 갱신한다. */
+function memberUpsertStatement(env: Env, familyId: string, t: number, clientId: string): D1PreparedStatement {
+  return env.DB.prepare(
+    `INSERT INTO members (family_id, client_id, created_at, last_active_at)
+     SELECT ?1, ?3, ?2, ?2
+     WHERE EXISTS (SELECT 1 FROM families WHERE id = ?1)
+     ON CONFLICT(family_id, client_id) DO UPDATE SET last_active_at = excluded.last_active_at`,
+  ).bind(familyId, t, clientId);
+}
+
+interface PushLog {
+  id: string;
+  clientUpdatedAt: number;
+  raw: string;
+}
+
+interface WriteItem {
+  isProfile: boolean;
+  build: (t: number) => D1PreparedStatement;
+}
+
+interface ServerRow {
+  log_id: string;
+  client_updated_at?: number;
+  updated_at?: number;
+  deleted_at: number | null;
+  raw_json: string;
+}
+
+const utf8Bytes = (text: string): number => textEncoder.encode(text).length;
 
 export default {
   async fetch(request: Request, env: Env): Promise<Response> {
@@ -89,56 +162,68 @@ export default {
     const { familyId, clientId } = auth;
 
     try {
+      // content-length 헤더가 없을 수 있으므로 본문을 읽은 뒤 UTF-8 바이트 수로도 검사한다.
+      let body: any = {};
+      if (request.method === 'POST') {
+        const text = await request.text();
+        if (utf8Bytes(text) > MAX_PAYLOAD_BYTES) {
+          return errorResponse('payload_too_large', 413);
+        }
+        try {
+          const parsed = JSON.parse(text);
+          body = parsed && typeof parsed === 'object' ? parsed : {};
+        } catch {
+          body = {};
+        }
+      }
+
       // 1. POST /api/family/connect
       if (request.method === 'POST' && path === '/api/family/connect') {
-        const body = (await request.json().catch(() => ({}))) as { allowCreate?: boolean };
         const allowCreate = Boolean(body.allowCreate);
-        const now = Date.now();
+        const t = now(env);
 
-        const family = await env.DB.prepare('SELECT * FROM families WHERE id = ?')
+        const family = await env.DB.prepare('SELECT id FROM families WHERE id = ?1')
           .bind(familyId)
-          .first<FamilyRow>();
+          .first<{ id: string }>();
 
         if (family) {
-          await env.DB.prepare(
-            `INSERT INTO members (family_id, client_id, created_at, last_active_at)
-             VALUES (?1, ?2, ?3, ?3)
-             ON CONFLICT(family_id, client_id) DO UPDATE SET last_active_at = excluded.last_active_at`
-          )
-            .bind(familyId, clientId, now)
-            .run();
-
+          const result = await memberUpsertStatement(env, familyId, t, clientId).run();
+          if (changesOf(result) === 0) {
+            return familyMissingResponse(env, familyId);
+          }
           return jsonResponse({ ok: true, isNewFamily: false });
         }
 
         if (!allowCreate) {
-          return errorResponse('family_not_found', 404);
+          return familyMissingResponse(env, familyId);
         }
 
-        // 새 가족 생성
-        const statements = [
+        // 새 가족 생성: deleted_families를 미리 읽지 않고, 삭제 기록 판정은 첫 문장의 WHERE NOT EXISTS 한 곳에서만 한다.
+        const results = await env.DB.batch([
           env.DB.prepare(
-            `INSERT INTO families (id, created_at, updated_at, last_client_id)
-             VALUES (?1, ?2, ?2, ?3)`
-          ).bind(familyId, now, clientId),
-          env.DB.prepare(
-            `INSERT INTO members (family_id, client_id, created_at, last_active_at)
-             VALUES (?1, ?2, ?3, ?3)`
-          ).bind(familyId, clientId, now),
-        ];
+            `INSERT OR IGNORE INTO families (id, created_at, updated_at, last_client_id)
+             SELECT ?1, ?2, ?2, ?3
+             WHERE NOT EXISTS (SELECT 1 FROM deleted_families WHERE id = ?1)`,
+          ).bind(familyId, t, clientId),
+          memberUpsertStatement(env, familyId, t, clientId),
+        ]);
 
-        await env.DB.batch(statements);
-        return jsonResponse({ ok: true, isNewFamily: true });
+        if (changesOf(results[1]) === 0) {
+          return familyMissingResponse(env, familyId);
+        }
+        return jsonResponse({ ok: true, isNewFamily: changesOf(results[0]) === 1 });
       }
 
       // 2. GET /api/family/token
       if (request.method === 'GET' && path === '/api/family/token') {
-        const family = await env.DB.prepare('SELECT * FROM families WHERE id = ?')
+        const family = await env.DB.prepare(
+          'SELECT updated_at, last_client_id, profile_updated_at, deletion_ready_at FROM families WHERE id = ?1',
+        )
           .bind(familyId)
           .first<FamilyRow>();
 
         if (!family) {
-          return errorResponse('family_not_found', 404);
+          return familyMissingResponse(env, familyId);
         }
 
         const changeToken = `${family.updated_at}:${family.last_client_id || ''}`;
@@ -152,18 +237,18 @@ export default {
 
       // 3. GET /api/family/deletion-status
       if (request.method === 'GET' && path === '/api/family/deletion-status') {
-        const family = await env.DB.prepare('SELECT * FROM families WHERE id = ?')
+        const family = await env.DB.prepare('SELECT deletion_ready_at FROM families WHERE id = ?1')
           .bind(familyId)
           .first<FamilyRow>();
 
         if (!family) {
-          return errorResponse('family_not_found', 404);
+          return familyMissingResponse(env, familyId);
         }
 
-        const now = Date.now();
+        const t = now(env);
         const scheduled = family.deletion_ready_at !== null;
         const readyAt = family.deletion_ready_at || undefined;
-        const canDeleteNow = scheduled && (family.deletion_ready_at! <= now);
+        const canDeleteNow = scheduled && family.deletion_ready_at! <= t;
 
         return jsonResponse({
           ok: true,
@@ -175,18 +260,17 @@ export default {
 
       // 4. POST /api/family/delete-schedule (1시간 냉각)
       if (request.method === 'POST' && path === '/api/family/delete-schedule') {
-        const family = await env.DB.prepare('SELECT id FROM families WHERE id = ?')
+        const family = await env.DB.prepare('SELECT id FROM families WHERE id = ?1')
           .bind(familyId)
           .first();
 
         if (!family) {
-          return errorResponse('family_not_found', 404);
+          return familyMissingResponse(env, familyId);
         }
 
-        const now = Date.now();
-        const readyAt = now + 60 * 60 * 1000; // 1시간 뒤
+        const readyAt = now(env) + 60 * 60 * 1000; // 1시간 뒤
 
-        await env.DB.prepare('UPDATE families SET deletion_ready_at = ? WHERE id = ?')
+        await env.DB.prepare('UPDATE families SET deletion_ready_at = ?1 WHERE id = ?2')
           .bind(readyAt, familyId)
           .run();
 
@@ -195,15 +279,15 @@ export default {
 
       // 5. POST /api/family/cancel-delete
       if (request.method === 'POST' && path === '/api/family/cancel-delete') {
-        const family = await env.DB.prepare('SELECT id FROM families WHERE id = ?')
+        const family = await env.DB.prepare('SELECT id FROM families WHERE id = ?1')
           .bind(familyId)
           .first();
 
         if (!family) {
-          return errorResponse('family_not_found', 404);
+          return familyMissingResponse(env, familyId);
         }
 
-        await env.DB.prepare('UPDATE families SET deletion_ready_at = NULL WHERE id = ?')
+        await env.DB.prepare('UPDATE families SET deletion_ready_at = NULL WHERE id = ?1')
           .bind(familyId)
           .run();
 
@@ -212,217 +296,304 @@ export default {
 
       // 6. POST /api/family/delete (영구 삭제: 냉각 기간 검증 강제)
       if (request.method === 'POST' && path === '/api/family/delete') {
-        const family = await env.DB.prepare('SELECT * FROM families WHERE id = ?')
+        const family = await env.DB.prepare('SELECT deletion_ready_at FROM families WHERE id = ?1')
           .bind(familyId)
           .first<FamilyRow>();
 
         if (!family) {
-          return errorResponse('family_not_found', 404);
+          return familyMissingResponse(env, familyId);
         }
 
-        const now = Date.now();
-        if (!family.deletion_ready_at || family.deletion_ready_at > now) {
+        const t = now(env);
+        if (!family.deletion_ready_at || family.deletion_ready_at > t) {
           return errorResponse('cooling_period_active', 400);
         }
 
-        // 배치로 완전 삭제
-        const statements = [
-          env.DB.prepare('DELETE FROM logs WHERE family_id = ?').bind(familyId),
-          env.DB.prepare('DELETE FROM members WHERE family_id = ?').bind(familyId),
-          env.DB.prepare('DELETE FROM families WHERE id = ?').bind(familyId),
-        ];
+        // 배치로 완전 삭제. 삭제 기록을 맨 앞에 넣어 같은 배치로 함께 확정한다.
+        await env.DB.batch([
+          env.DB.prepare('INSERT OR IGNORE INTO deleted_families (id, deleted_at) VALUES (?1, ?2)').bind(familyId, t),
+          env.DB.prepare('DELETE FROM logs WHERE family_id = ?1').bind(familyId),
+          env.DB.prepare('DELETE FROM members WHERE family_id = ?1').bind(familyId),
+          env.DB.prepare('DELETE FROM families WHERE id = ?1').bind(familyId),
+        ]);
 
-        await env.DB.batch(statements);
         return jsonResponse({ ok: true });
       }
 
-      // 7. POST /api/family/sync (증분 푸시 & 풀)
+      // 7. POST /api/family/sync (올리기 + 선택적 당겨 받기)
       if (request.method === 'POST' && path === '/api/family/sync') {
-        const body = (await request.json().catch(() => ({}))) as {
-          lastSyncedAt?: number;
-          pushLogs?: any[];
-          pushProfile?: any;
-          pushDeletedIds?: string[];
-        };
+        const maxPushItems = positiveIntOr(env.MAX_PUSH_ITEMS, DEFAULT_MAX_PUSH_ITEMS);
+        const maxPageRows = positiveIntOr(env.MAX_PAGE_ROWS, DEFAULT_MAX_PAGE_ROWS);
 
-        const pushLogs = Array.isArray(body.pushLogs) ? body.pushLogs : [];
-        const pushDeletedIds = Array.isArray(body.pushDeletedIds) ? body.pushDeletedIds : [];
+        const rawPushLogs: any[] = Array.isArray(body.pushLogs) ? body.pushLogs : [];
+        const rawPushDeletedIds: any[] = Array.isArray(body.pushDeletedIds) ? body.pushDeletedIds : [];
 
-        if (pushLogs.length + pushDeletedIds.length > MAX_BATCH_ITEMS) {
+        if (rawPushLogs.length + rawPushDeletedIds.length > MAX_BATCH_ITEMS) {
           return errorResponse('batch_size_exceeded', 413);
         }
 
-        const family = await env.DB.prepare('SELECT * FROM families WHERE id = ?')
+        const family = await env.DB.prepare('SELECT id FROM families WHERE id = ?1')
           .bind(familyId)
-          .first<FamilyRow>();
+          .first<{ id: string }>();
 
         if (!family) {
-          return errorResponse('family_not_found', 404);
+          return familyMissingResponse(env, familyId);
         }
 
-        const serverTime = Date.now();
-        const lastSyncedAt = Number(body.lastSyncedAt) || 0;
-        const pushProfile = body.pushProfile || null;
-
-        const writeStatements: D1PreparedStatement[] = [];
-        let hasWrites = false;
-
-        // 1) 로그 푸시 (LWW 조건부 삽입 / 묘비명 부활 방지)
-        for (const log of pushLogs) {
-          if (!log || typeof log.id !== 'string') continue;
-          const clientUpdatedAt = Number(log.updatedAt || log.timestamp) || serverTime;
-          const rawJson = JSON.stringify(log);
-
-          writeStatements.push(
-            env.DB.prepare(
-              `INSERT INTO logs (family_id, log_id, client_updated_at, updated_at, deleted_at, raw_json)
-               VALUES (?1, ?2, ?3, ?4, NULL, ?5)
-               ON CONFLICT(family_id, log_id) DO UPDATE SET
-                 client_updated_at = excluded.client_updated_at,
-                 updated_at = excluded.updated_at,
-                 raw_json = excluded.raw_json
-               WHERE logs.deleted_at IS NULL 
-                 AND excluded.client_updated_at >= logs.client_updated_at`
-            ).bind(familyId, log.id, clientUpdatedAt, serverTime, rawJson)
-          );
-          hasWrites = true;
+        const pushLogs: PushLog[] = [];
+        for (const log of rawPushLogs) {
+          if (!log || typeof log !== 'object' || typeof log.id !== 'string') continue;
+          let clientUpdatedAt = Number(log.updatedAt || log.timestamp);
+          if (!Number.isFinite(clientUpdatedAt)) clientUpdatedAt = 0;
+          pushLogs.push({ id: log.id, clientUpdatedAt, raw: canonicalJson(log) });
         }
+        const pushDeletedIds = Array.from(
+          new Set(rawPushDeletedIds.filter((id): id is string => typeof id === 'string')),
+        );
 
-        // 2) 삭제 표식 (Tombstone)
-        for (const delId of pushDeletedIds) {
-          if (typeof delId !== 'string') continue;
-          writeStatements.push(
-            env.DB.prepare(
-              `UPDATE logs SET deleted_at = ?1, updated_at = ?1
-               WHERE family_id = ?2 AND log_id = ?3`
-            ).bind(serverTime, familyId, delId)
-          );
-          hasWrites = true;
-        }
-
-        // 3) 프로필 갱신
-        let targetProfile = {
-          name: family.shared_name || undefined,
-          birthDate: family.shared_birth_date || undefined,
-          birthWeight: family.shared_birth_weight || undefined,
-          targetFormula: family.shared_target_formula !== null ? family.shared_target_formula : undefined,
-          sharedUpdatedAt: family.profile_updated_at || 0,
-        };
-
-        if (pushProfile && typeof pushProfile.sharedUpdatedAt === 'number') {
-          if (pushProfile.sharedUpdatedAt > (family.profile_updated_at || 0) || family.profile_updated_at === 0) {
-            const nextName = pushProfile.name ?? family.shared_name;
-            const nextBirthDate = pushProfile.birthDate ?? family.shared_birth_date;
-            const nextBirthWeight = pushProfile.birthWeight ?? family.shared_birth_weight;
-            const nextTargetFormula = pushProfile.targetFormula ?? family.shared_target_formula;
-
-            writeStatements.push(
-              env.DB.prepare(
-                `UPDATE families SET
-                   shared_name = ?1,
-                   shared_birth_date = ?2,
-                   shared_birth_weight = ?3,
-                   shared_target_formula = ?4,
-                   profile_updated_at = ?5
-                 WHERE id = ?6`
-              ).bind(
-                nextName ?? null,
-                nextBirthDate ?? null,
-                nextBirthWeight ?? null,
-                nextTargetFormula !== undefined ? nextTargetFormula : null,
-                pushProfile.sharedUpdatedAt,
-                familyId
-              )
-            );
-
-            targetProfile = {
-              name: nextName || undefined,
-              birthDate: nextBirthDate || undefined,
-              birthWeight: nextBirthWeight || undefined,
-              targetFormula: nextTargetFormula !== undefined ? nextTargetFormula : undefined,
-              sharedUpdatedAt: pushProfile.sharedUpdatedAt,
-            };
-            hasWrites = true;
-          }
-        }
-
-        // 4) 변경 발생 시 D1 배치 분할(100개 단위) 및 family updated_at / last_client_id 갱신
-        if (hasWrites) {
-          writeStatements.push(
-            env.DB.prepare(
-              `UPDATE families SET updated_at = ?1, last_client_id = ?2 WHERE id = ?3`
-            ).bind(serverTime, clientId, familyId)
-          );
-
-          for (let i = 0; i < writeStatements.length; i += D1_BATCH_CHUNK_SIZE) {
-            await env.DB.batch(writeStatements.slice(i, i + D1_BATCH_CHUNK_SIZE));
-          }
-        }
-
-        // 5) 증분 풀 (Pull) - 직전 동기화 이후의 새 변경만 조회 (updated_at > lastSyncedAt)
-        let queryStr = '';
-        let queryParams: any[] = [];
-
-        if (lastSyncedAt === 0) {
-          // 전체 풀: 활성 로그와 삭제 표식(tombstone) 모두 조회하여
-          // 오프라인 클라이언트나 백업 복원 시 지워진 기록이 부활하는 것을 원천 차단
-          queryStr = 'SELECT raw_json, deleted_at, log_id FROM logs WHERE family_id = ?1 ORDER BY client_updated_at ASC';
-          queryParams = [familyId];
-        } else {
-          // 증분 풀: lastSyncedAt 이후 갱신된 행 조회
-          queryStr = 'SELECT raw_json, deleted_at, log_id FROM logs WHERE family_id = ?1 AND updated_at > ?2 ORDER BY updated_at ASC';
-          queryParams = [familyId, lastSyncedAt];
-        }
-
-        const pullResults = await env.DB.prepare(queryStr)
-          .bind(...queryParams)
-          .all<{ raw_json: string; deleted_at: number | null; log_id?: string }>();
-
-        const remoteLogs: any[] = [];
-        const remoteDeletedIds: string[] = [];
-
-        for (const row of pullResults.results || []) {
-          if (row.deleted_at !== null) {
-            if (row.log_id) {
-              remoteDeletedIds.push(row.log_id);
-            } else {
-              try {
-                const parsed = JSON.parse(row.raw_json);
-                if (parsed.id) remoteDeletedIds.push(parsed.id);
-              } catch {}
-            }
+        // 아기 정보: 공유 항목 4개가 모두 있고 형식이 맞을 때만 쓴다.
+        const pushProfile = body.pushProfile;
+        let profileJson: string | null = null;
+        let profileTs = 0;
+        let profileRejected = false;
+        if (pushProfile !== undefined && pushProfile !== null) {
+          const complete =
+            typeof pushProfile === 'object' &&
+            typeof pushProfile.name === 'string' &&
+            typeof pushProfile.birthDate === 'string' &&
+            typeof pushProfile.birthWeight === 'string' &&
+            typeof pushProfile.targetFormula === 'number' &&
+            Number.isFinite(pushProfile.targetFormula) &&
+            typeof pushProfile.sharedUpdatedAt === 'number' &&
+            Number.isFinite(pushProfile.sharedUpdatedAt);
+          if (complete) {
+            profileJson = canonicalJson({
+              name: pushProfile.name,
+              birthDate: pushProfile.birthDate,
+              birthWeight: pushProfile.birthWeight,
+              targetFormula: pushProfile.targetFormula,
+            });
+            profileTs = pushProfile.sharedUpdatedAt;
           } else {
-            try {
-              remoteLogs.push(JSON.parse(row.raw_json));
-            } catch {}
+            profileRejected = true;
           }
         }
 
-        // 6) 밀린 기록(supersededIds) 판별
-        const supersededIds: string[] = [];
+        // 쓰기 항목: 아기 정보(첫 배치), 기록, 삭제 표식 순서. 시각은 배치마다 찍는다.
+        const items: WriteItem[] = [];
+        if (profileJson !== null) {
+          const j = profileJson;
+          const ts = profileTs;
+          items.push({
+            isProfile: true,
+            build: t =>
+              env.DB.prepare(
+                `UPDATE families SET shared_json = ?1, profile_updated_at = ?2,
+                   updated_at = ?3, last_client_id = ?4
+                 WHERE id = ?5
+                   AND (profile_updated_at < ?2
+                     OR (profile_updated_at = ?2 AND COALESCE(shared_json, '') < ?1))`,
+              ).bind(j, ts, t, clientId, familyId),
+          });
+        }
         for (const log of pushLogs) {
-          if (!log || typeof log.id !== 'string') continue;
-          const clientUpdatedAt = Number(log.updatedAt || log.timestamp) || serverTime;
-          if (remoteDeletedIds.includes(log.id)) {
-            supersededIds.push(log.id);
-            continue;
+          items.push({
+            isProfile: false,
+            build: t =>
+              env.DB.prepare(
+                `INSERT INTO logs (family_id, log_id, client_updated_at, updated_at, deleted_at, raw_json)
+                 SELECT ?1, ?2, ?3, ?4, NULL, ?5
+                 WHERE EXISTS (SELECT 1 FROM families WHERE id = ?1)
+                 ON CONFLICT(family_id, log_id) DO UPDATE SET
+                   client_updated_at = excluded.client_updated_at,
+                   updated_at = excluded.updated_at,
+                   raw_json = excluded.raw_json
+                 WHERE logs.deleted_at IS NULL
+                   AND (excluded.client_updated_at > logs.client_updated_at
+                     OR (excluded.client_updated_at = logs.client_updated_at
+                         AND excluded.raw_json > logs.raw_json))`,
+              ).bind(familyId, log.id, log.clientUpdatedAt, t, log.raw),
+          });
+        }
+        for (const delId of pushDeletedIds) {
+          items.push({
+            isProfile: false,
+            build: t =>
+              env.DB.prepare(
+                `INSERT INTO logs (family_id, log_id, client_updated_at, updated_at, deleted_at, raw_json)
+                 SELECT ?1, ?2, 0, ?3, ?3, ?4
+                 WHERE EXISTS (SELECT 1 FROM families WHERE id = ?1)
+                 ON CONFLICT(family_id, log_id) DO UPDATE SET
+                   deleted_at = excluded.deleted_at, updated_at = excluded.updated_at
+                 WHERE logs.deleted_at IS NULL`,
+              ).bind(familyId, delId, t, canonicalJson({ deleted: true, id: delId })),
+          });
+        }
+
+        // 쓰기 배치(100문장 이하): 배치마다 새 시각을 찍고, 행이 있으면 마지막 문장으로 조건부 토큰 갱신.
+        const chunkSize = D1_BATCH_CHUNK_SIZE - 1;
+        for (let i = 0; i < items.length; i += chunkSize) {
+          const chunk = items.slice(i, i + chunkSize);
+          const t = now(env);
+          const statements = chunk.map(item => item.build(t));
+          if (chunk.some(item => !item.isProfile)) {
+            statements.push(
+              env.DB.prepare(
+                `UPDATE families SET updated_at = ?1, last_client_id = ?2
+                 WHERE id = ?3
+                   AND EXISTS (SELECT 1 FROM logs WHERE family_id = ?3 AND updated_at = ?1)`,
+              ).bind(t, clientId, familyId),
+            );
           }
-          const matchingRemote = remoteLogs.find(r => r.id === log.id);
-          if (matchingRemote) {
-            const remoteClientUpdated = Number(matchingRemote.updatedAt || matchingRemote.timestamp) || 0;
-            if (remoteClientUpdated > clientUpdatedAt) {
-              supersededIds.push(log.id);
+          await env.DB.batch(statements);
+        }
+
+        // 읽기 배치 하나: 아기 정보, 올리기 분류(id 99개씩 IN), 당겨 받기 페이지(요청했을 때만).
+        const reads: D1PreparedStatement[] = [
+          env.DB.prepare('SELECT shared_json, profile_updated_at FROM families WHERE id = ?1').bind(familyId),
+        ];
+        const classifyIds = Array.from(new Set(pushLogs.map(log => log.id)));
+        const classifyStatementCount = Math.ceil(classifyIds.length / CLASSIFY_ID_CHUNK);
+        for (let i = 0; i < classifyIds.length; i += CLASSIFY_ID_CHUNK) {
+          const ids = classifyIds.slice(i, i + CLASSIFY_ID_CHUNK);
+          const placeholders = ids.map((_, idx) => `?${idx + 2}`).join(',');
+          reads.push(
+            env.DB.prepare(
+              `SELECT log_id, client_updated_at, deleted_at, raw_json FROM logs
+               WHERE family_id = ?1 AND log_id IN (${placeholders})`,
+            ).bind(familyId, ...ids),
+          );
+        }
+
+        const pullRequest = body.pull && typeof body.pull === 'object' ? body.pull : null;
+        let pullLimit = 0;
+        let pullAfterUpdatedAt = 0;
+        let pullAfterLogId = '';
+        let cursorCandidate: number | undefined;
+        if (pullRequest) {
+          const requestedLimit = Number(pullRequest.limit);
+          pullLimit = Math.floor(
+            Math.min(maxPageRows, Math.max(MIN_PAGE_ROWS, Number.isFinite(requestedLimit) ? requestedLimit : maxPageRows)),
+          );
+          const afterUpdatedAt = Number(pullRequest.afterUpdatedAt);
+          pullAfterUpdatedAt = Number.isFinite(afterUpdatedAt) ? afterUpdatedAt : 0;
+          pullAfterLogId = typeof pullRequest.afterLogId === 'string' ? pullRequest.afterLogId : '';
+          cursorCandidate = now(env) - CURSOR_MARGIN_MS;
+          reads.push(
+            env.DB.prepare(
+              `SELECT log_id, updated_at, deleted_at, raw_json FROM logs
+               WHERE family_id = ?1 AND (updated_at, log_id) > (?2, ?3)
+               ORDER BY updated_at, log_id
+               LIMIT ?4`,
+            ).bind(familyId, pullAfterUpdatedAt, pullAfterLogId, pullLimit + 1),
+          );
+        }
+
+        const readResults = await env.DB.batch(reads);
+
+        const profileRow = (readResults[0].results?.[0] ?? null) as Pick<FamilyRow, 'shared_json' | 'profile_updated_at'> | null;
+        if (!profileRow) {
+          // 읽기 전에 영구 삭제가 확정된 경우
+          return familyMissingResponse(env, familyId);
+        }
+
+        // 올리기 분류
+        const serverRows = new Map<string, ServerRow>();
+        for (let i = 0; i < classifyStatementCount; i += 1) {
+          for (const row of (readResults[1 + i].results ?? []) as ServerRow[]) {
+            serverRows.set(row.log_id, row);
+          }
+        }
+        const acceptedIds: string[] = [];
+        const remoteDeletedIds: string[] = [];
+        const remoteDeletedSet = new Set<string>();
+        const remoteRawParts: string[] = [];
+        const remoteLogIdSet = new Set<string>();
+        for (const log of pushLogs) {
+          const row = serverRows.get(log.id);
+          if (!row) continue;
+          if (row.deleted_at !== null) {
+            if (!remoteDeletedSet.has(log.id)) {
+              remoteDeletedSet.add(log.id);
+              remoteDeletedIds.push(log.id);
+            }
+          } else if (row.raw_json === log.raw) {
+            acceptedIds.push(log.id);
+          } else if (!remoteLogIdSet.has(log.id)) {
+            remoteLogIdSet.add(log.id);
+            remoteRawParts.push(row.raw_json);
+          }
+        }
+
+        // 당겨 받기 페이지
+        let hasMore: boolean | undefined;
+        let nextAfter: { updatedAt: number; logId: string } | undefined;
+        if (pullRequest) {
+          const pageRows = (readResults[readResults.length - 1].results ?? []) as ServerRow[];
+          let rows = pageRows;
+          let more = false;
+          if (rows.length > pullLimit) {
+            rows = rows.slice(0, pullLimit);
+            more = true;
+          }
+          let bytes = 0;
+          let included = rows.length;
+          for (let i = 0; i < rows.length; i += 1) {
+            bytes += utf8Bytes(rows[i].raw_json);
+            if (bytes >= PULL_BYTE_BUDGET) {
+              included = i + 1;
+              if (included < rows.length) more = true;
+              break;
             }
           }
+          rows = rows.slice(0, included);
+          for (const row of rows) {
+            if (row.deleted_at !== null) {
+              if (!remoteDeletedSet.has(row.log_id)) {
+                remoteDeletedSet.add(row.log_id);
+                remoteDeletedIds.push(row.log_id);
+              }
+            } else if (!remoteLogIdSet.has(row.log_id)) {
+              remoteLogIdSet.add(row.log_id);
+              remoteRawParts.push(row.raw_json);
+            }
+          }
+          hasMore = more;
+          const last = rows[rows.length - 1];
+          nextAfter = last
+            ? { updatedAt: Number(last.updated_at), logId: last.log_id }
+            : { updatedAt: pullAfterUpdatedAt, logId: pullAfterLogId };
         }
 
-        return jsonResponse({
+        let remoteProfile: Record<string, unknown> | undefined;
+        if (profileRow.shared_json !== null) {
+          remoteProfile = {
+            ...(JSON.parse(profileRow.shared_json) as Record<string, unknown>),
+            sharedUpdatedAt: profileRow.profile_updated_at,
+          };
+        }
+
+        const head = JSON.stringify({
           ok: true,
-          serverTime,
-          remoteLogs,
+          serverTime: now(env),
+          acceptedIds,
           remoteDeletedIds,
-          remoteProfile: targetProfile,
-          supersededIds,
+          remoteProfile,
+          profileRejected: profileRejected ? true : undefined,
+          hasMore,
+          nextAfter,
+          cursorCandidate,
+          maxPushItems,
+          maxPageRows,
+        });
+        // raw_json은 파싱하지 않고 저장된 canonical JSON 문자열을 그대로 이어 붙인다.
+        const responseBody = `${head.slice(0, -1)},"remoteLogs":[${remoteRawParts.join(',')}]}`;
+        return new Response(responseBody, {
+          status: 200,
+          headers: {
+            'Content-Type': 'application/json; charset=utf-8',
+            ...CORS_HEADERS,
+          },
         });
       }
 
