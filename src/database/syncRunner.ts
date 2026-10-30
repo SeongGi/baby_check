@@ -164,7 +164,8 @@ export function createSyncRunner(deps: SyncRunnerDeps): {
           return;
         }
 
-        if (abortToken.aborted && !latestProfile.syncKey) {
+        // 상한으로 중단된 연결 회차는 사용자가 연결을 해제한 것이 아니므로 아래 판정에서 실패로 처리합니다.
+        if (abortToken.aborted && !timedOut && !latestProfile.syncKey) {
           deps.onEvent({ type: 'detached' });
           resolveVisible({ ...result, success: false, merged: false, error: '가족 연결이 해제되었습니다.' });
           return;

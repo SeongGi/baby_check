@@ -310,13 +310,24 @@ export default {
         }
 
         // 배치로 완전 삭제. 삭제 기록을 맨 앞에 넣어 같은 배치로 함께 확정한다.
-        await env.DB.batch([
-          env.DB.prepare('INSERT OR IGNORE INTO deleted_families (id, deleted_at) VALUES (?1, ?2)').bind(familyId, t),
-          env.DB.prepare('DELETE FROM logs WHERE family_id = ?1').bind(familyId),
-          env.DB.prepare('DELETE FROM members WHERE family_id = ?1').bind(familyId),
-          env.DB.prepare('DELETE FROM families WHERE id = ?1').bind(familyId),
+        // 위의 확인과 배치 사이에 삭제 취소가 끼어들 수 있으므로, 냉각 기간 조건을 첫 문장에서 다시 확인하고
+        // 나머지 문장은 이 배치가 삭제 기록을 남겼을 때만 지운다.
+        const deleteGuard = 'EXISTS (SELECT 1 FROM deleted_families WHERE id = ?1 AND deleted_at = ?2)';
+        const results = await env.DB.batch([
+          env.DB.prepare(
+            `INSERT OR IGNORE INTO deleted_families (id, deleted_at)
+             SELECT ?1, ?2
+             WHERE EXISTS (SELECT 1 FROM families
+                           WHERE id = ?1 AND deletion_ready_at IS NOT NULL AND deletion_ready_at <= ?2)`,
+          ).bind(familyId, t),
+          env.DB.prepare(`DELETE FROM logs WHERE family_id = ?1 AND ${deleteGuard}`).bind(familyId, t),
+          env.DB.prepare(`DELETE FROM members WHERE family_id = ?1 AND ${deleteGuard}`).bind(familyId, t),
+          env.DB.prepare(`DELETE FROM families WHERE id = ?1 AND ${deleteGuard}`).bind(familyId, t),
         ]);
 
+        if (changesOf(results[0]) === 0) {
+          return errorResponse('cooling_period_active', 400);
+        }
         return jsonResponse({ ok: true });
       }
 
@@ -599,7 +610,9 @@ export default {
 
       return errorResponse('not_found', 404);
     } catch (err: any) {
-      return errorResponse(err?.message || 'internal_server_error', 500);
+      // D1 오류 문구에는 SQL 일부가 들어 있으므로 응답에는 싣지 않고 로그에만 남긴다.
+      console.error('Unhandled server error', err);
+      return errorResponse('internal_server_error', 500);
     }
   },
 };

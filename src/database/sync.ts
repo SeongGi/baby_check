@@ -29,6 +29,7 @@ import {
   UPLOAD_STALLED_MESSAGE,
 } from './syncDecision';
 import { utf8ByteLength } from '../utils/utf8';
+import { compareCodePoints } from '../utils/compareCodePoints';
 
 const SYNC_INVITE_PREFIX = 'babycheck://family/';
 const FULL_RECONCILE_INTERVAL_MS = 6 * 60 * 60 * 1000;
@@ -138,9 +139,10 @@ const protocolError = (message: string): Error => {
   return err;
 };
 
+// 서버의 (updated_at, log_id) 정렬(SQLite BINARY)과 같은 코드 포인트 순서로 비교합니다.
 const isCursorAfter = (next: SyncCursor, current: SyncCursor): boolean =>
   next.updatedAt > current.updatedAt
-  || (next.updatedAt === current.updatedAt && next.logId > current.logId);
+  || (next.updatedAt === current.updatedAt && compareCodePoints(next.logId, current.logId) > 0);
 
 const readNextAfter = (value: unknown): SyncCursor | null => {
   const v = value as { updatedAt?: unknown; logId?: unknown } | null | undefined;
@@ -460,7 +462,9 @@ export const syncWithCloud = async (
     }
 
     // 6. 증분 당겨 받기: 전체 모드인 회차는 건너뜁니다.
-    while (!fullMode && !skipIncremental && !endRound && !abortedRound) {
+    // 다만 이 회차에 전체 모드를 끝내고 올리기까지 했다면 한 번 더 받습니다. 마지막 페이지를 받은 뒤
+    // 상대 기기가 쓴 기록은 이 기기의 올리기가 변경 토큰을 자기 것으로 덮어 폴링으로 알 수 없기 때문입니다.
+    while ((!fullMode || (!ledger.full && batches > 0)) && !skipIncremental && !endRound && !abortedRound) {
       if (isAborted()) { abortedRound = true; break; }
       if (elapsed() >= timing.cycleBudgetMs) { continuing = true; break; }
       const after: SyncCursor = ledger.pullAfter ?? { updatedAt: ledger.cursorMillis, logId: '' };

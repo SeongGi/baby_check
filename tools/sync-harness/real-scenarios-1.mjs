@@ -384,6 +384,8 @@ await scenario('3', '장부 정확성: 올리기 응답을 기다리는 동안 �
 
   // 올릴 기록 N0 하나를 두고, 그 올리기 요청이 서버에서 기다리는 동안 추가, 수정, 삭제를 한다.
   const N0 = (await A.send('addLog', { log: { type: 'formula', amount: 11, timestamp: Date.now() } })).saved;
+  // M도 같은 묶음에 담겨 서버로 가는 기록이다. 응답을 기다리는 동안 M을 고치면 올림으로 적히면 안 된다(설계 2.6.1의 2번).
+  const M = (await A.send('addLog', { log: { type: 'formula', amount: 33, timestamp: Date.now() } })).saved;
   // 회차 예산을 300ms로 줄여서, 멈춘 요청이 끝나면 회차가 곧바로 끝나게 한다(같은 회차의 다음 묶음으로 올라가는 경로를 막는다).
   await A.send('setTiming', { cycleBudgetMs: 300 });
   const gate = await adapter.holdNext({ kind: 'push', clientId: idA });
@@ -393,6 +395,11 @@ await scenario('3', '장부 정확성: 올리기 응답을 기다리는 동안 �
   await sleep(15);
   await A.send('updateLog', { log: { ...P, amount: 777 } });
   await A.send('deleteLog', { id: Q.id });
+  await sleep(15);
+  await A.send('updateLog', { log: { ...M, amount: 888 } });
+  const editedM = (await A.send('getLogs')).logs.find((l) => l.id === M.id);
+  assert.equal(editedM.amount, 888, '전제: 멈춘 묶음 안의 기록 M이 응답 전에 고쳐졌다');
+  assert.ok(editedM.updatedAt > (M.updatedAt || M.timestamp), '전제: 고친 M의 버전 시각이 보낸 버전보다 늦다');
   await sleep(400);
   await gate.release();
   const round = await pending;
@@ -401,6 +408,10 @@ await scenario('3', '장부 정확성: 올리기 응답을 기다리는 동안 �
   const ledger1 = await ledgerOf(A);
   assert.equal(typeof ledger1.uploaded[N0.id], 'number', '전제: 멈췄던 묶음의 N0는 올림으로 적혀야 한다');
   assert.equal(ledger1.uploaded[N1.id], undefined, '요청 중에 추가한 기록이 올림으로 적혔다');
+  // 멈춘 묶음에 담겼던 M은 서버가 받았지만 그 사이 고쳤으므로, 고친 버전 시각이 올림으로 적히면 안 된다.
+  assert.notEqual(ledger1.uploaded[M.id], editedM.updatedAt, '묶음 안의 기록을 응답 전에 고쳤는데 고친 버전이 올림으로 적혔다');
+  assert.ok(ledger1.uploaded[M.id] === undefined || ledger1.uploaded[M.id] === (M.updatedAt || M.timestamp), `M의 올림 시각이 보낸 버전도 아니다: ${ledger1.uploaded[M.id]}`);
+  assert.ok((await livePairs(adapter, key)).some(([id, raw]) => id === M.id && JSON.parse(raw).amount === 33), '전제: 서버에는 M의 보낸 버전(33)이 있다');
   assert.equal(ledger1.uploaded[P.id], 3_000_000, '요청 중에 고친 기록이 새 버전으로 올림에 적혔다');
   assert.ok(!ledger1.tombstoned.includes(Q.id), '요청 중에 지운 기록의 삭제 표식이 올림으로 적혔다');
   assert.ok(!(await livePairs(adapter, key)).some(([id]) => id === N1.id), '전제: 서버에는 아직 N1이 없다');
@@ -413,10 +424,12 @@ await scenario('3', '장부 정확성: 올리기 응답을 기다리는 동안 �
   assert.ok(serverLive.some(([id]) => id === N1.id), '다음 회차에 N1이 올라가지 않았다');
   assert.ok(serverLive.some(([id, raw]) => id === P.id && JSON.parse(raw).amount === 777), '다음 회차에 고친 기록이 올라가지 않았다');
   assert.ok((await deletedOnServer(adapter, key)).includes(Q.id), '다음 회차에 삭제 표식이 올라가지 않았다');
+  assert.ok(serverLive.some(([id, raw]) => id === M.id && JSON.parse(raw).amount === 888), '다음 회차에 묶음 안에서 고친 M이 올라가지 않았다');
   await sync(B);
   const bLogs = (await B.send('getLogs')).logs;
   assert.ok(bLogs.some((l) => l.id === N1.id), 'B가 N1을 받지 못했다');
   assert.equal(bLogs.find((l) => l.id === P.id)?.amount, 777, 'B가 고친 기록을 받지 못했다');
+  assert.equal(bLogs.find((l) => l.id === M.id)?.amount, 888, 'B가 묶음 안에서 고친 M을 받지 못했다');
   assert.ok(!bLogs.some((l) => l.id === Q.id), 'B에 삭제한 기록이 남았다');
   assertSamePairs('A', await logSetOf(A), 'B', await logSetOf(B));
   assertSamePairs('A', await logSetOf(A), '서버', serverLive);
@@ -828,10 +841,14 @@ await scenario('7-1/저장전상한', '여러 요청 가족 만들기: 첫 저�
   await sleep(1300);
   await slow.clear();
   assert.equal((await storedProfile(A))?.syncKey ?? null, null, '늦은 응답이 상한 뒤에 키를 저장했다');
-  // 연결 회차가 상한으로 중단되면 저장된 키도 없으므로 러너는 이를 detached로 알린다(App의 기존 동작). 어느 쪽이든 성공 사건은 없어야 한다.
+  // 상한으로 중단된 연결 회차는 연결 해제가 아니므로 detached가 아니라 failed로 알리고, 오류는 시간 초과 문구여야 한다.
   const events = await eventsOf(A);
-  assert.ok(events.some((e) => e.type === 'failed' || e.type === 'detached'), `실패를 알리는 사건이 없다: ${JSON.stringify(events.map((e) => e.type))}`);
-  assert.ok(!events.some((e) => e.type === 'succeeded'), '성공 사건이 있으면 안 된다');
+  const types = events.map((e) => e.type);
+  assert.ok(types.includes('failed'), `failed 사건이 없다: ${JSON.stringify(types)}`);
+  assert.ok(!types.includes('detached'), `상한에 걸린 연결 회차가 detached로 알려졌다: ${JSON.stringify(types)}`);
+  assert.ok(!types.includes('succeeded'), '성공 사건이 있으면 안 된다');
+  assert.ok(String(result.error).includes('서버 응답을 기다리고 있어요'), `결과 오류가 시간 초과 문구가 아니다: ${result.error}`);
+  assert.ok(String(events.find((e) => e.type === 'failed').error).includes('서버 응답을 기다리고 있어요'), '실패 사건의 오류가 시간 초과 문구가 아니다');
 });
 
 await scenario('7-1/503', '여러 요청 가족 만들기: 첫 저장 뒤 다른 요청이 503이어도 success, continuing이고, 모든 요청이 503이면 실패다', ['s1A'], async ({ adapter, devices: [A] }) => {

@@ -171,6 +171,12 @@ function MainApp() {
             setSyncState('error');
             setSyncError(event.error || '서버에 연결하지 못했습니다.');
             lastSyncFailedRef.current = true;
+            // 실패한 회차라도 앞서 받은 페이지는 저장소에 저장됐으므로 화면에도 반영합니다.
+            if (event.result?.merged) {
+              setLogs(event.result.logs);
+              setProfile(event.result.profile);
+              void refreshFeedingReminder(event.result.logs, event.result.profile);
+            }
             break;
           case 'disconnected':
             setProfile(event.profile);
