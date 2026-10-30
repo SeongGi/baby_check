@@ -1,6 +1,7 @@
 import React, { useState } from 'react';
-import { Alert, KeyboardAvoidingView, Platform, ScrollView, StyleSheet, Text, TextInput, TouchableOpacity, View } from 'react-native';
+import { Alert, ScrollView, StyleSheet, Text, TextInput, TouchableOpacity, View } from 'react-native';
 import { COLORS } from '../theme/colors';
+import { KeyboardAwareScrollView } from '../components/KeyboardAwareScrollView';
 import { WeightLog } from '../types';
 
 interface LogWeightProps {
@@ -30,15 +31,9 @@ export const LogWeight: React.FC<LogWeightProps> = ({ onAddLog, onNavigate }) =>
   };
 
   return (
-    <KeyboardAvoidingView 
-      style={styles.container} 
-      behavior={Platform.OS === 'ios' ? 'padding' : undefined}
-      keyboardVerticalOffset={Platform.OS === 'ios' ? 64 : 0}
-    >
-      <ScrollView 
-        contentContainerStyle={styles.content} 
-        keyboardShouldPersistTaps="handled"
-        keyboardDismissMode="on-drag"
+    <KeyboardAwareScrollView
+      containerStyle={styles.container}
+      contentContainerStyle={styles.content} 
       >
         <View style={styles.header}>
           <TouchableOpacity onPress={() => onNavigate('dashboard')} style={styles.backButton}><Text style={styles.backText}>‹</Text></TouchableOpacity>
@@ -57,8 +52,7 @@ export const LogWeight: React.FC<LogWeightProps> = ({ onAddLog, onNavigate }) =>
         <TouchableOpacity style={[styles.saveButton, isSaving && styles.disabled]} onPress={handleSave} disabled={isSaving}>
           <Text style={styles.saveText}>{isSaving ? '저장 중...' : '체중 기록 저장하기'}</Text>
         </TouchableOpacity>
-      </ScrollView>
-    </KeyboardAvoidingView>
+    </KeyboardAwareScrollView>
   );
 };
 

@@ -1,6 +1,6 @@
 {
   "name": "baby_check",
-  "version": "1.7.8",
+  "version": "1.7.9",
   "main": "index.ts",
   "dependencies": {
     "@expo/ui": "~56.0.26",

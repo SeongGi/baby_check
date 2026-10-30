@@ -10,6 +10,13 @@ export const getInstalledAppVersion = (): string => {
   return build ? `${version} (코드 ${build})` : version;
 };
 
+/**
+ * 빌드할 때 넣은 배포 스토어입니다. 원스토어 빌드는
+ * `EXPO_PUBLIC_DISTRIBUTION_STORE=onestore`로 번들을 만듭니다.
+ */
+export const DISTRIBUTION_STORE: 'play' | 'onestore' =
+  process.env.EXPO_PUBLIC_DISTRIBUTION_STORE === 'onestore' ? 'onestore' : 'play';
+
 /** Let Google Play decide whether this tester has an update available. */
 export const openGooglePlayListing = async (): Promise<void> => {
   const marketUrl = `market://details?id=${PLAY_PACKAGE}`;

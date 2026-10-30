@@ -6,11 +6,11 @@ import {
   TouchableOpacity, 
   TextInput, 
   Alert,
-  KeyboardAvoidingView, 
   Platform, 
   ScrollView 
 } from 'react-native';
 import { COLORS } from '../theme/colors';
+import { KeyboardAwareScrollView } from '../components/KeyboardAwareScrollView';
 import { BottleSlider } from '../components/BottleSlider';
 import { MilkTemperature, FeedingType } from '../types';
 
@@ -90,17 +90,11 @@ export const LogFormula: React.FC<LogFormulaProps> = ({ onAddLog, onNavigate }) 
   };
 
   return (
-    <KeyboardAvoidingView 
-      style={styles.keyboardView}
-      behavior={Platform.OS === 'ios' ? 'padding' : undefined}
-      keyboardVerticalOffset={Platform.OS === 'ios' ? 64 : 0}
-    >
-      <ScrollView 
+    <KeyboardAwareScrollView
+        containerStyle={styles.keyboardView}
         style={styles.container} 
         contentContainerStyle={styles.contentContainer}
         scrollEnabled={scrollEnabled}
-        keyboardShouldPersistTaps="handled"
-        keyboardDismissMode="on-drag"
       >
         {/* Header Title */}
         <View style={styles.header}>
@@ -241,8 +235,7 @@ export const LogFormula: React.FC<LogFormulaProps> = ({ onAddLog, onNavigate }) 
             {isSaving ? '저장 중...' : '기록 저장하기'}
           </Text>
         </TouchableOpacity>
-      </ScrollView>
-    </KeyboardAvoidingView>
+    </KeyboardAwareScrollView>
   );
 };
 

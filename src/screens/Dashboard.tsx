@@ -12,8 +12,9 @@ import {
   Platform,
   RefreshControl
 } from 'react-native';
-import { BabyLogEntry, BabyProfile, FormulaLog, StoolLog, MilkTemperature, FeedingType, StoolColor, StoolConsistency, StoolAmount, BathLog, BathType, WeightLog, SleepLog, TummyTimeLog, PlayLog } from '../types';
+import { BabyLogEntry, BabyProfile, FormulaLog, StoolLog, MilkTemperature, FeedingType, StoolColor, StoolConsistency, StoolAmount, BathLog, BathType, WeightLog, TemperatureLog, SleepLog, TummyTimeLog, PlayLog } from '../types';
 import { COLORS } from '../theme/colors';
+import { KeyboardAwareScrollView } from '../components/KeyboardAwareScrollView';
 import { getDDay, formatTime, getRelativeDateString, formatDateTime } from '../utils/date';
 import { BottleSlider } from '../components/BottleSlider';
 import { getLatestFeeding, getNextFeedingAt } from '../utils/feedingReminder';
@@ -111,7 +112,7 @@ interface DashboardProps {
   autoStartVoiceRequest: number;
   onAutoStartVoiceHandled: (request: number) => void;
   onVoiceRecognitionActivity: (active: boolean) => void;
-  onNavigate: (screen: 'dashboard' | 'formula' | 'diaper' | 'bath' | 'weight' | 'statistics' | 'profile') => void;
+  onNavigate: (screen: 'dashboard' | 'formula' | 'diaper' | 'bath' | 'weight' | 'temperature' | 'statistics' | 'profile') => void;
   refreshing?: boolean;
   onRefresh?: () => void;
   onSetNextFeedingTime: (timestamp: number | null, feedingLogId?: string) => Promise<void>;
@@ -239,6 +240,7 @@ export const Dashboard: React.FC<DashboardProps> = ({
   const [editBathType, setEditBathType] = useState<BathType>('full');
   const [editBathDuration, setEditBathDuration] = useState(10);
   const [editWeight, setEditWeight] = useState('');
+  const [editBodyTemp, setEditBodyTemp] = useState('');
 
   // Time state inputs
   const [editHour, setEditHour] = useState('0');
@@ -281,6 +283,8 @@ export const Dashboard: React.FC<DashboardProps> = ({
       setEditBathDuration(log.durationMinutes);
     } else if (log.type === 'weight') {
       setEditWeight(String(log.weightKg));
+    } else if (log.type === 'temperature') {
+      setEditBodyTemp(String(log.temperatureC));
     }
   };
 
@@ -380,6 +384,14 @@ export const Dashboard: React.FC<DashboardProps> = ({
         return;
       }
       updatedLog = { ...updatedLog, weightKg } as WeightLog;
+    } else if (editingLog.type === 'temperature') {
+      const parsed = Number(editBodyTemp.replace(',', '.'));
+      if (!Number.isFinite(parsed) || parsed < 34 || parsed > 42) {
+        Alert.alert('체온 확인', '34~42℃ 사이의 체온을 입력해 주세요.');
+        return;
+      }
+      const temperatureC = Math.round(parsed * 10) / 10; // 소수 첫째 자리로 반올림
+      updatedLog = { ...updatedLog, temperatureC } as TemperatureLog;
     } else if (isTimedType(editingLog.type)) {
       if (editEndedAt !== undefined && editEndedAt <= editTimestamp) {
         Alert.alert('시간 확인', '종료 시간은 시작 시간보다 늦어야 해요.');
@@ -404,7 +416,7 @@ export const Dashboard: React.FC<DashboardProps> = ({
 
   const handleDeletePress = (id: string, logType: string) => {
     const typeKorean = isTimedType(logType) ? TIMED_META[logType].label
-      : logType === 'formula' ? '수유' : logType === 'stool' ? '대변' : logType === 'bath' ? '목욕' : logType === 'weight' ? '체중' : '소변';
+      : logType === 'formula' ? '수유' : logType === 'stool' ? '대변' : logType === 'bath' ? '목욕' : logType === 'weight' ? '체중' : logType === 'temperature' ? '체온' : '소변';
     Alert.alert(
       '기록 삭제',
       `이 ${typeKorean} 기록을 삭제하시겠습니까?`,
@@ -492,6 +504,13 @@ export const Dashboard: React.FC<DashboardProps> = ({
             <Text style={styles.logDescSub}>성장 기록</Text>
           </View>
         );
+      case 'temperature':
+        return (
+          <View>
+            <Text style={styles.logDescTitle}>체온 🌡️ <Text style={[styles.logHighlight, { color: '#C95F43' }]}>{log.temperatureC}℃</Text>{log.temperatureC >= 38 ? ' · 발열 주의' : ''}</Text>
+            <Text style={styles.logDescSub}>건강 기록</Text>
+          </View>
+        );
       case 'sleep':
       case 'tummyTime':
       case 'play': {
@@ -513,6 +532,7 @@ export const Dashboard: React.FC<DashboardProps> = ({
     if (type === 'stool') return COLORS.accent;
     if (type === 'bath') return COLORS.bath;
     if (type === 'weight') return '#7C9CBF';
+    if (type === 'temperature') return '#E07A5F';
     if (isTimedType(type)) return TIMED_META[type].color;
     return COLORS.secondary;
   };
@@ -611,6 +631,10 @@ export const Dashboard: React.FC<DashboardProps> = ({
           <TouchableOpacity style={[styles.quickButton, { backgroundColor: '#7C9CBF' }]} onPress={() => onNavigate('weight')}>
             <Text style={styles.quickButtonIcon}>⚖️</Text>
             <Text style={styles.quickButtonText}>체중 기록</Text>
+          </TouchableOpacity>
+          <TouchableOpacity style={[styles.quickButton, { backgroundColor: '#E07A5F' }]} onPress={() => onNavigate('temperature')} accessibilityRole="button" accessibilityLabel="체온 기록 추가">
+            <Text style={styles.quickButtonIcon}>🌡️</Text>
+            <Text style={styles.quickButtonText}>체온 기록</Text>
           </TouchableOpacity>
           {TIMED_TYPES.map(type => {
             const meta = TIMED_META[type];
@@ -763,7 +787,7 @@ export const Dashboard: React.FC<DashboardProps> = ({
       </ScrollView>
 
       <Modal visible={showNextFeedingModal} transparent animationType="fade" onRequestClose={() => setShowNextFeedingModal(false)}>
-        <View style={styles.nextTimeModalOverlay}>
+        <KeyboardAvoidingView style={styles.nextTimeModalOverlay} behavior="padding">
           <View style={styles.nextTimeModalCard}>
             <Text style={styles.nextTimeModalTitle}>⏰ 다음 수유 시간 정하기</Text>
             <Text style={styles.nextTimeModalDesc}>현재 시각보다 이전으로 설정하면 내일 시간으로 저장됩니다.</Text>
@@ -802,7 +826,7 @@ export const Dashboard: React.FC<DashboardProps> = ({
               </TouchableOpacity>
             </View>
           </View>
-        </View>
+        </KeyboardAvoidingView>
       </Modal>
 
       {/* Interactive Edit Modal */}
@@ -815,18 +839,18 @@ export const Dashboard: React.FC<DashboardProps> = ({
         >
           <KeyboardAvoidingView 
             style={styles.modalOverlay}
-            behavior={Platform.OS === 'ios' ? 'padding' : undefined}
+            behavior="padding"
           >
             <View style={styles.modalContent}>
               {/* Modal Header */}
               <View style={styles.modalHeader}>
-                <Text style={styles.modalTitle}>기록 수정 ({isTimedType(editingLog.type) ? TIMED_META[editingLog.type].modalTitleWord : editingLog.type === 'formula' ? '수유' : editingLog.type === 'stool' ? '대변' : editingLog.type === 'bath' ? '목욕' : editingLog.type === 'weight' ? '체중' : '소변'})</Text>
+                <Text style={styles.modalTitle}>기록 수정 ({isTimedType(editingLog.type) ? TIMED_META[editingLog.type].modalTitleWord : editingLog.type === 'formula' ? '수유' : editingLog.type === 'stool' ? '대변' : editingLog.type === 'bath' ? '목욕' : editingLog.type === 'weight' ? '체중' : editingLog.type === 'temperature' ? '체온' : '소변'})</Text>
                 <TouchableOpacity onPress={() => setEditingLog(null)} style={styles.modalCloseButton}>
                   <Text style={styles.modalCloseText}>✕</Text>
                 </TouchableOpacity>
               </View>
 
-              <ScrollView style={styles.modalScrollView} showsVerticalScrollIndicator={false}>
+              <KeyboardAwareScrollView containerStyle={styles.modalScrollContainer} style={styles.modalScrollView} showsVerticalScrollIndicator={false}>
                 {/* 1. Time edit section */}
                 <View style={styles.modalSection}>
                   <Text style={styles.modalSectionTitle}>{isTimedType(editingLog.type) ? TIMED_META[editingLog.type].startSectionTitle : '⏰ 시간 설정'}</Text>
@@ -1091,6 +1115,13 @@ export const Dashboard: React.FC<DashboardProps> = ({
                   </View>
                 )}
 
+                {editingLog.type === 'temperature' && (
+                  <View style={styles.modalSection}>
+                    <Text style={styles.modalSectionTitle}>🌡️ 체온</Text>
+                    <TextInput style={styles.modalNotesInput} value={editBodyTemp} onChangeText={value => setEditBodyTemp(value.replace(/[^0-9.,]/g, ''))} keyboardType="decimal-pad" placeholder="예: 36.8" />
+                  </View>
+                )}
+
                 {/* 3. Notes edit section */}
                 <View style={styles.modalSection}>
                   <Text style={styles.modalSectionTitle}>📝 메모 수정</Text>
@@ -1103,7 +1134,7 @@ export const Dashboard: React.FC<DashboardProps> = ({
                     multiline
                   />
                 </View>
-              </ScrollView>
+              </KeyboardAwareScrollView>
 
               {/* Action buttons */}
               <View style={styles.modalFooter}>
@@ -1472,6 +1503,8 @@ const styles = StyleSheet.create({
     color: COLORS.textMuted,
     fontWeight: 'bold',
   },
+  // 내용 높이만큼만 차지하다가 카드가 줄어들면 함께 줄어듭니다.
+  modalScrollContainer: { flex: 0, flexShrink: 1 },
   modalScrollView: {
     marginBottom: 12,
   },
