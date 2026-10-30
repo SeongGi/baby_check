@@ -24,7 +24,8 @@ import { createFakeAdapter } from './server-adapter.mjs';
 //  - 시나리오 18 진전 없음 중단: 서버 분류가 항상 "받아들이지 않음"이 되도록 state.rejectAllPushes 로 조작한다
 //  - 시나리오 17의 응답 조작: 같은 sharedUpdatedAt 의 불완전한 remoteProfile 을 state.tamperSyncResponse 로 끼워 넣는다
 //  - 시나리오 6-a 의 빈 문자열 아기 이름 응답 조작(같은 방식)
-// 두 시나리오는 실제 서버에서 판정할 수 있는 부분(서버가 일부 항목만 있는 pushProfile 을 거부하는 것 등)을 real-scenarios.mjs 에서 맡습니다.
+// 시나리오 17은 실제 서버에서 판정할 수 있는 부분(shared_json NULL 이면 remoteProfile 없음, 일부 항목만 있는 pushProfile 거부 등)을
+// real-scenarios-2.mjs 에서 맡고, 18은 실제 Worker 코드로 만들 수 없어 여기(가짜 Worker 모드)에서만 판정합니다.
 const REAL = process.env.HARNESS_REAL_WORKER === '1';
 let srv;
 let realHarness = null;
@@ -458,10 +459,23 @@ await reset();
 await storage.saveProfile({ ...await storage.getProfile(), syncKey: bigKey, name: '지킬이름' });
 assert.equal((await syncWithCloud(bigKey, await storage.getLogs(), await storage.getProfile(), false)).success, true);
 if (FAKE_ONLY) { // 서버 응답을 바꿔치기하는 검사라서 가짜 Worker 모드 전용이다.
-  for (const tampered of [{}, { name: '엉뚱', sharedUpdatedAt: 9e15 }, { name: '엉뚱', birthDate: '2020-01-01', birthWeight: '3', targetFormula: '900', sharedUpdatedAt: 9e15 }]) {
+  // 같은 sharedUpdatedAt(타이브레이커로 갈리는 경우)과 더 큰 sharedUpdatedAt 양쪽에서 확인한다.
+  const sameStamp = (await storage.getProfile()).sharedUpdatedAt;
+  const guarded = await storage.getProfile();
+  for (const tampered of [
+    {},
+    { name: '엉뚱', sharedUpdatedAt: 9e15 },
+    { name: '엉뚱', birthDate: '2020-01-01', birthWeight: '3', targetFormula: '900', sharedUpdatedAt: 9e15 },
+    { sharedUpdatedAt: sameStamp },
+    { name: '엉뚱', sharedUpdatedAt: sameStamp },
+    { name: '엉뚱', birthDate: '2020-01-01', birthWeight: '3', targetFormula: '900', sharedUpdatedAt: sameStamp },
+    { name: '엉뚱', birthDate: '2020-01-01', birthWeight: '3', targetFormula: 900 },
+  ]) {
     srv.state.tamperSyncResponse = (_body, response) => ({ ...response, remoteProfile: tampered });
     assert.equal((await syncWithCloud(bigKey, await storage.getLogs(), await storage.getProfile(), false)).success, true);
-    assert.equal((await storage.getProfile()).name, '지킬이름');
+    const after = await storage.getProfile();
+    assert.equal(after.name, '지킬이름');
+    assert.deepEqual([after.birthDate, after.birthWeight, after.targetFormula], [guarded.birthDate, guarded.birthWeight, guarded.targetFormula], '공유 항목이 바뀌지 않는다');
   }
   srv.state.tamperSyncResponse = null;
   console.log('PASS 완전하지 않은 원격 아기 정보는 무시한다');
@@ -506,6 +520,34 @@ let r = await runner.request({ syncKey: runKey });
 assert.equal(r.success, false);
 assert.equal(await srv.requestCount(), 0);
 console.log('PASS 가족 키가 없으면 요청이 0회다');
+
+// 18 (러너). 진전 없음 중단 회차는 failed 사건이고 러너가 이어 가지 않으며, 다음 회차는 같은 항목을 다시 시도한다. (가짜 Worker 모드 전용)
+if (FAKE_ONLY) {
+  await reset();
+  await storage.saveProfile({ ...await storage.getProfile(), syncKey: bigKey });
+  await srv.ensureFamily(bigKey);
+  await storage.saveLogs(Array.from({ length: 1200 }, (_, i) => ({ id: `rs-${i}`, type: 'formula', amount: 90, timestamp: 65_000 + i, updatedAt: 65_000 + i })));
+  srv.state.rejectAllPushes = true;
+  events = [];
+  runner = makeRunner(events);
+  r = await runner.request({ syncKey: bigKey });
+  assert.equal(r.success, false);
+  assert.equal(r.uploadStalled, true);
+  assert.ok(!r.continuing, '결과에 continuing이 없다');
+  await new Promise(res => setTimeout(res, 100)); // 이어 가기가 있다면 그 사이에 회차가 더 시작된다
+  assert.equal(events.filter(e => e.type === 'started').length, 1, '러너는 이 회차를 이어 가지 않는다');
+  assert.ok(events.some(e => e.type === 'failed' && e.error.includes('일부 기록을 올리지 못했습니다')), '러너 사건은 failed이고 문구가 실린다');
+  assert.ok(!events.some(e => e.type === 'succeeded'), '성공 사건이 없다');
+  const stalledPushes = (await syncRequests()).filter(x => x.pushLogs > 0);
+  assert.equal(stalledPushes.length, 2, '올리기 요청은 두 묶음에서 멈춘다');
+  mark = await srv.requestCount();
+  r = await runner.request({ syncKey: bigKey });
+  const retried = (await syncRequests(mark)).filter(x => x.pushLogs > 0);
+  assert.ok(retried.length >= 1 && retried[0].pushLogs === stalledPushes[0].pushLogs, '다음 회차는 같은 항목부터 다시 시도한다');
+  srv.state.rejectAllPushes = false;
+  await reset();
+  console.log('PASS 진전 없음 중단 회차는 failed 사건이고 이어 가지 않으며 다음 회차가 같은 항목을 다시 시도한다 (러너)');
+}
 
 // 14-2. 합치기: 회차가 도는 동안 들어온 평소 동기화는 대기 중인 다음 회차 하나로 합쳐진다.
 await storage.saveProfile({ ...await storage.getProfile(), syncKey: runKey });

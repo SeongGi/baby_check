@@ -13,6 +13,7 @@
 // 이 모듈의 위치로 경로를 구합니다.
 import { spawn } from 'node:child_process';
 import { existsSync, rmSync } from 'node:fs';
+import { StringDecoder } from 'node:string_decoder';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { createRealAdapter } from './server-adapter.mjs';
@@ -73,11 +74,12 @@ function spawnChild(script, env, label) {
   return child;
 }
 
-// 줄 단위로 stdout을 쪼개 줍니다.
+// 줄 단위로 stdout을 쪼개 줍니다. 청크 경계에 걸친 여러 바이트 문자(한글 등)가 깨지지 않도록 StringDecoder로 읽습니다.
 function onLines(stream, handler) {
   let buffer = '';
+  const decoder = new StringDecoder('utf8');
   stream.on('data', (chunk) => {
-    buffer += chunk.toString();
+    buffer += decoder.write(chunk);
     let index;
     while ((index = buffer.indexOf('\n')) >= 0) {
       const line = buffer.slice(0, index);

@@ -3,7 +3,8 @@
 #   ./verify.sh unit        네트워크 없이 프로필 규칙만 (무료, 항상 먼저 돌릴 것)
 #   ./verify.sh regression  가짜 Worker로 도는 회귀 시나리오 (무료)
 #   ./verify.sh real        실제 Worker 코드를 서버 프로세스로 띄운 모드 (무료, 127.0.0.1만 사용).
-#                           제어 엔드포인트 자체 점검, 같은 회귀, 시나리오(real-scenarios.mjs가 있으면)
+#                           제어 엔드포인트 자체 점검, 같은 회귀, 시나리오(real-scenarios-*.mjs)
+#   ./verify.sh scenario <파일>  실제 서버 시나리오 파일 하나만
 #   ./verify.sh compat      예전 형식 데이터 호환성  (실제 Firestore 사용)
 #   ./verify.sh full        두 기기 통합 시나리오    (실제 Firestore 사용)
 #   ./verify.sh reminder    알림 계산
@@ -28,15 +29,25 @@ run_regression() {
 
 # node:sqlite 의 실험 기능 경고를 숨기는 옵션을 더해 서버와 기기 프로세스를 띄웁니다.
 run_real() {
-  rm -f "$DIR"/storage-real-*.json "$DIR/storage-regression-real.json" "$DIR/storage-scenarios-real.json"
+  rm -f "$DIR"/storage-real-*.json "$DIR/storage-regression-real.json" "$DIR"/storage-scenarios-real*.json
   node --disable-warning=ExperimentalWarning --import "$LOADER_IMPORT" "$DIR/real-selfcheck.mjs"
   HARNESS_REAL_WORKER=1 HARNESS_STORAGE_FILE="$DIR/storage-regression-real.json" \
     node --disable-warning=ExperimentalWarning --import "$LOADER_IMPORT" "$DIR/regression.mjs"
-  # A7에서 붙는 시나리오 파일입니다. 아직 없으면 건너뜁니다.
-  if [ -f "$DIR/real-scenarios.mjs" ]; then
-    HARNESS_STORAGE_FILE="$DIR/storage-scenarios-real.json" \
-      node --disable-warning=ExperimentalWarning --import "$LOADER_IMPORT" "$DIR/real-scenarios.mjs"
-  fi
+  # 설계 06 5.1의 시나리오 파일(real-scenarios-1.mjs, real-scenarios-2.mjs …)을 이름 순서로 모두 돌립니다.
+  local scenario
+  for scenario in "$DIR"/real-scenarios-*.mjs; do
+    [ -f "$scenario" ] || continue
+    HARNESS_STORAGE_FILE="$DIR/storage-scenarios-real-$(basename "$scenario" .mjs).json" \
+      node --disable-warning=ExperimentalWarning --import "$LOADER_IMPORT" "$scenario"
+  done
+}
+
+# 시나리오 파일 하나만 돌립니다. 예: ./verify.sh scenario real-scenarios-1.mjs
+run_scenario() {
+  local scenario="$DIR/$1"
+  [ -f "$scenario" ] || { echo "시나리오 파일이 없습니다: $1" >&2; exit 2; }
+  HARNESS_STORAGE_FILE="$DIR/storage-scenarios-real-$(basename "$scenario" .mjs).json" \
+    node --disable-warning=ExperimentalWarning --import "$LOADER_IMPORT" "$scenario"
 }
 
 run_reminder() {
@@ -48,10 +59,11 @@ case "${1:-all}" in
   unit)       run_unit ;;
   regression) run_regression ;;
   real)       run_real ;;
+  scenario)   run_scenario "${2:?시나리오 파일 이름이 필요합니다}" ;;
   reminder)   run_reminder ;;
   offline)    run_unit && run_regression && run_real && run_reminder ;;
   compat)     node "$DIR/compat.mjs" ;;
   full)       node "$DIR/run.mjs" ;;
   all)        run_unit && run_regression && run_real && run_reminder && node "$DIR/compat.mjs" && node "$DIR/run.mjs" ;;
-  *)          echo "usage: $0 [unit|regression|real|reminder|offline|compat|full|all]" >&2; exit 2 ;;
+  *)          echo "usage: $0 [unit|regression|real|scenario <파일>|reminder|offline|compat|full|all]" >&2; exit 2 ;;
 esac
