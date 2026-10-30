@@ -6,9 +6,10 @@
 ## 실행
 
 ```bash
-tools/sync-harness/verify.sh offline     # unit + regression. 네트워크 없음, 무료. 항상 먼저.
+tools/sync-harness/verify.sh offline     # unit + regression + real + reminder. 네트워크 없음, 무료. 항상 먼저.
 tools/sync-harness/verify.sh unit        # 프로필 공유 시각 규칙만
-tools/sync-harness/verify.sh regression  # 가짜 클라우드로 도는 회귀 시나리오
+tools/sync-harness/verify.sh regression  # 가짜 Worker로 도는 회귀 시나리오
+tools/sync-harness/verify.sh real        # 실제 Worker 코드를 서버 프로세스로 띄운 모드 (아래 "실제 서버 모드")
 tools/sync-harness/verify.sh compat      # 예전 형식 데이터 호환성
 tools/sync-harness/verify.sh full        # 두 기기 통합 시나리오
 tools/sync-harness/verify.sh all
@@ -22,6 +23,44 @@ https://console.firebase.google.com/project/babycheck-sync/usage
 
 `probe-quota.mjs` 는 쓰기 한 번만 시도해 할당량 소진 여부를 빠르게 확인합니다.
 
+## 실제 서버 모드
+
+Cloudflare 동기화(1.8.0)는 가짜 Worker(`stubs/fake-worker.mjs`)로 클라이언트만 빠르게 검사하고, 서버 동작의 판정은
+**실제 서버 코드(`server/src/index.ts`)** 로 합니다. `verify.sh real` 이 아래를 순서대로 돌립니다. 127.0.0.1 밖으로는 나가지
+않고 Cloudflare 계정도 쓰지 않습니다.
+
+1. `real-selfcheck.mjs`: 제어 엔드포인트, D1 흉내의 한도와 집계, 기기 명령, 저장 고장 주입, 자기 검사를 점검합니다.
+2. `regression.mjs` (`HARNESS_REAL_WORKER=1`): 기존 회귀를 실제 서버에 대고 다시 돌립니다. 이 프로세스가 기기 하나이고 서버는 따로 뜹니다.
+3. `real-scenarios.mjs`: 두 기기 시나리오입니다. 파일이 생기면 자동으로 이어서 돕니다.
+
+프로세스를 여러 개 띄우므로 상한 안에서 돌리세요. `spawn ... EAGAIN` 이 보이면 다시 돌리지 말고 `ps` 로 무엇이 불어났는지 보세요.
+
+```bash
+(ulimit -u $(( $(ps -u $(id -u) -o pid= | wc -l) + 150 )); tools/sync-harness/verify.sh real)
+```
+
+시나리오를 쓸 때는 `real-harness.mjs` 를 씁니다. 서버 하나와 기기 여러 대를 띄우고, 끝나면(예외와 시그널 포함) 자식 프로세스를 모두 정리합니다.
+
+```js
+const harness = await startRealHarness({ devices: ['A', 'B'] });
+const { server, devices: { A, B } } = harness;
+await selfCheckDevices(harness);                  // 기기마다 clientId와 저장 파일이 다른지
+await A.send('runnerRequest', { request: { syncKey, allowFamilyCreation: true, connecting: true } });
+await selfCheckMembers(harness, syncKey);         // 첫 연결 뒤 members 에 client_id 두 개
+await server.adapter.holdNext({ kind: 'push', batch: 'write' });   // 서버 상태 조회 어댑터
+await A.kill(); await A.restart();                // SIGKILL 뒤 같은 저장 파일로 다시
+await harness.stop();
+```
+
+- **서버**(`real-server.mjs`): `node:sqlite` 위의 D1 흉내(`stubs/d1-mock.mjs`)에서 실제 Worker 코드를 돌립니다. 요청마다 쿼리 수,
+  읽은 행, 쓴 행(삽입은 1 + 인덱스 수, 갱신은 1 + 바뀌는 열을 담은 인덱스 수), Worker 처리 시간을 기록합니다. `/__harness/` 제어
+  엔드포인트(`clock`, `hold`, `release`, `fail`, `state`, `inject`, `wipe`, `config`)의 사용법은 파일 머리말에 있습니다.
+- **기기**(`device.mjs`, `HARNESS_REAL_WORKER=1`): 명령(`device-real.mjs` 머리말 참고)을 동시에 처리하는 휴대폰 한 대입니다.
+  요청 상한과 러너 상한은 실제의 10분의 1로 줄여 시작하고, 저장소 흉내(`stubs/async-storage.mjs`)에 저장 고장 주입
+  (`injectStorageFault`: 쓰기 뒤 예외, 쓰기 직후 SIGKILL, 쓰기 지연과 `releaseWrite`)이 있습니다.
+- **어댑터**(`server-adapter.mjs`): 가짜 Worker와 실제 서버에 같은 질의와 조작을 던집니다. `regression.mjs` 는 어댑터로 쓰여 있어
+  두 모드에서 모두 돕니다. 서버 응답을 바꿔치기해야 하는 검사(진전 없음 중단, 불완전한 `remoteProfile` 주입)만 가짜 Worker 모드 전용입니다.
+
 ## 구조
 
 | 파일 | 역할 |
@@ -30,7 +69,12 @@ https://console.firebase.google.com/project/babycheck-sync/usage
 | `device.mjs` | 휴대폰 한 대. 프로세스 하나가 익명 사용자 하나에 대응하므로, 프로세스를 나누면 진짜 두 기기와 같은 조건이 됩니다. stdin 으로 JSON 명령을 받습니다. |
 | `client.mjs` | 기기 프로세스를 띄우고 명령을 주고받는 쪽. |
 | `unit.mjs` | 프로필 공유 시각 규칙 (네트워크 없음). |
-| `regression.mjs` | 시간 초과·중단·오프라인·커밋 실패·증분 동기화. `stubs/fake-cloud.mjs` 위에서 돌아 무료입니다. |
+| `regression.mjs` | 시간 초과·중단·오프라인·커밋 실패·증분 동기화. 가짜 Worker(`stubs/fake-cloud.mjs` 가 가리키는 `stubs/fake-worker.mjs`)와 실제 서버 모드 양쪽에서 돌아 무료입니다. |
+| `real-server.mjs` | 실제 Worker 코드를 HTTP 서버로 띄우는 프로세스와 제어 엔드포인트. `stubs/d1-mock.mjs` 가 D1 흉내입니다. |
+| `device-real.mjs` | 실제 서버 모드 기기 명령(러너, 장부, 저장 고장 주입, 기기 시계). |
+| `real-harness.mjs` | 서버와 기기 프로세스를 띄우고 SIGKILL, 재시작, 자기 검사, 정리를 맡는 도우미. |
+| `server-adapter.mjs` | 서버 상태 조회 어댑터(가짜 Worker용, 실제 서버용). |
+| `real-selfcheck.mjs` | 실제 서버 모드 기반 구조의 자체 점검. |
 | `compat.mjs` | 이미 저장돼 있는 예전 형식 데이터가 보존되는지. |
 | `run.mjs` | 합류·전파·삭제·충돌·수렴 등 두 기기 통합 시나리오. |
 

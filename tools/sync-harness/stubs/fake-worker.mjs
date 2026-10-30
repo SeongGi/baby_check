@@ -27,6 +27,8 @@ export const state = {
   beforeRead: null,
   beforeTransaction: null,
   beforeCommit: null,
+  // 어댑터가 설치하는 요청 훅. (body, request) => Promise<{status}|undefined>
+  onRequest: null,
   // 응답 본문을 바꿔치기합니다(아기 정보 가드 검사 등). (body, response) => response
   tamperSyncResponse: null,
   // 올리기 분류를 "항상 받아들이지 않음"으로 만듭니다(진전 없음 중단 검사).
@@ -119,11 +121,12 @@ async function handleSync(key, clientId, bodyText) {
     state.beforeRead = null;
     await hook();
   }
-  const request = { kind: 'sync', clientId, pushLogs: 0, pushDeleted: 0, pull: null, status: 200, writes: 0 };
+  const request = { kind: 'sync', clientId, pushLogs: 0, pushDeleted: 0, pull: null, status: 200, writes: 0, bodyBytes: 0, logWrites: 0, committed: false };
   state.requests.push(request);
   const fail = (response) => { request.status = response.status; return response; };
 
-  if (encoder.encode(bodyText).length > MAX_BODY_BYTES) {
+  request.bodyBytes = encoder.encode(bodyText).length;
+  if (request.bodyBytes > MAX_BODY_BYTES) {
     return fail(makeJsonResponse({ ok: false, error: 'payload_too_large' }, 413));
   }
   let body;
@@ -138,6 +141,11 @@ async function handleSync(key, clientId, bodyText) {
   }
   if (pushLogs.length + pushDeletedIds.length > MAX_REQUEST_ITEMS) {
     return fail(makeJsonResponse({ ok: false, error: 'too_many_items' }, 413));
+  }
+  // 어댑터(server-adapter.mjs)의 멈춤과 실패 주입이 쓰는 훅입니다. 기다릴 수 있고, {status}를 돌려주면 그 응답으로 끝납니다.
+  if (state.onRequest) {
+    const outcome = await state.onRequest(body, request);
+    if (outcome?.status) return fail(makeJsonResponse({ ok: false, error: `injected_${outcome.status}` }, outcome.status));
   }
   if (state.failNextSync) {
     const status = typeof state.failNextSync === 'function' ? state.failNextSync(body, request) : state.failNextSync;
@@ -205,6 +213,8 @@ async function handleSync(key, clientId, bodyText) {
     written.profile = true;
   }
   request.writes = written.logs.length + written.tombstones.length + (written.profile ? 1 : 0);
+  request.logWrites = written.logs.length + written.tombstones.length;
+  request.committed = request.writes > 0;
   if (request.writes > 0) {
     family.updatedAt = t;
     family.lastClientId = clientId;
