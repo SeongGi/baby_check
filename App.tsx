@@ -18,9 +18,10 @@ import AsyncStorage from '@react-native-async-storage/async-storage';
 import { SafeAreaProvider, useSafeAreaInsets } from 'react-native-safe-area-context';
 import { COLORS } from './src/theme/colors';
 import { BabyLogEntry, BabyProfile } from './src/types';
-import { getLogs, getProfile, addLog, deleteLog, updateLog, saveProfile, migrateStoredData, importDataWithoutLoss, backupLocalData } from './src/database/storage';
-import { cancelFamilyDeletion, deleteFamilyCloudData, getFamilyDeletionStatus, parseFamilySyncId, readFamilyChangeToken, refreshCloudConnection, scheduleFamilyDeletion, subscribeToCloudChanges, syncWithCloud } from './src/database/sync';
-import { withSyncDeadline } from './src/database/syncDeadline';
+import { getLogs, getProfile, addLog, deleteLog, updateLog, saveProfile, migrateStoredData, importDataWithoutLoss, backupLocalData, readProfileAfterPendingWrites } from './src/database/storage';
+import { cancelFamilyDeletion, deleteFamilyCloudData, getFamilyDeletionStatus, parseFamilySyncId, readFamilyChangeToken, scheduleFamilyDeletion, subscribeToCloudChanges, syncWithCloud } from './src/database/sync';
+import { createSyncRunner } from './src/database/syncRunner';
+import { decideAfterTokenError } from './src/database/syncDecision';
 import { refreshFeedingReminder } from './src/utils/feedingReminder';
 import { canDispatchAutoVoiceLaunch, getAutoVoiceLaunchAction } from './src/utils/autoVoiceLaunch';
 import { Dashboard } from './src/screens/Dashboard';
@@ -58,14 +59,12 @@ function MainApp() {
   const [refreshing, setRefreshing] = useState(false);
   const [syncState, setSyncState] = useState<SyncState>('idle');
   const [lastSyncedAt, setLastSyncedAt] = useState<number | null>(null);
-  const syncQueueRef = useRef<Promise<void>>(Promise.resolve());
   const processedInviteRef = useRef<string | null>(null);
   const processedNotificationRef = useRef<string | null>(null);
   // 마지막으로 반영한 가족 변경 지점입니다. 주기 확인에서 이 값이 그대로면
   // 기록 전체를 다시 읽지 않고 넘어갑니다.
   const lastChangeTokenRef = useRef<string | null>(null);
   const lastSyncFailedRef = useRef(false);
-  const activeSyncAbortRef = useRef<{ aborted: boolean } | null>(null);
   const [syncError, setSyncError] = useState<string | null>(null);
 
   const insets = useSafeAreaInsets();
@@ -134,14 +133,66 @@ function MainApp() {
     }
   };
 
-  // 자동 동기화, 당겨서 새로고침, 저장 직후 업로드가 겹치지 않도록 한 줄로 실행합니다.
-  const isSyncRunningRef = useRef(false);
-  // 대기 중인 동기화는 반드시 가족 키별로 따로 보관합니다. 하나로 합치면 가족을
-  // 바꾼 직후의 요청이 이전 가족의 결과를 돌려받아, 새 가족의 업로드가 조용히
-  // 건너뛰어지고 화면에는 엉뚱한 성공/실패가 표시됩니다.
-  const pendingSyncByKeyRef = useRef<Map<string, Promise<any>>>(new Map());
+  // 대기열, 합치기, 상한, 상한 뒤 판정, 이어 가기는 syncRunner가 맡고, App은 러너가
+  // 알려 주는 사건을 화면 상태에 반영하는 일만 합니다. 러너는 한 번만 만듭니다.
+  const syncRunnerRef = useRef<ReturnType<typeof createSyncRunner> | null>(null);
+  if (!syncRunnerRef.current) {
+    syncRunnerRef.current = createSyncRunner({
+      syncWithCloud,
+      getLogs,
+      getProfile,
+      saveProfile,
+      readProfileAfterPendingWrites,
+      timeoutMs: SYNC_TIMEOUT_MS,
+      onEvent: event => {
+        switch (event.type) {
+          case 'started':
+            setSyncState('syncing');
+            break;
+          case 'succeeded':
+            setLastSyncedAt(Date.now());
+            lastSyncFailedRef.current = false;
+            if (event.notice) {
+              // 일부 기록이 너무 커서 공유하지 못했습니다. 나머지는 모두 동기화됐습니다.
+              setSyncState('error');
+              setSyncError(event.notice);
+            } else {
+              setSyncState('idle');
+              setSyncError(null);
+            }
+            // 이어 가기 회차는 호출한 화면이 없으므로 새로 받은 기록을 여기서 반영합니다.
+            if (event.continuation && event.result.merged) {
+              setLogs(event.result.logs);
+              setProfile(event.result.profile);
+              void refreshFeedingReminder(event.result.logs, event.result.profile);
+            }
+            break;
+          case 'failed':
+            setSyncState('error');
+            setSyncError(event.error || '서버에 연결하지 못했습니다.');
+            lastSyncFailedRef.current = true;
+            break;
+          case 'disconnected':
+            setProfile(event.profile);
+            setSyncState('idle');
+            setSyncError(null);
+            lastSyncFailedRef.current = false;
+            Alert.alert(
+              '가족 연결 해제됨',
+              '다른 기기에서 가족 서버 데이터를 영구 삭제해 이 기기의 연결도 해제되었습니다. 이 기기에 저장된 기록은 그대로 남아 있습니다.',
+            );
+            break;
+          case 'detached':
+            setSyncState('idle');
+            setSyncError(null);
+            lastSyncFailedRef.current = false;
+            break;
+        }
+      },
+    });
+  }
 
-  const syncLatestData = async (
+  const syncLatestData = (
     syncKey: string,
     createBackup = false,
     // 이미 연결돼 있던 가족이 다른 기기에서 영구 삭제된 경우, 평소 동기화가
@@ -150,151 +201,7 @@ function MainApp() {
     allowFamilyCreation = false,
     connecting = false,
     forceFullRead = false,
-  ) => {
-    type SyncResult = Awaited<ReturnType<typeof syncWithCloud>>;
-    const normalizedKey = syncKey.trim();
-
-    // 특별한 설정(가족 가입, 백업 생성 등)이 없는 일반 동기화 요청이 연달아 들어오면
-    // 큐를 무한정 늘리는 대신 대기 중인 다음 회차에 합쳐 네트워크와 쓰기 한도를 아낍니다.
-    // 합치는 범위는 같은 가족 키로 한정합니다.
-    const isStandardSync = !createBackup && allowFamilyCreation && !connecting && !forceFullRead;
-    if (isStandardSync && isSyncRunningRef.current) {
-      const alreadyPending = pendingSyncByKeyRef.current.get(normalizedKey);
-      if (alreadyPending) return alreadyPending as Promise<SyncResult>;
-    }
-
-    let resolveVisible!: (result: SyncResult) => void;
-    let rejectVisible!: (error: unknown) => void;
-    const visibleResult = new Promise<SyncResult>((resolve, reject) => {
-      resolveVisible = resolve;
-      rejectVisible = reject;
-    });
-
-    if (isStandardSync && isSyncRunningRef.current) {
-      pendingSyncByKeyRef.current.set(normalizedKey, visibleResult);
-    }
-
-    const run = async (): Promise<void> => {
-      isSyncRunningRef.current = true;
-      if (pendingSyncByKeyRef.current.get(normalizedKey) === visibleResult) {
-        pendingSyncByKeyRef.current.delete(normalizedKey);
-      }
-
-      const currentLogs = await getLogs();
-      const currentProfile = await getProfile();
-      if ((!connecting && currentProfile.syncKey !== normalizedKey)
-        || (connecting && currentProfile.syncKey && currentProfile.syncKey !== normalizedKey)) {
-        resolveVisible({
-          logs: currentLogs,
-          profile: currentProfile,
-          success: false,
-          merged: false,
-          error: 'Sync is not connected',
-        });
-        isSyncRunningRef.current = false;
-        return;
-      }
-      setSyncState('syncing');
-      const abortToken = { aborted: false };
-      activeSyncAbortRef.current = abortToken;
-      // Firestore 쓰기는 서버 응답 전까지 계속 대기합니다. 상한이 없으면 새로고침
-      // 표시가 영영 돌고, 뒤에 줄 서 있는 다음 동기화까지 모두 막힙니다.
-      const operation = syncWithCloud(
-        normalizedKey,
-        currentLogs,
-        currentProfile,
-        createBackup,
-        abortToken,
-        allowFamilyCreation,
-        forceFullRead,
-      );
-      try {
-        const result = await withSyncDeadline(operation, abortToken, () => ({
-          logs: currentLogs,
-          profile: currentProfile,
-          success: false,
-          merged: false,
-          error: '서버 응답을 기다리고 있어요. 연결 상태를 확인한 뒤 다시 시도해 주세요.',
-        }), SYNC_TIMEOUT_MS);
-        // 서버를 기다리는 동안 추가한 기록을 화면에서도 보존합니다.
-        const latestProfile = await getProfile();
-        const latestLogs = await getLogs();
-        result.logs = latestLogs;
-        result.profile = latestProfile;
-
-        // 사용자가 그 사이에 가족 연결을 해제했거나 다른 가족으로 바꾼 경우,
-        // 이전 가족의 늦은 실패 결과가 에러 배너를 다시 띄우지 않도록 정리합니다.
-        const isCurrentFamily = connecting
-          ? (latestProfile.syncKey === normalizedKey || !latestProfile.syncKey)
-          : (latestProfile.syncKey === normalizedKey);
-        if (!isCurrentFamily) {
-          if (!latestProfile.syncKey) {
-            setSyncState('idle');
-            setSyncError(null);
-            lastSyncFailedRef.current = false;
-          }
-          resolveVisible({ ...result, success: false, merged: false, error: '가족 연결이 해제되었거나 변경되었습니다.' });
-          return;
-        }
-
-        if (abortToken.aborted && !latestProfile.syncKey) {
-          setSyncState('idle');
-          setSyncError(null);
-          lastSyncFailedRef.current = false;
-          resolveVisible({ ...result, success: false, merged: false, error: '가족 연결이 해제되었습니다.' });
-          return;
-        }
-
-        // 이 기기가 이미 이 가족 키로 연결돼 있었는데(latestProfile.syncKey === normalizedKey,
-        // isCurrentFamily로 위에서 확인됨) 서버가 "가족을 찾을 수 없다"고 답했다면, 다른
-        // 기기가 그 사이 가족 서버 데이터를 영구 삭제한 것입니다. 여기서 계속
-        // 재시도하면 allowFamilyCreation 여부와 무관하게 다음 "새 가족 만들기"
-        // 시도에서 조용히 되살아날 위험이 있으므로, 이 기기도 로컬 연결을 끊어
-        // 둡니다. 이 기기에 저장된 기록 자체는 지우지 않습니다.
-        if (!result.success && result.familyUnavailable && !connecting) {
-          await saveProfile({ ...latestProfile, syncKey: undefined });
-          const disconnectedProfile = await getProfile();
-          setProfile(disconnectedProfile);
-          setSyncState('idle');
-          setSyncError(null);
-          lastSyncFailedRef.current = false;
-          resolveVisible({ ...result, logs: latestLogs, profile: disconnectedProfile, success: false, merged: false, error: '가족 데이터가 삭제되어 연결이 해제되었습니다.' });
-          Alert.alert(
-            '가족 연결 해제됨',
-            '다른 기기에서 가족 서버 데이터를 영구 삭제해 이 기기의 연결도 해제되었습니다. 이 기기에 저장된 기록은 그대로 남아 있습니다.',
-          );
-          return;
-        }
-
-        setSyncState(result.success ? 'idle' : 'error');
-        setSyncError(result.success ? null : result.error || '서버에 연결하지 못했습니다.');
-        lastSyncFailedRef.current = !result.success;
-        if (result.success) setLastSyncedAt(Date.now());
-        resolveVisible(result);
-        // 취소 토큰을 저장 큐와 transaction에서 검사하므로 늦은 응답을 버리고
-        // 다음 시도를 허용합니다. 응답 없는 네트워크가 대기열을 잠그지 않습니다.
-        void operation.catch(() => undefined);
-      } catch (error) {
-        const latest = await getProfile().catch(() => null);
-        if (abortToken.aborted && (!latest?.syncKey || latest.syncKey !== normalizedKey)) {
-          setSyncState('idle');
-          setSyncError(null);
-          lastSyncFailedRef.current = false;
-        } else {
-          setSyncState('error');
-          setSyncError(error instanceof Error ? error.message : '서버에 연결하지 못했습니다.');
-          lastSyncFailedRef.current = true;
-        }
-        rejectVisible(error);
-      } finally {
-        isSyncRunningRef.current = false;
-        if (activeSyncAbortRef.current === abortToken) activeSyncAbortRef.current = null;
-      }
-    };
-    const queued = syncQueueRef.current.catch(() => undefined).then(run);
-    syncQueueRef.current = queued.then(() => undefined, () => undefined);
-    return visibleResult;
-  };
+  ) => syncRunnerRef.current!.request({ syncKey, createBackup, allowFamilyCreation, connecting, forceFullRead });
 
   // Load initial data and run background sync if syncKey is set
   useEffect(() => {
@@ -387,7 +294,10 @@ function MainApp() {
       try {
         const stop = await subscribeToCloudChanges(syncKey, checkForRemoteChanges, error => {
           console.warn('Realtime sync listener failed', error);
-          scheduleReconnect();
+          // 410이면 가족이 영구 삭제된 것이므로 재연결하지 않고 평소 동기화를 한 번 요청합니다.
+          // 그 동기화가 410을 받아 연결을 끊습니다.
+          if (decideAfterTokenError(error).action === 'syncNow') void pullRemoteChanges();
+          else scheduleReconnect();
         });
         if (!mounted) {
           stop();
@@ -403,15 +313,8 @@ function MainApp() {
 
     connect();
 
-    const appStateSubscription = AppState.addEventListener('change', async state => {
+    const appStateSubscription = AppState.addEventListener('change', state => {
       if (state !== 'active') return;
-      // 진행 중인 동기화 도중에 연결을 끊으면 캐시에서 읽은 낡은 값으로
-      // 병합될 수 있어, 대기열이 빈 뒤에 처리합니다.
-      syncQueueRef.current = syncQueueRef.current
-        .catch(() => undefined)
-        .then(() => refreshCloudConnection())
-        .catch(() => undefined);
-      await syncQueueRef.current;
       // 화면에 돌아왔을 때는 못 올린 기록이 있을 수 있으므로 전체 동기화합니다.
       void pullRemoteChanges();
     });
@@ -647,8 +550,8 @@ function MainApp() {
   };
 
   const handleSaveProfile = async (profilePatch: Partial<BabyProfile>, syncInBackground = true) => {
-    if ('syncKey' in profilePatch && activeSyncAbortRef.current) {
-      activeSyncAbortRef.current.aborted = true;
+    if ('syncKey' in profilePatch) {
+      syncRunnerRef.current?.abortActive();
     }
     // 화면이 들고 있는 프로필은 백그라운드 동기화보다 오래된 값일 수 있습니다.
     // 그 위에 얹으면 상대방이 방금 바꾼 이름을 되돌려 버립니다.

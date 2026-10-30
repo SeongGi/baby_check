@@ -1,13 +1,18 @@
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import * as Crypto from 'expo-crypto';
 import { BabyLogEntry, BabyProfile } from '../types';
+import { compareCodePoints } from '../utils/compareCodePoints';
+import { isCompleteSharedProfile, SyncLimits } from './syncDecision';
 
 const LOGS_STORAGE_KEY = '@baby_logs';
 const PROFILE_STORAGE_KEY = '@baby_profile';
 const BACKUP_STORAGE_KEY = '@baby_local_backup';
 const MIGRATION_BACKUP_STORAGE_KEY = '@baby_migration_backup_v2';
 const SCHEMA_VERSION_STORAGE_KEY = '@baby_schema_version';
-const SYNC_LEDGER_STORAGE_KEY = '@baby_sync_ledger_v1';
+// 1.8.0(Cloudflare) 장부입니다. 1.7.9 기기에 남은 옛 장부는 읽지도 지우지도 않습니다.
+// 다만 가져오기·백업 복원이 옛 키를 지우는 동작은 그대로 두고 새 키도 함께 지웁니다.
+const SYNC_LEDGER_STORAGE_KEY = '@baby_sync_ledger_cf_v1';
+const LEGACY_SYNC_LEDGER_STORAGE_KEY = '@baby_sync_ledger_v1';
 const CURRENT_SCHEMA_VERSION = 2;
 
 // AsyncStorage의 읽기→수정→쓰기는 원자적이지 않습니다. 서버 동기화와 사용자의
@@ -289,7 +294,7 @@ export const saveProfileFromSync = async (profile: BabyProfile): Promise<boolean
   });
 };
 
-const stableValue = (value: unknown): string =>
+export const stableValue = (value: unknown): string =>
   JSON.stringify(value, (_key, item) =>
     item && typeof item === 'object' && !Array.isArray(item)
       ? Object.keys(item as Record<string, unknown>).sort().reduce<Record<string, unknown>>((result, key) => {
@@ -299,6 +304,57 @@ const stableValue = (value: unknown): string =>
         }, {})
       : item,
   );
+
+/** 기기 값과 동기화 값을 한 번에 합칩니다. 기록은 줄이지 않고, 삭제 표식과 공유 항목만 최신 값이 이깁니다. */
+const mergeSyncedState = (
+  currentLogs: BabyLogEntry[],
+  currentProfile: BabyProfile,
+  syncedLogs: BabyLogEntry[],
+  syncedProfile: BabyProfile,
+): { logs: BabyLogEntry[]; profile: BabyProfile } => {
+  const deletedIds = new Set([
+    ...(currentProfile.deletedLogIds || []),
+    ...(syncedProfile.deletedLogIds || []),
+  ]);
+  const byId = new Map<string, BabyLogEntry>();
+  [...syncedLogs, ...currentLogs].forEach(log => {
+    if (!log || deletedIds.has(log.id)) return;
+    const existing = byId.get(log.id);
+    const candidateStamp = log.updatedAt || log.timestamp || 0;
+    const existingStamp = existing?.updatedAt || existing?.timestamp || 0;
+    // 같은 시각이면 서버와 같은 규칙(코드 포인트 순서로 큰 canonical JSON)으로 고릅니다.
+    if (!existing || candidateStamp > existingStamp
+      || (candidateStamp === existingStamp && compareCodePoints(stableValue(log), stableValue(existing)) > 0)) {
+      byId.set(log.id, log);
+    }
+  });
+  const logs = Array.from(byId.values()).sort((a, b) => b.timestamp - a.timestamp);
+
+  // 알림·수유 간격 같은 기기 전용 값은 현재 기기 값이 이기고, 가족 공유 항목은
+  // sharedUpdatedAt과 내용 타이브레이커로 최신 값을 확정합니다.
+  const currentStamp = currentProfile.sharedUpdatedAt ?? currentProfile.updatedAt ?? 0;
+  const syncedStamp = syncedProfile.sharedUpdatedAt ?? syncedProfile.updatedAt ?? 0;
+  const currentShared = SHARED_PROFILE_FIELDS.reduce<Record<string, unknown>>((result, field) => {
+    result[field] = currentProfile[field];
+    return result;
+  }, {});
+  const syncedShared = SHARED_PROFILE_FIELDS.reduce<Record<string, unknown>>((result, field) => {
+    result[field] = syncedProfile[field];
+    return result;
+  }, {});
+  const syncedSharedWins = syncedStamp > currentStamp
+    || (syncedStamp === currentStamp
+      && compareCodePoints(stableValue(syncedShared), stableValue(currentShared)) > 0);
+  const profile = normalizeProfile({
+    ...syncedProfile,
+    ...currentProfile,
+    ...(syncedSharedWins ? syncedShared : currentShared),
+    syncKey: currentProfile.syncKey || syncedProfile.syncKey,
+    deletedLogIds: Array.from(deletedIds),
+    sharedUpdatedAt: syncedSharedWins ? syncedStamp : currentStamp,
+  } as BabyProfile);
+  return { logs, profile };
+};
 
 /**
  * 서버 응답을 기다리는 동안 추가·수정·삭제된 로컬 기록을 다시 병합한 뒤 한 번에
@@ -322,45 +378,7 @@ export const saveSyncedDataWithoutLoss = async (
         console.warn('[storage] 가족 연결이 바뀌어 오래된 동기화 결과를 폐기했습니다.');
         return { logs: currentLogs, profile: currentProfile, success: false };
       }
-      const deletedIds = new Set([
-        ...(currentProfile.deletedLogIds || []),
-        ...(syncedProfile.deletedLogIds || []),
-      ]);
-      const byId = new Map<string, BabyLogEntry>();
-      [...syncedLogs, ...currentLogs].forEach(log => {
-        if (!log || deletedIds.has(log.id)) return;
-        const existing = byId.get(log.id);
-        const candidateStamp = log.updatedAt || log.timestamp || 0;
-        const existingStamp = existing?.updatedAt || existing?.timestamp || 0;
-        if (!existing || candidateStamp > existingStamp
-          || (candidateStamp === existingStamp && stableValue(log) > stableValue(existing))) {
-          byId.set(log.id, log);
-        }
-      });
-      const logs = Array.from(byId.values()).sort((a, b) => b.timestamp - a.timestamp);
-
-      // 알림·수유 간격 같은 기기 전용 값은 현재 기기 값이 이기고, 가족 공유 항목은
-      // sharedUpdatedAt과 내용 타이브레이커로 최신 값을 확정합니다.
-      const currentStamp = currentProfile.sharedUpdatedAt ?? currentProfile.updatedAt ?? 0;
-      const syncedStamp = syncedProfile.sharedUpdatedAt ?? syncedProfile.updatedAt ?? 0;
-      const currentShared = SHARED_PROFILE_FIELDS.reduce<Record<string, unknown>>((result, field) => {
-        result[field] = currentProfile[field];
-        return result;
-      }, {});
-      const syncedShared = SHARED_PROFILE_FIELDS.reduce<Record<string, unknown>>((result, field) => {
-        result[field] = syncedProfile[field];
-        return result;
-      }, {});
-      const syncedSharedWins = syncedStamp > currentStamp
-        || (syncedStamp === currentStamp && stableValue(syncedShared) > stableValue(currentShared));
-      const profile = normalizeProfile({
-        ...syncedProfile,
-        ...currentProfile,
-        ...(syncedSharedWins ? syncedShared : currentShared),
-        syncKey: currentProfile.syncKey || syncedProfile.syncKey,
-        deletedLogIds: Array.from(deletedIds),
-        sharedUpdatedAt: syncedSharedWins ? syncedStamp : currentStamp,
-      } as BabyProfile);
+      const { logs, profile } = mergeSyncedState(currentLogs, currentProfile, syncedLogs, syncedProfile);
       await AsyncStorage.multiSet([
         [LOGS_STORAGE_KEY, JSON.stringify(logs)],
         [PROFILE_STORAGE_KEY, JSON.stringify(profile)],
@@ -372,41 +390,101 @@ export const saveSyncedDataWithoutLoss = async (
     }
   });
 
+/**
+ * 대기열에 읽기 작업을 넣어, 앞서 시작한 저장이 모두 끝난 뒤의 프로필을 돌려줍니다.
+ * 상한이 온 뒤 "키가 저장소에 실제로 남았는가"를 판정할 때 씁니다(2.6.3).
+ */
+export const readProfileAfterPendingWrites = async (): Promise<BabyProfile> =>
+  runStorageWrite(async () => {
+    try {
+      return await readProfileUnsafe();
+    } catch (error) {
+      console.error('Error fetching profile from AsyncStorage', error);
+      return { ...DEFAULT_PROFILE };
+    }
+  });
+
 // ────────────── 증분 동기화 장부 ──────────────
 
 /**
- * 매번 기록 전체를 서버에서 다시 읽으면 무료 등급의 하루 읽기 한도(5만)가
- * 금방 소진되고, 한도가 끝나면 동기화가 통째로 멈춥니다. 마지막으로 반영한
- * 서버 변경 지점과 "이미 올린 것으로 확인된" 기록을 기기에 적어 두고, 다음
- * 동기화에서는 그 이후에 바뀐 문서만 받아옵니다.
+ * 매번 기록 전체를 서버에서 다시 읽으면 무료 등급의 읽기 한도가 금방 소진됩니다.
+ * 마지막으로 반영한 서버 변경 지점과 "서버에 있다고 확인한" 기록을 기기에 적어
+ * 두고, 다음 동기화에서는 그 이후에 바뀐 행만 받아옵니다.
  *
  * 이 장부는 어디까지나 비용을 줄이기 위한 힌트입니다. 값이 없거나 깨졌거나
- * 가족이 바뀌면 그냥 전체 읽기로 되돌아가므로, 장부가 틀려서 기록이 사라지는
- * 경우는 없습니다.
+ * 가족이 바뀌면 그냥 전체 모드로 되돌아가므로, 장부가 틀려서 기록이 사라지는
+ * 경우는 없습니다. 장부에는 서버에 있다고 확인한 내용만 적습니다.
  */
-export interface FamilySyncLedger {
-  familyKey: string;
-  /** 서버 시각 기준으로 마지막까지 반영한 지점 (밀리초). */
-  cursorMillis: number;
-  /** 마지막으로 기록 전체를 읽은 기기 시각. 주기적 전체 대조에 씁니다. */
-  lastFullReadAt: number;
-  /** 기록 id → 서버에 올린 것이 확인된 로컬 updatedAt. */
-  uploaded: Record<string, number>;
-  /** 서버에 삭제 표시가 올라간 것이 확인된 기록 id. */
-  tombstoned: string[];
+export interface SyncCursor {
+  updatedAt: number;
+  logId: string;
 }
 
-const isLedgerShape = (value: unknown): value is FamilySyncLedger =>
-  !!value && typeof value === 'object'
-  && typeof (value as FamilySyncLedger).familyKey === 'string'
-  && typeof (value as FamilySyncLedger).cursorMillis === 'number'
-  && typeof (value as FamilySyncLedger).lastFullReadAt === 'number'
-  && !!(value as FamilySyncLedger).uploaded
-  && typeof (value as FamilySyncLedger).uploaded === 'object'
-  && Array.isArray((value as FamilySyncLedger).tombstoned);
+export interface CloudSyncLedger {
+  familyKey: string;
+  /** 증분 당겨 받기 시작점(서버 시각, 밀리초). */
+  cursorMillis: number;
+  /** 마지막 전체 모드 완료 시각(기기 시각). 6시간마다 전체를 대조합니다. */
+  lastFullReadAt: number;
+  /** 기록 id → 서버에 있다고 확인한 updatedAt. */
+  uploaded: Record<string, number>;
+  /** 서버에 삭제 표식이 있다고 확인한 id. */
+  tombstoned: string[];
+  pullAfter?: SyncCursor;
+  pullCursorAtStart?: number;
+  limits?: SyncLimits;
+  /** 진행 중인 전체 모드. 있으면 다음 회차는 full.after부터 이어 갑니다. */
+  full?: {
+    after: SyncCursor;
+    cursorAtStart?: number;
+    uploaded: Record<string, number>;
+    tombstoned: string[];
+  };
+}
 
-/** 요청한 가족의 장부만 돌려줍니다. 다른 가족 것이면 없는 것으로 취급합니다. */
-export const readSyncLedger = async (familyKey: string): Promise<FamilySyncLedger | null> => {
+const isFiniteNumber = (value: unknown): value is number =>
+  typeof value === 'number' && Number.isFinite(value);
+
+const isCursorShape = (value: unknown): value is SyncCursor =>
+  !!value && typeof value === 'object'
+  && isFiniteNumber((value as SyncCursor).updatedAt)
+  && typeof (value as SyncCursor).logId === 'string';
+
+const isUploadedMap = (value: unknown): value is Record<string, number> =>
+  !!value && typeof value === 'object' && !Array.isArray(value)
+  && Object.values(value as Record<string, unknown>).every(isFiniteNumber);
+
+const isStringArray = (value: unknown): value is string[] =>
+  Array.isArray(value) && value.every(item => typeof item === 'string');
+
+const isLimitsShape = (value: unknown): value is SyncLimits => {
+  if (!value || typeof value !== 'object') return false;
+  const v = value as Record<string, unknown>;
+  return isFiniteNumber(v.push) && isFiniteNumber(v.pull)
+    && isFiniteNumber(v.pushStreak) && isFiniteNumber(v.pullStreak)
+    && (v.serverPush === undefined || isFiniteNumber(v.serverPush))
+    && (v.serverPull === undefined || isFiniteNumber(v.serverPull));
+};
+
+const isLedgerShape = (value: unknown): value is CloudSyncLedger => {
+  if (!value || typeof value !== 'object') return false;
+  const v = value as Record<string, unknown>;
+  if (typeof v.familyKey !== 'string' || !isFiniteNumber(v.cursorMillis) || !isFiniteNumber(v.lastFullReadAt)) return false;
+  if (!isUploadedMap(v.uploaded) || !isStringArray(v.tombstoned)) return false;
+  if (v.pullAfter !== undefined && !isCursorShape(v.pullAfter)) return false;
+  if (v.pullCursorAtStart !== undefined && !isFiniteNumber(v.pullCursorAtStart)) return false;
+  if (v.limits !== undefined && !isLimitsShape(v.limits)) return false;
+  if (v.full !== undefined) {
+    const full = v.full as Record<string, unknown> | null;
+    if (!full || typeof full !== 'object' || !isCursorShape(full.after)) return false;
+    if (full.cursorAtStart !== undefined && !isFiniteNumber(full.cursorAtStart)) return false;
+    if (!isUploadedMap(full.uploaded) || !isStringArray(full.tombstoned)) return false;
+  }
+  return true;
+};
+
+/** 요청한 가족의 장부만 돌려줍니다. 다른 가족 것이거나 형식이 틀리면 없는 것으로 취급합니다. */
+export const readSyncLedger = async (familyKey: string): Promise<CloudSyncLedger | null> => {
   try {
     await storageWriteQueue.catch(() => undefined);
     const rawData = await AsyncStorage.getItem(SYNC_LEDGER_STORAGE_KEY);
@@ -415,34 +493,189 @@ export const readSyncLedger = async (familyKey: string): Promise<FamilySyncLedge
     if (!isLedgerShape(parsed) || parsed.familyKey !== familyKey) return null;
     return parsed;
   } catch (error) {
-    console.warn('[storage] 증분 동기화 장부를 읽지 못해 전체 읽기로 되돌립니다.', error);
+    console.warn('[storage] 증분 동기화 장부를 읽지 못해 전체 모드로 되돌립니다.', error);
     return null;
   }
 };
 
+const cloneLedger = (ledger: CloudSyncLedger): CloudSyncLedger => JSON.parse(JSON.stringify(ledger));
+
+const pruneUploaded = (uploaded: Record<string, number>, live: Set<string>): Record<string, number> => {
+  const kept: Record<string, number> = {};
+  Object.entries(uploaded).forEach(([id, stamp]) => {
+    if (live.has(id) && typeof stamp === 'number') kept[id] = stamp;
+  });
+  return kept;
+};
+
+const pruneLedger = (ledger: CloudSyncLedger, liveLogIds: Iterable<string>): void => {
+  const live = new Set(liveLogIds);
+  ledger.uploaded = pruneUploaded(ledger.uploaded, live);
+  if (ledger.full) ledger.full.uploaded = pruneUploaded(ledger.full.uploaded, live);
+};
+
 /**
- * 장부를 저장하면서, 기기에 더 이상 없는 기록의 항목은 버립니다. 그대로 두면
- * 삭제한 기록까지 장부에 영원히 쌓입니다.
+ * 장부만 저장합니다(요청 크기 조절 결과처럼 기록이 바뀌지 않는 경우). 기기에 더
+ * 이상 없는 기록의 항목은 버립니다.
  */
 export const writeSyncLedger = async (
-  ledger: FamilySyncLedger,
+  ledger: CloudSyncLedger,
   liveLogIds: Iterable<string>,
 ): Promise<boolean> =>
   runStorageWrite(async () => {
     try {
-      const live = new Set(liveLogIds);
-      const uploaded: Record<string, number> = {};
-      Object.entries(ledger.uploaded).forEach(([id, stamp]) => {
-        if (live.has(id) && typeof stamp === 'number') uploaded[id] = stamp;
-      });
-      await AsyncStorage.setItem(
-        SYNC_LEDGER_STORAGE_KEY,
-        JSON.stringify({ ...ledger, uploaded }),
-      );
+      const next = cloneLedger(ledger);
+      pruneLedger(next, liveLogIds);
+      await AsyncStorage.setItem(SYNC_LEDGER_STORAGE_KEY, JSON.stringify(next));
       return true;
     } catch (error) {
-      console.warn('[storage] 증분 동기화 장부를 저장하지 못했습니다. 다음 동기화는 전체를 읽습니다.', error);
+      console.warn('[storage] 증분 동기화 장부를 저장하지 못했습니다. 다음 동기화는 전체 모드로 돕니다.', error);
       return false;
+    }
+  });
+
+export interface ApplySyncResponseInput {
+  familyKey: string;
+  /** 저장소의 syncKey가 이 가운데 하나일 때만 저장합니다(2.6의 기대 키 규칙). */
+  allowedStoredKeys: Array<string | null>;
+  abortToken?: { aborted: boolean };
+  remoteLogs: BabyLogEntry[];
+  remoteDeletedIds: string[];
+  remoteProfile?: unknown;
+  sentLogs?: BabyLogEntry[];
+  sentDeletedIds?: string[];
+  acceptedIds?: string[];
+  /** 이 회차가 들고 있는 장부. 저장에 성공하면 새 장부가 결과로 돌아옵니다. */
+  ledger: CloudSyncLedger;
+  /** 항목을 적은 뒤 커서와 크기 설정 같은 장부 값을 바꿉니다(동기 함수). */
+  updateLedger?: (ledger: CloudSyncLedger) => void;
+}
+
+export interface ApplySyncResponseResult {
+  success: boolean;
+  reason?: 'aborted' | 'keyChanged' | 'error';
+  logs: BabyLogEntry[];
+  profile: BabyProfile;
+  ledger: CloudSyncLedger;
+  /** 기록, 프로필, 장부 가운데 하나라도 실제로 바뀌어 저장했는가 */
+  wrote: boolean;
+  /** 이번 저장으로 장부에 새로 적힌 항목 수(기록과 삭제 표식) */
+  ledgerItemsAdded: number;
+  /** 기록, 프로필, 장부(크기 조절 값 제외)가 실제로 바뀌었는가. 이어 가기 판정의 "진전"입니다. */
+  meaningful: boolean;
+}
+
+const stampOf = (log: BabyLogEntry): number => log.updatedAt || log.timestamp;
+
+/**
+ * 서버 응답 하나를 원자적으로 반영합니다. 기록과 프로필 병합, 장부 항목 기록,
+ * 저장을 대기열 안에서 `multiSet` 한 번으로 해서, 저장 도중 앱이 종료돼도
+ * 기록과 장부가 어긋나지 않습니다(2.6.1).
+ */
+export const applySyncResponse = async (input: ApplySyncResponseInput): Promise<ApplySyncResponseResult> =>
+  runStorageWrite(async (): Promise<ApplySyncResponseResult> => {
+    const failed = (
+      reason: 'aborted' | 'keyChanged' | 'error',
+      logs: BabyLogEntry[],
+      profile: BabyProfile,
+    ): ApplySyncResponseResult => ({
+      success: false, reason, logs, profile, ledger: input.ledger, wrote: false, ledgerItemsAdded: 0, meaningful: false,
+    });
+    let currentLogs: BabyLogEntry[] = [];
+    let currentProfile: BabyProfile = { ...DEFAULT_PROFILE };
+    try {
+      currentLogs = await readLogsUnsafe();
+      currentProfile = await readProfileUnsafe();
+      if (input.abortToken?.aborted) return failed('aborted', currentLogs, currentProfile);
+      if (!input.allowedStoredKeys.includes(currentProfile.syncKey || null)) {
+        console.warn('[storage] 가족 연결이 바뀌어 오래된 동기화 결과를 폐기했습니다.');
+        return failed('keyChanged', currentLogs, currentProfile);
+      }
+
+      // 1. 병합. 원격 아기 정보는 4항목이 모두 있고 형식이 맞을 때만 비교 대상입니다.
+      const remoteShared = isCompleteSharedProfile(input.remoteProfile) ? input.remoteProfile : null;
+      const remoteStamp = remoteShared
+        && isFiniteNumber((input.remoteProfile as { sharedUpdatedAt?: unknown }).sharedUpdatedAt)
+        ? (input.remoteProfile as { sharedUpdatedAt: number }).sharedUpdatedAt
+        : 0;
+      const syncedProfile: BabyProfile = {
+        ...currentProfile,
+        deletedLogIds: Array.from(new Set([...(currentProfile.deletedLogIds || []), ...input.remoteDeletedIds])),
+        syncKey: input.familyKey,
+        ...(remoteShared ? {
+          name: remoteShared.name,
+          birthDate: remoteShared.birthDate,
+          birthWeight: remoteShared.birthWeight,
+          targetFormula: remoteShared.targetFormula,
+          sharedUpdatedAt: remoteStamp,
+        } : {}),
+      };
+      const { logs, profile } = mergeSyncedState(currentLogs, currentProfile, input.remoteLogs, syncedProfile);
+
+      // 2. 장부 항목. 서버에 있다고 방금 확인한 내용만 적습니다.
+      const ledger = cloneLedger(input.ledger);
+      const mergedById = new Map(logs.map(log => [log.id, log] as const));
+      const targets = ledger.full ? [ledger, ledger.full] : [ledger];
+      const tombstoneSets = targets.map(target => new Set(target.tombstoned));
+      let added = 0;
+      const recordUploaded = (id: string, stamp: number) => {
+        let changed = false;
+        targets.forEach(target => {
+          if (target.uploaded[id] !== stamp) { target.uploaded[id] = stamp; changed = true; }
+        });
+        if (changed) added += 1;
+      };
+      input.remoteLogs.forEach(remote => {
+        const merged = mergedById.get(remote.id);
+        if (merged && stableValue(merged) === stableValue(remote)) recordUploaded(remote.id, stampOf(remote));
+      });
+      const sentById = new Map((input.sentLogs || []).map(log => [log.id, log] as const));
+      (input.acceptedIds || []).forEach(id => {
+        const sent = sentById.get(id);
+        const merged = mergedById.get(id);
+        if (sent && merged && stableValue(merged) === stableValue(sent)) recordUploaded(id, stampOf(sent));
+      });
+      [...(input.sentDeletedIds || []), ...input.remoteDeletedIds].forEach(id => {
+        let changed = false;
+        tombstoneSets.forEach(set => {
+          if (!set.has(id)) { set.add(id); changed = true; }
+        });
+        if (changed) added += 1;
+      });
+      targets.forEach((target, index) => { target.tombstoned = Array.from(tombstoneSets[index]); });
+      pruneLedger(ledger, mergedById.keys());
+      input.updateLedger?.(ledger);
+
+      // 3. 저장. 바뀐 것만 담아 한 번에 씁니다.
+      const [oldLogs, oldProfile, oldLedger] = await Promise.all([
+        AsyncStorage.getItem(LOGS_STORAGE_KEY),
+        AsyncStorage.getItem(PROFILE_STORAGE_KEY),
+        AsyncStorage.getItem(SYNC_LEDGER_STORAGE_KEY),
+      ]);
+      const pairs: [string, string][] = [];
+      const logsJson = JSON.stringify(logs);
+      const profileJson = JSON.stringify(profile);
+      const ledgerJson = JSON.stringify(ledger);
+      if (logsJson !== oldLogs) pairs.push([LOGS_STORAGE_KEY, logsJson]);
+      if (profileJson !== oldProfile) pairs.push([PROFILE_STORAGE_KEY, profileJson]);
+      if (ledgerJson !== oldLedger) pairs.push([SYNC_LEDGER_STORAGE_KEY, ledgerJson]);
+      if (pairs.length > 0) await AsyncStorage.multiSet(pairs);
+      const currentById = new Map(currentLogs.map(log => [log.id, log] as const));
+      const logsChanged = logs.length !== currentLogs.length
+        || logs.some(log => {
+          const before = currentById.get(log.id);
+          return !before || stableValue(before) !== stableValue(log);
+        });
+      const withoutLimits = (value: CloudSyncLedger) => stableValue({ ...value, limits: undefined });
+      const meaningful = logsChanged
+        || stableValue(currentProfile) !== stableValue(profile)
+        || withoutLimits(input.ledger) !== withoutLimits(ledger);
+      return {
+        success: true, logs, profile, ledger, wrote: pairs.length > 0, ledgerItemsAdded: added, meaningful,
+      };
+    } catch (error) {
+      console.error('Error applying sync response', error);
+      return failed('error', currentLogs, currentProfile);
     }
   });
 
@@ -519,6 +752,7 @@ export const importDataWithoutLoss = async (
     [PROFILE_STORAGE_KEY, JSON.stringify(restored)],
   ]);
   // 가져온 기록은 서버에 없을 수 있으므로 다음 동기화는 전체를 대조합니다.
+  await AsyncStorage.removeItem(LEGACY_SYNC_LEDGER_STORAGE_KEY);
   await AsyncStorage.removeItem(SYNC_LEDGER_STORAGE_KEY);
   return { logs, profile: restored };
 });
@@ -577,6 +811,7 @@ export const restoreFromLocalBackup = async (): Promise<{ success: boolean; back
       ]);
       // 되돌린 기록은 서버 상태와 다시 맞춰 봐야 합니다. 증분 장부를 지워
       // 다음 동기화가 기록 전체를 대조하게 합니다.
+      await AsyncStorage.removeItem(LEGACY_SYNC_LEDGER_STORAGE_KEY);
       await AsyncStorage.removeItem(SYNC_LEDGER_STORAGE_KEY);
       return {
         success: true,

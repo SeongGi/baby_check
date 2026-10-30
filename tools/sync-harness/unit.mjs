@@ -5,6 +5,10 @@ import { fileURLToPath } from 'node:url';
 const SRC = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../../src');
 const AsyncStorage = (await import('./stubs/async-storage.mjs')).default;
 const storage = await import(`${SRC}/database/storage.ts`);
+const { compareCodePoints } = await import(`${SRC}/utils/compareCodePoints.ts`);
+const { utf8ByteLength } = await import(`${SRC}/utils/utf8.ts`);
+const decision = await import(`${SRC}/database/syncDecision.ts`);
+const { isCoalescibleSync } = await import(`${SRC}/database/syncRunner.ts`);
 
 const results = [];
 const check = (name, passed, detail) => {
@@ -155,6 +159,128 @@ check('원본 ID가 같아도 내용이 다른 백업 기록을 보존',
   restoredLogs.some(log => log.id === restored[0]?.id)
     && restoredLogs.some(log => log.type === 'formula' && log.amount === 110 && log.id !== original.id),
   JSON.stringify(restoredLogs.filter(log => log.type === 'formula').map(log => ({ id: log.id, amount: log.amount }))));
+
+
+// ────────────── 06 설계 A3: 순수 함수 ──────────────
+const eq = (a, b) => JSON.stringify(a) === JSON.stringify(b);
+
+// compareCodePoints: UTF-16 순서와 코드 포인트 순서가 갈리는 쌍(이모지 vs U+FF01)
+check('compareCodePoints: 😀(U+1F600)는 ！(U+FF01)보다 크다', compareCodePoints('😀', '！') > 0 && '😀' < '！',
+  `cp=${compareCodePoints('😀', '！')}, utf16 비교는 반대`);
+check('compareCodePoints: 같음/접두사/ASCII',
+  compareCodePoints('a', 'a') === 0 && compareCodePoints('a', 'ab') < 0 && compareCodePoints('b', 'a') > 0 && compareCodePoints('', '') === 0);
+check('compareCodePoints: 앞부분이 같은 보충 문자 뒤 비교', compareCodePoints('😀a', '😀b') < 0 && compareCodePoints('😀', '😀a') < 0);
+
+// utf8ByteLength: Node Buffer.byteLength 와 대조
+const samples = ['', 'abc', '가나다', '😀', 'a가😀b', '\u0080߿ࠀ￿', '한글'.repeat(1000), '😀'.repeat(50), '\ud800', 'a\udc00b', '\ud83d', '😀\ud83d'];
+const mismatches = samples.filter(text => utf8ByteLength(text) !== Buffer.byteLength(text, 'utf8'));
+check('utf8ByteLength: Buffer.byteLength 와 같다 (한글, 이모지, 짝 없는 서로게이트)', mismatches.length === 0,
+  mismatches.map(t => `${JSON.stringify(t.slice(0, 6))}:${utf8ByteLength(t)}!=${Buffer.byteLength(t)}`).join(' '));
+check('utf8ByteLength: 짝 없는 서로게이트는 3바이트', utf8ByteLength('\ud800') === 3 && utf8ByteLength('\udc00') === 3);
+
+// isCompleteSharedProfile
+const completeProfile = { name: '', birthDate: '2024-01-01', birthWeight: '3.2', targetFormula: 800 };
+check('isCompleteSharedProfile: 빈 문자열 이름은 완전하다', decision.isCompleteSharedProfile(completeProfile));
+check('isCompleteSharedProfile: {} / 일부 항목 / 형식 오류는 불완전',
+  !decision.isCompleteSharedProfile({}) && !decision.isCompleteSharedProfile({ name: 'a' })
+  && !decision.isCompleteSharedProfile({ ...completeProfile, targetFormula: '800' })
+  && !decision.isCompleteSharedProfile({ ...completeProfile, targetFormula: NaN })
+  && !decision.isCompleteSharedProfile({ ...completeProfile, name: undefined })
+  && !decision.isCompleteSharedProfile(null) && !decision.isCompleteSharedProfile('x') && !decision.isCompleteSharedProfile([]));
+
+// nextStepAfterFailure 표 전체 (2.6.2)
+const stepTable = [
+  ['pull', 'tooLarge', 'skipPull'], ['pull', 'serverError', 'skipPull'], ['pull', 'timeout', 'skipPull'],
+  ['push', 'tooLarge', 'skipPushAndIncremental'], ['push', 'serverError', 'skipPushAndIncremental'], ['push', 'timeout', 'skipPushAndIncremental'],
+  ['pull', 'network', 'endRound'], ['push', 'network', 'endRound'],
+  ['pull', 'notFound', 'endRound'], ['push', 'notFound', 'endRound'], ['pull', 'gone', 'endRound'], ['push', 'gone', 'endRound'],
+  ['pull', 'clientError', 'skipPull'], ['push', 'clientError', 'skipPush'],
+];
+const stepMismatch = stepTable.filter(([stage, failure, expected]) => decision.nextStepAfterFailure(stage, failure) !== expected);
+check('nextStepAfterFailure: 표 전체', stepMismatch.length === 0, JSON.stringify(stepMismatch));
+const err = (status, extra) => Object.assign(new Error('x'), { status, ...extra });
+check('classifyFailure: 상태 코드와 시간 초과와 네트워크',
+  decision.classifyFailure(err(413)) === 'tooLarge' && decision.classifyFailure(err(503)) === 'serverError'
+  && decision.classifyFailure(err(500)) === 'serverError' && decision.classifyFailure(err(404)) === 'notFound'
+  && decision.classifyFailure(err(410)) === 'gone' && decision.classifyFailure(err(400)) === 'clientError'
+  && decision.classifyFailure(err(401)) === 'clientError' && decision.classifyFailure(err(undefined, { isTimeout: true })) === 'timeout'
+  && decision.classifyFailure(new TypeError('Network request failed')) === 'network');
+
+// nextLimits 경계값
+const L = (o = {}) => ({ push: 400, pull: 500, pushStreak: 0, pullStreak: 0, ...o });
+let n = decision.nextLimits(L(), { kind: 'push', result: 'failure', failure: 'serverError' });
+check('nextLimits: 503은 올리기 크기를 절반(400→200)으로, 연속 성공을 끊는다', n.push === 200 && n.pull === 500 && n.pushStreak === 0, JSON.stringify(n));
+check('nextLimits: 413과 시간 초과도 절반',
+  decision.nextLimits(L(), { kind: 'pull', result: 'failure', failure: 'tooLarge' }).pull === 250
+  && decision.nextLimits(L(), { kind: 'pull', result: 'failure', failure: 'timeout' }).pull === 250);
+check('nextLimits: 하한 25 아래로 줄지 않는다',
+  decision.nextLimits(L({ push: 30 }), { kind: 'push', result: 'failure', failure: 'serverError' }).push === 25
+  && decision.nextLimits(L({ push: 25 }), { kind: 'push', result: 'failure', failure: 'serverError' }).push === 25);
+check('nextLimits: 네트워크 끊김과 404/410/4xx는 크기를 그대로 둔다',
+  ['network', 'notFound', 'gone', 'clientError'].every(failure => decision.nextLimits(L({ push: 200 }), { kind: 'push', result: 'failure', failure }).push === 200));
+let g = L({ push: 100, pushStreak: 8 });
+g = decision.nextLimits(g, { kind: 'push', result: 'success' });
+check('nextLimits: 9번째 성공은 늘리지 않는다', g.push === 100 && g.pushStreak === 9);
+g = decision.nextLimits(g, { kind: 'push', result: 'success' });
+check('nextLimits: 연속 10번 성공하면 두 배(100→200), 횟수는 0', g.push === 200 && g.pushStreak === 0, JSON.stringify(g));
+check('nextLimits: 늘린 값은 기본값 400을 넘지 않는다', decision.nextLimits(L({ push: 300, pushStreak: 9 }), { kind: 'push', result: 'success' }).push === 400);
+let h = decision.nextLimits(L({ push: 100, pushStreak: 9 }), { kind: 'push', result: 'success', hints: { maxPushItems: 100, maxPageRows: 250 } });
+check('nextLimits: 서버 힌트를 저장하고 늘린 값이 힌트를 넘지 않는다', h.push === 100 && h.serverPush === 100 && h.serverPull === 250, JSON.stringify(h));
+check('effectiveLimit: min(장부 값, 서버 힌트), 하한 25',
+  decision.effectiveLimit(L({ serverPush: 100 }), 'push') === 100 && decision.effectiveLimit(L({ serverPull: 10 }), 'pull') === 25
+  && decision.effectiveLimit(undefined, 'push') === 400 && decision.effectiveLimit(undefined, 'pull') === 500);
+check('nextLimits: 입력을 바꾸지 않는다', (() => { const input = L(); decision.nextLimits(input, { kind: 'push', result: 'failure', failure: 'serverError' }); return input.push === 400; })());
+
+// decideAfterSync
+const ok = (extra = {}) => ({ success: true, ...extra });
+const bad = (extra = {}) => ({ success: false, error: 'e', ...extra });
+const ctx = (extra = {}) => ({ connecting: false, timedOut: false, storedKeyMatches: false, ...extra });
+check('decideAfterSync: 410은 연결 해제', decision.decideAfterSync(bad({ familyUnavailable: true }), ctx()).action === 'disconnect');
+check('decideAfterSync: 합류 중 410은 키를 남기지 않는 실패(영구 삭제 문구)',
+  eq(decision.decideAfterSync(bad({ familyUnavailable: true }), ctx({ connecting: true, storedKeyMatches: true })),
+    { action: 'failure', error: decision.GONE_JOIN_MESSAGE }));
+const nf = decision.decideAfterSync(bad({ familyNotFound: true }), ctx({ storedKeyMatches: true }));
+check('decideAfterSync: 404는 오류 표시이고 연결을 끊지 않는다', nf.action === 'failure' && nf.error === decision.NOT_FOUND_MESSAGE);
+check('decideAfterSync: 합류 중 404는 저장소 판정을 하지 않고 합류 실패',
+  eq(decision.decideAfterSync(bad({ familyNotFound: true }), ctx({ connecting: true, storedKeyMatches: true })),
+    { action: 'failure', error: decision.JOIN_NOT_FOUND_MESSAGE }));
+check('decideAfterSync: 연결 회차가 실패해도 키가 저장돼 있으면 성공과 이어 가기',
+  eq(decision.decideAfterSync(bad(), ctx({ connecting: true, storedKeyMatches: true })), { action: 'success', continueSync: true, recovered: true }));
+check('decideAfterSync: 연결 회차 상한(timedOut)도 같은 판정',
+  decision.decideAfterSync(bad(), ctx({ connecting: true, timedOut: true, storedKeyMatches: true })).action === 'success');
+check('decideAfterSync: 저장된 키가 없으면 연결 회차 실패는 실패',
+  decision.decideAfterSync(bad(), ctx({ connecting: true, storedKeyMatches: false })).action === 'failure');
+check('decideAfterSync: 평소 회차는 저장소 판정을 하지 않는다',
+  decision.decideAfterSync(bad(), ctx({ connecting: false, storedKeyMatches: true })).action === 'failure');
+check('decideAfterSync: continuing 이고 progressed 이면 이어 간다',
+  decision.decideAfterSync(ok({ continuing: true, progressed: true }), ctx()).continueSync === true);
+check('decideAfterSync: continuing: true, progressed: false 이면 이어 가지 않는다',
+  decision.decideAfterSync(ok({ continuing: true, progressed: false }), ctx()).continueSync === false);
+check('decideAfterSync: continuing 이 없으면 이어 가지 않는다', decision.decideAfterSync(ok({ progressed: true }), ctx()).continueSync === false);
+check('decideAfterSync: uploadStalled / pullTooSlow 문구',
+  decision.decideAfterSync(bad({ uploadStalled: true }), ctx()).error === decision.UPLOAD_STALLED_MESSAGE
+  && decision.decideAfterSync(bad({ pullTooSlow: true }), ctx()).error === decision.PULL_TOO_SLOW_MESSAGE);
+check('decideAfterSync: 큰 기록이 있으면 성공이면서 안내 문구',
+  decision.decideAfterSync(ok({ oversizedIds: ['a'] }), ctx()).notice === decision.OVERSIZED_MESSAGE);
+
+// decideAfterTokenError
+check('decideAfterTokenError: 410은 폴링을 멈추고 동기화, 404와 그 밖은 재연결',
+  decision.decideAfterTokenError(err(410)).action === 'syncNow' && decision.decideAfterTokenError(err(404)).action === 'reconnect'
+  && decision.decideAfterTokenError(new Error('x')).action === 'reconnect' && decision.decideAfterTokenError(null).action === 'reconnect');
+
+// isCoalescibleSync: 네 선택이 각각 켜지면 거짓
+check('isCoalescibleSync: 평소 동기화만 합친다',
+  isCoalescibleSync({ syncKey: 'k' }) === true
+  && ['createBackup', 'allowFamilyCreation', 'connecting', 'forceFullRead'].every(option => isCoalescibleSync({ syncKey: 'k', [option]: true }) === false));
+
+// 타이브레이커: 같은 updatedAt 이면 코드 포인트 순서로 큰 canonical JSON 이 이긴다(서버와 같음)
+await storage.saveLogs([{ id: 'tie', type: 'formula', amount: 1, timestamp: 5, updatedAt: 7, notes: '！' }]);
+let tieProfile = await storage.getProfile();
+await storage.saveSyncedDataWithoutLoss([{ id: 'tie', type: 'formula', amount: 1, timestamp: 5, updatedAt: 7, notes: '😀' }], tieProfile);
+check('저장 병합 타이브레이커: 😀가 ！를 이긴다(UTF-16 비교라면 반대)',
+  (await storage.getLogs()).find(log => log.id === 'tie').notes === '😀');
+await storage.saveSyncedDataWithoutLoss([{ id: 'tie', type: 'formula', amount: 1, timestamp: 5, updatedAt: 7, notes: '！' }], tieProfile);
+check('저장 병합 타이브레이커: 순서와 상관없이 같은 쪽', (await storage.getLogs()).find(log => log.id === 'tie').notes === '😀');
 
 const failed = results.filter((r) => !r.passed);
 console.log(`\n==== 단위 검증: ${results.length - failed.length}/${results.length} 통과 ====`);

@@ -15,20 +15,32 @@ export interface SyncTokenResponse {
   error?: string;
 }
 
+export interface SyncPullRequest {
+  afterUpdatedAt: number;
+  afterLogId: string;
+  limit: number;
+}
+
 export interface SyncDataPayload {
-  lastSyncedAt?: number;
   pushLogs?: BabyLogEntry[];
   pushProfile?: Partial<BabyProfile>;
   pushDeletedIds?: string[];
+  /** 없으면 서버는 당겨 받기를 하지 않습니다(skipPull). */
+  pull?: SyncPullRequest;
 }
 
 export interface SyncDataResponse {
   ok: boolean;
-  serverTime?: number;
+  acceptedIds?: string[];
   remoteLogs?: BabyLogEntry[];
   remoteDeletedIds?: string[];
   remoteProfile?: Partial<BabyProfile>;
-  supersededIds?: string[];
+  profileRejected?: boolean;
+  hasMore?: boolean;
+  nextAfter?: { updatedAt: number; logId: string };
+  cursorCandidate?: number;
+  maxPushItems?: number;
+  maxPageRows?: number;
   error?: string;
 }
 
@@ -40,7 +52,30 @@ export interface FamilyDeletionStatusResponse {
   error?: string;
 }
 
-const DEFAULT_TIMEOUT_MS = 10_000;
+// 요청 하나의 상한(10초)과 한 회차의 시간 예산(전체 모드 당겨 받기 6초, 모든 요청 8초)입니다.
+// 모두 20초 회차 상한(App의 SYNC_TIMEOUT_MS) 안에 올리기 시간을 남기려는 값이고,
+// 시험에서만 setSyncTimingForTests로 줄입니다. 앱 코드는 이 함수를 부르지 않습니다.
+const DEFAULT_REQUEST_TIMEOUT_MS = 10_000;
+const DEFAULT_PULL_BUDGET_MS = 6_000;
+const DEFAULT_CYCLE_BUDGET_MS = 8_000;
+
+let requestTimeoutMs = DEFAULT_REQUEST_TIMEOUT_MS;
+let pullBudgetMs = DEFAULT_PULL_BUDGET_MS;
+let cycleBudgetMs = DEFAULT_CYCLE_BUDGET_MS;
+
+export interface SyncTiming {
+  requestTimeoutMs: number;
+  pullBudgetMs: number;
+  cycleBudgetMs: number;
+}
+
+export const setSyncTimingForTests = (timing: Partial<SyncTiming>): void => {
+  if (timing.requestTimeoutMs !== undefined) requestTimeoutMs = timing.requestTimeoutMs;
+  if (timing.pullBudgetMs !== undefined) pullBudgetMs = timing.pullBudgetMs;
+  if (timing.cycleBudgetMs !== undefined) cycleBudgetMs = timing.cycleBudgetMs;
+};
+
+export const getSyncTiming = (): SyncTiming => ({ requestTimeoutMs, pullBudgetMs, cycleBudgetMs });
 
 async function requestJson<T>(
   endpoint: string,
@@ -54,7 +89,7 @@ async function requestJson<T>(
 ): Promise<T> {
   const workerUrl = getWorkerUrl().replace(/\/+$/, '');
   const url = `${workerUrl}${endpoint}`;
-  const timeoutMs = options.timeoutMs ?? DEFAULT_TIMEOUT_MS;
+  const timeoutMs = options.timeoutMs ?? requestTimeoutMs;
 
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeoutMs);

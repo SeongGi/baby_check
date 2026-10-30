@@ -2,18 +2,43 @@ import * as Crypto from 'expo-crypto';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { BabyLogEntry, BabyProfile } from '../types';
 import {
+  applySyncResponse,
   backupLocalData,
-  FamilySyncLedger,
+  CloudSyncLedger,
+  getLogs,
+  getProfile,
   readSyncLedger,
-  saveSyncedDataWithoutLoss,
+  stableValue,
+  SyncCursor,
   writeSyncLedger,
 } from './storage';
 import * as cloudClient from './cloudClient';
+import { SyncDataPayload, SyncDataResponse } from './cloudClient';
+import {
+  classifyFailure,
+  effectiveLimit,
+  FailureKind,
+  GONE_MESSAGE,
+  LimitOutcome,
+  MIN_LIMIT,
+  nextLimits,
+  nextStepAfterFailure,
+  NOT_FOUND_MESSAGE,
+  PULL_TOO_SLOW_MESSAGE,
+  RequestStage,
+  UPLOAD_STALLED_MESSAGE,
+} from './syncDecision';
+import { utf8ByteLength } from '../utils/utf8';
 
 const SYNC_INVITE_PREFIX = 'babycheck://family/';
-const SHARED_PROFILE_KEYS = ['name', 'birthDate', 'birthWeight', 'targetFormula'] as const;
 const FULL_RECONCILE_INTERVAL_MS = 6 * 60 * 60 * 1000;
 const CLIENT_ID_STORAGE_KEY = '@baby_check_client_id';
+// 묶음 하나의 직렬화 크기(UTF-8 바이트) 상한입니다. 서버의 본문 한도 1MB 밑에서 여유를 둡니다.
+const MAX_PUSH_BYTES = 900 * 1024;
+// 한 회차에 보내는 올리기 묶음 수의 상한입니다. 남으면 다음 회차가 이어 갑니다.
+const MAX_PUSH_BATCHES_PER_ROUND = 20;
+const ABORTED_MESSAGE = '동기화가 시간 초과로 중단되었습니다.';
+const ALREADY_DELETED_MESSAGE = '이미 삭제된 가족입니다.';
 
 let cachedClientId: string | null = null;
 
@@ -32,10 +57,6 @@ export const getSyncClientId = async (): Promise<string> => {
   } catch {}
   cachedClientId = created;
   return created;
-};
-
-export const refreshCloudConnection = async (): Promise<void> => {
-  // REST 기반 통신에서는 상시 소켓이 없으므로 특별한 재연결 처리가 불필요합니다.
 };
 
 export const createFamilySyncId = (): string => Crypto.randomUUID().replace(/-/g, '');
@@ -59,50 +80,13 @@ const sharedStamp = (profile: Partial<BabyProfile> | null | undefined): number =
   (typeof profile?.sharedUpdatedAt === 'number' ? profile.sharedUpdatedAt : undefined)
   ?? (typeof profile?.updatedAt === 'number' ? profile.updatedAt : 0);
 
-const sharedFieldsOf = (profile: Partial<BabyProfile>) => ({
-  name: profile.name,
-  birthDate: profile.birthDate,
-  birthWeight: profile.birthWeight,
-  targetFormula: profile.targetFormula,
-});
-
-const canonical = (value: unknown): string =>
-  JSON.stringify(value, (_key, item) =>
-    item && typeof item === 'object' && !Array.isArray(item)
-      ? Object.keys(item as Record<string, unknown>)
-          .sort()
-          .reduce<Record<string, unknown>>((sorted, key) => {
-            const field = (item as Record<string, unknown>)[key];
-            if (field !== undefined) sorted[key] = field;
-            return sorted;
-          }, {})
-      : item,
-  );
-
-const mergeLogs = (localLogs: BabyLogEntry[], remoteLogs: BabyLogEntry[], deletedIds: Set<string>) => {
-  const byId = new Map<string, BabyLogEntry>();
-  [...localLogs, ...remoteLogs].forEach(log => {
-    if (!log || deletedIds.has(log.id)) return;
-    const current = byId.get(log.id);
-    const candidateUpdated = log.updatedAt || log.timestamp;
-    const currentUpdated = current?.updatedAt || current?.timestamp || 0;
-    const candidateTieBreaker = canonical(log);
-    const currentTieBreaker = current ? canonical(current) : '';
-    if (!current || candidateUpdated > currentUpdated ||
-      (candidateUpdated === currentUpdated && candidateTieBreaker > currentTieBreaker)) {
-      byId.set(log.id, log);
-    }
-  });
-  return Array.from(byId.values()).sort((a, b) => b.timestamp - a.timestamp);
-};
-
 const describeSyncError = (error: unknown): string => {
   if (!error) return '알 수 없는 오류가 발생했습니다.';
   if (typeof error === 'string') return error;
   const msg = (error as Error).message || '';
-  if (msg.includes('family_not_found') || (error as any).status === 404) {
-    return '가족 연결 키가 서버의 초대 정보와 일치하지 않거나, 가족 데이터가 삭제되었습니다. 초대 링크를 다시 받아 주세요.';
-  }
+  const status = (error as { status?: unknown }).status;
+  if (msg.includes('family_deleted') || status === 410) return GONE_MESSAGE;
+  if (msg.includes('family_not_found') || status === 404) return NOT_FOUND_MESSAGE;
   if (msg.includes('Network request failed') || (error as any).isTimeout || msg.includes('Failed to fetch')) {
     return '서버에 연결하지 못했습니다. 네트워크를 확인해 주세요.';
   }
@@ -129,6 +113,52 @@ export const readFamilyChangeToken = async (syncKey: string): Promise<string | n
 
 const readyFamilyKeys = new Set<string>();
 
+export interface SyncWithCloudResult {
+  logs: BabyLogEntry[];
+  profile: BabyProfile;
+  success: boolean;
+  merged: boolean;
+  error?: string;
+  /** 410(family_deleted): 가족이 영구 삭제되었습니다. */
+  familyUnavailable?: boolean;
+  /** 404(family_not_found): 서버에 가족이 없습니다. 연결은 끊지 않습니다. */
+  familyNotFound?: boolean;
+  /** 시간 예산, 묶음 수 상한, 전체 모드 미완료로 할 일이 남은 채 끝났습니다. */
+  continuing?: boolean;
+  /** 이 회차에서 저장이 한 번이라도 의미 있게 바뀌었습니다(크기 조절만은 제외). */
+  progressed?: boolean;
+  uploadStalled?: boolean;
+  oversizedIds?: string[];
+  pullTooSlow?: boolean;
+}
+
+const protocolError = (message: string): Error => {
+  const err = new Error(message);
+  (err as any).status = 502;
+  return err;
+};
+
+const isCursorAfter = (next: SyncCursor, current: SyncCursor): boolean =>
+  next.updatedAt > current.updatedAt
+  || (next.updatedAt === current.updatedAt && next.logId > current.logId);
+
+const readNextAfter = (value: unknown): SyncCursor | null => {
+  const v = value as { updatedAt?: unknown; logId?: unknown } | null | undefined;
+  return v && typeof v.updatedAt === 'number' && Number.isFinite(v.updatedAt) && typeof v.logId === 'string'
+    ? { updatedAt: v.updatedAt, logId: v.logId }
+    : null;
+};
+
+const stampOf = (log: BabyLogEntry): number => log.updatedAt || log.timestamp;
+
+const sharedProfilePayload = (profile: BabyProfile) => ({
+  name: profile.name,
+  birthDate: profile.birthDate,
+  birthWeight: profile.birthWeight,
+  targetFormula: profile.targetFormula,
+  sharedUpdatedAt: sharedStamp(profile),
+});
+
 export const syncWithCloud = async (
   syncKey: string,
   localLogs: BabyLogEntry[],
@@ -137,14 +167,9 @@ export const syncWithCloud = async (
   abortToken?: SyncAbortToken,
   allowFamilyCreation = true,
   forceFullRead = false,
-): Promise<{
-  logs: BabyLogEntry[];
-  profile: BabyProfile;
-  success: boolean;
-  merged: boolean;
-  error?: string;
-  familyUnavailable?: boolean;
-}> => {
+  startedAt?: number,
+): Promise<SyncWithCloudResult> => {
+  const roundStart = startedAt ?? Date.now();
   const normalizedKey = parseFamilySyncId(syncKey);
   if (!normalizedKey) {
     return {
@@ -155,199 +180,337 @@ export const syncWithCloud = async (
       error: '가족 연결 키가 올바르지 않습니다.',
     };
   }
+  const key: string = normalizedKey;
+  const timing = cloudClient.getSyncTiming();
+  const elapsed = () => Date.now() - roundStart;
+  const isAborted = () => !!abortToken?.aborted;
+
+  // 회차가 시작할 때 저장돼 있던 키. 가족 만들기와 합류에서는 null입니다.
+  const startKey = localProfile.syncKey || null;
+
+  let logs = localLogs;
+  let profile = localProfile;
+  let ledger: CloudSyncLedger = {
+    familyKey: key, cursorMillis: 0, lastFullReadAt: 0, uploaded: {}, tombstoned: [],
+  };
+  let storedOnce = false; // 첫 저장이 성공했는가(기대 키 규칙)
+  let progressed = false;
+  let profileSent = false;
+  let abortedRound = false;
+  let continuing = false;
+  let uploadStalled = false;
+  let pullTooSlow = false;
+  let familyUnavailable = false;
+  let familyNotFound = false;
+  let failure: { error: unknown; kind: FailureKind } | null = null;
+  let saveFailure: string | null = null;
+  let endRound = false;
+  let skipPull = false;
+  let skipPush = false;
+  let skipIncremental = false;
+  const oversized = new Set<string>();
+
+  const compose = (): SyncWithCloudResult => {
+    const hasSaved = storedOnce;
+    const merged = hasSaved
+      && (stableValue(logs) !== stableValue(localLogs) || stableValue(profile) !== stableValue(localProfile));
+    const base = { logs, profile, merged, progressed };
+    const extras: Partial<SyncWithCloudResult> = {};
+    if (oversized.size > 0) extras.oversizedIds = Array.from(oversized);
+    if (familyUnavailable) extras.familyUnavailable = true;
+    else if (familyNotFound) extras.familyNotFound = true;
+    if (pullTooSlow) extras.pullTooSlow = true;
+    if (uploadStalled) extras.uploadStalled = true;
+    if (failure) {
+      return {
+        ...base, ...extras, success: false,
+        error: pullTooSlow ? PULL_TOO_SLOW_MESSAGE : describeSyncError(failure.error),
+      };
+    }
+    if (saveFailure) return { ...base, ...extras, success: false, error: saveFailure };
+    if (abortedRound || isAborted()) return { ...base, ...extras, success: false, error: ABORTED_MESSAGE };
+    if (uploadStalled) return { ...base, ...extras, success: false, error: UPLOAD_STALLED_MESSAGE };
+    return { ...base, ...extras, success: true, ...(continuing ? { continuing: true } : {}) };
+  };
+
+  const persistLimitsNow = async (outcome: LimitOutcome) => {
+    const limits = nextLimits(ledger.limits, outcome);
+    if (stableValue(limits) === stableValue(ledger.limits)) return;
+    ledger = { ...ledger, limits };
+    if (isAborted()) return;
+    await writeSyncLedger(ledger, logs.map(log => log.id));
+  };
+
+  const onFailure = async (stage: RequestStage, error: unknown, usedLimit: number) => {
+    const kind = classifyFailure(error);
+    if (!failure) failure = { error, kind };
+    if (kind === 'notFound') { familyNotFound = true; readyFamilyKeys.delete(key); }
+    if (kind === 'gone') { familyUnavailable = true; readyFamilyKeys.delete(key); }
+    if (stage === 'pull' && kind === 'timeout' && usedLimit <= MIN_LIMIT) pullTooSlow = true;
+    await persistLimitsNow({ kind: stage, result: 'failure', failure: kind });
+    const step = nextStepAfterFailure(stage, kind);
+    if (step === 'endRound') endRound = true;
+    else if (step === 'skipPull') skipPull = true;
+    else if (step === 'skipPush') skipPush = true;
+    else { skipPush = true; skipIncremental = true; }
+  };
+
+  // 응답 하나를 원자적으로 저장합니다. 저장하지 못하면 회차를 끝냅니다.
+  const applyResponse = async (
+    res: SyncDataResponse,
+    stage: RequestStage,
+    options: {
+      sentLogs?: BabyLogEntry[];
+      sentDeletedIds?: string[];
+      mutate?: (ledger: CloudSyncLedger) => void;
+    } = {},
+  ) => {
+    const outcome: LimitOutcome = {
+      kind: stage,
+      result: 'success',
+      hints: { maxPushItems: res.maxPushItems, maxPageRows: res.maxPageRows },
+    };
+    const applied = await applySyncResponse({
+      familyKey: key,
+      allowedStoredKeys: storedOnce ? [key] : [startKey, key],
+      abortToken,
+      remoteLogs: Array.isArray(res.remoteLogs) ? res.remoteLogs : [],
+      remoteDeletedIds: Array.isArray(res.remoteDeletedIds) ? res.remoteDeletedIds : [],
+      remoteProfile: res.remoteProfile,
+      sentLogs: options.sentLogs,
+      sentDeletedIds: options.sentDeletedIds,
+      acceptedIds: Array.isArray(res.acceptedIds) ? res.acceptedIds : [],
+      ledger,
+      updateLedger: next => {
+        options.mutate?.(next);
+        next.limits = nextLimits(next.limits, outcome);
+      },
+    });
+    if (!applied.success) {
+      endRound = true;
+      if (applied.reason === 'aborted') abortedRound = true;
+      else if (applied.reason === 'keyChanged') saveFailure = '가족 연결이 해제되었거나 변경되었습니다.';
+      else saveFailure = '기기에 병합 결과를 저장하지 못했습니다.';
+      return applied;
+    }
+    storedOnce = true;
+    ledger = applied.ledger;
+    logs = applied.logs;
+    profile = applied.profile;
+    if (applied.meaningful) progressed = true;
+    if (res.profileRejected) console.warn('[sync] 서버가 아기 정보를 받아들이지 않았습니다.');
+    return applied;
+  };
+
+  const profilePart = async (): Promise<Pick<SyncDataPayload, 'pushProfile'>> =>
+    profileSent ? {} : { pushProfile: sharedProfilePayload(await getProfile()) };
+
+  const localResult = (success: boolean): SyncWithCloudResult =>
+    ({ logs: localLogs, profile: localProfile, success, merged: false });
 
   try {
     if (createBackup) await backupLocalData();
     const clientId = await getSyncClientId();
 
-    // 1. 가족 연결 상태 확인 및 등록 (새 가족 생성이거나 미등록 시에만 호출)
-    if (allowFamilyCreation || !readyFamilyKeys.has(normalizedKey)) {
+    // 1. 연결: 새 가족을 만들거나 아직 등록하지 않은 가족일 때만 부릅니다.
+    if (allowFamilyCreation || !readyFamilyKeys.has(key)) {
       try {
-        await cloudClient.connectFamily(normalizedKey, clientId, allowFamilyCreation);
-        readyFamilyKeys.add(normalizedKey);
+        await cloudClient.connectFamily(key, clientId, allowFamilyCreation);
+        readyFamilyKeys.add(key);
       } catch (connErr: any) {
-        readyFamilyKeys.delete(normalizedKey);
-        if (connErr?.status === 404 || connErr?.message?.includes('family_not_found')) {
-          return {
-            logs: localLogs,
-            profile: localProfile,
-            success: false,
-            merged: false,
-            familyUnavailable: true,
-            error: '가족 연결 키가 서버의 초대 정보와 일치하지 않거나, 가족 데이터가 삭제되었습니다.',
-          };
+        readyFamilyKeys.delete(key);
+        const kind = classifyFailure(connErr);
+        if (kind === 'gone') {
+          return { ...localResult(false), familyUnavailable: true, error: describeSyncError(connErr) };
+        }
+        if (kind === 'notFound') {
+          return { ...localResult(false), familyNotFound: true, error: describeSyncError(connErr) };
         }
         throw connErr;
       }
     }
+    if (isAborted()) return { ...localResult(false), error: ABORTED_MESSAGE };
 
-    if (abortToken?.aborted) {
-      return { logs: localLogs, profile: localProfile, success: false, merged: false, error: '동기화가 시간 초과로 중단되었습니다.' };
+    // 2~3. 장부 읽기와 모드 결정
+    const stored = await readSyncLedger(key);
+    const fullMode = !stored
+      || forceFullRead
+      || Date.now() - stored.lastFullReadAt >= FULL_RECONCILE_INTERVAL_MS
+      || !!stored.full;
+    if (stored) ledger = stored;
+    if (fullMode && !ledger.full) {
+      ledger = {
+        ...ledger,
+        full: { after: { updatedAt: 0, logId: '' }, uploaded: {}, tombstoned: [] },
+      };
+      delete ledger.pullAfter;
+      delete ledger.pullCursorAtStart;
     }
 
-    // 2. 증분 장부 대조
-    const ledger = await readSyncLedger(normalizedKey);
-    const canUseDelta = !forceFullRead
-      && !!ledger
-      && ledger.cursorMillis > 0
-      && Date.now() - ledger.lastFullReadAt < FULL_RECONCILE_INTERVAL_MS;
-
-    const lastSyncedAt = canUseDelta && ledger ? ledger.cursorMillis : 0;
-    const uploadedLedger = canUseDelta && ledger ? ledger.uploaded : {};
-    const tombstonedLedger = new Set(canUseDelta && ledger ? ledger.tombstoned : []);
-
-    // 3. 업로드할 로그 및 삭제 표식 준비
-    const pushLogs: BabyLogEntry[] = [];
-    localLogs.forEach(log => {
-      const localUpdated = log.updatedAt || log.timestamp;
-      if (!canUseDelta || uploadedLedger[log.id] !== localUpdated) {
-        pushLogs.push(log);
-      }
-    });
-
-    const pushDeletedIds: string[] = [];
-    (localProfile.deletedLogIds || []).forEach(id => {
-      if (!canUseDelta || !tombstonedLedger.has(id)) {
-        pushDeletedIds.push(id);
-      }
-    });
-
-    const pushProfile = {
-      name: localProfile.name,
-      birthDate: localProfile.birthDate,
-      birthWeight: localProfile.birthWeight,
-      targetFormula: localProfile.targetFormula,
-      sharedUpdatedAt: sharedStamp(localProfile),
-    };
-
-    if (abortToken?.aborted) {
-      return { logs: localLogs, profile: localProfile, success: false, merged: false, error: '동기화가 시간 초과로 중단되었습니다.' };
-    }
-
-    // 4. Cloudflare Worker로 원자적 동기화 요청 (Push & Pull 동시 수행)
-    const syncRes = await cloudClient.postSync(normalizedKey, clientId, {
-      lastSyncedAt,
-      pushLogs,
-      pushProfile,
-      pushDeletedIds,
-    });
-
-    if (abortToken?.aborted) {
-      return { logs: localLogs, profile: localProfile, success: false, merged: false, error: '동기화가 시간 초과로 중단되었습니다.' };
-    }
-
-    // 5. 원격 데이터와 로컬 데이터 병합
-    const remoteLogs = syncRes.remoteLogs || [];
-    const remoteDeletedIds = syncRes.remoteDeletedIds || [];
-    const remoteProfile = syncRes.remoteProfile || null;
-
-    const combinedDeletedIds = new Set([
-      ...(localProfile.deletedLogIds || []),
-      ...remoteDeletedIds,
-    ]);
-
-    let mergedLogs = mergeLogs(localLogs, remoteLogs, combinedDeletedIds);
-    let mergedProfile: BabyProfile = {
-      ...localProfile,
-      deletedLogIds: Array.from(combinedDeletedIds),
-      syncKey: normalizedKey,
-    };
-
-    if (remoteProfile) {
-      const remoteSharedKey = canonical(sharedFieldsOf(remoteProfile));
-      const remoteWins = sharedStamp(remoteProfile) > sharedStamp(localProfile)
-        || (sharedStamp(remoteProfile) === sharedStamp(localProfile)
-          && (remoteSharedKey as string) > canonical(sharedFieldsOf(localProfile)));
-
-      if (remoteWins) {
-        SHARED_PROFILE_KEYS.forEach(key => {
-          const val = remoteProfile[key];
-          if (val !== undefined) (mergedProfile as any)[key] = val;
+    // 4. 전체 모드 당겨 받기
+    while (fullMode && ledger.full && !endRound && !skipPull) {
+      if (isAborted()) { abortedRound = true; break; }
+      if (elapsed() >= timing.pullBudgetMs || elapsed() >= timing.cycleBudgetMs) { continuing = true; break; }
+      const after = ledger.full.after;
+      const limit = effectiveLimit(ledger.limits, 'pull');
+      let res: SyncDataResponse;
+      try {
+        res = await cloudClient.postSync(key, clientId, {
+          ...(await profilePart()),
+          pull: { afterUpdatedAt: after.updatedAt, afterLogId: after.logId, limit },
         });
-        mergedProfile.sharedUpdatedAt = sharedStamp(remoteProfile);
+        const next = res.hasMore ? readNextAfter(res.nextAfter) : null;
+        if (res.hasMore && (!next || !isCursorAfter(next, after))) throw protocolError('서버 응답의 nextAfter가 올바르지 않습니다.');
+      } catch (error) {
+        if (isAborted()) { abortedRound = true; break; }
+        await onFailure('pull', error, limit);
+        break;
+      }
+      if (isAborted()) { abortedRound = true; break; }
+      profileSent = true;
+      const nextAfter = res.hasMore ? readNextAfter(res.nextAfter) : null;
+      const applied = await applyResponse(res, 'pull', {
+        mutate: next => {
+          const full = next.full;
+          if (!full) return;
+          if (full.cursorAtStart === undefined) {
+            full.cursorAtStart = typeof res.cursorCandidate === 'number' ? res.cursorCandidate : 0;
+          }
+          if (nextAfter) {
+            full.after = nextAfter;
+          } else {
+            // 끝까지 받았습니다. 기존 장부를 이번 대조 결과로 바꿔 끼웁니다.
+            next.uploaded = full.uploaded;
+            next.tombstoned = full.tombstoned;
+            next.cursorMillis = full.cursorAtStart;
+            next.lastFullReadAt = Date.now();
+            delete next.full;
+            delete next.pullAfter;
+            delete next.pullCursorAtStart;
+          }
+        },
+      });
+      if (!applied.success) break;
+    }
+
+    // 5. 올리기
+    const excluded = new Set<string>();
+    let batches = 0;
+    let noProgressBatches = 0;
+    while (!skipPush && !endRound && !abortedRound) {
+      if (isAborted()) { abortedRound = true; break; }
+      const limit = effectiveLimit(ledger.limits, 'push');
+      const freshLogs = await getLogs();
+      const freshProfile = await getProfile();
+      const tombstoned = new Set(ledger.tombstoned);
+      const pushIds: string[] = [];
+      const pushLogs: BabyLogEntry[] = [];
+      let bytes = 0;
+      let count = 0;
+      let full = false;
+      for (const id of freshProfile.deletedLogIds || []) {
+        if (tombstoned.has(id) || excluded.has(id)) continue;
+        const size = utf8ByteLength(JSON.stringify(id)) + 1;
+        if (count >= limit || bytes + size > MAX_PUSH_BYTES) { full = true; break; }
+        pushIds.push(id);
+        bytes += size;
+        count += 1;
+      }
+      if (!full) {
+        for (const log of freshLogs) {
+          if (excluded.has(log.id) || oversized.has(log.id)) continue;
+          if (ledger.uploaded[log.id] === stampOf(log)) continue;
+          const size = utf8ByteLength(JSON.stringify(log));
+          if (size > MAX_PUSH_BYTES) { oversized.add(log.id); continue; }
+          if (count >= limit || bytes + size + 1 > MAX_PUSH_BYTES) { full = true; break; }
+          pushLogs.push(log);
+          bytes += size + 1;
+          count += 1;
+        }
+      }
+      if (count === 0) break;
+      if (batches >= MAX_PUSH_BATCHES_PER_ROUND || elapsed() >= timing.cycleBudgetMs) {
+        continuing = true;
+        break;
+      }
+      batches += 1;
+      let res: SyncDataResponse;
+      try {
+        res = await cloudClient.postSync(key, clientId, {
+          ...(await profilePart()),
+          pushLogs,
+          pushDeletedIds: pushIds,
+        });
+      } catch (error) {
+        if (isAborted()) { abortedRound = true; break; }
+        await onFailure('push', error, limit);
+        break;
+      }
+      if (isAborted()) { abortedRound = true; break; }
+      profileSent = true;
+      const applied = await applyResponse(res, 'push', { sentLogs: pushLogs, sentDeletedIds: pushIds });
+      if (!applied.success) break;
+      if (applied.ledgerItemsAdded === 0) {
+        // 비교 규칙이 조금만 어긋나도 같은 묶음을 계속 보내는 일을 막습니다.
+        pushLogs.forEach(log => excluded.add(log.id));
+        pushIds.forEach(id => excluded.add(id));
+        noProgressBatches += 1;
+        if (noProgressBatches >= 2) { uploadStalled = true; break; }
       }
     }
 
-    // 6. 안전한 로컬 저장 (동시성 큐 보호)
-    const safelySaved = await saveSyncedDataWithoutLoss(
-      mergedLogs,
-      mergedProfile,
-      localProfile.syncKey || null,
-      abortToken,
-    );
-    if (!safelySaved.success) {
-      throw new Error('기기에 병합 결과를 저장하지 못했습니다.');
-    }
-    mergedLogs = safelySaved.logs;
-    mergedProfile = safelySaved.profile;
-
-    const changedLocally = canonical(mergedLogs) !== canonical(localLogs)
-      || canonical(mergedProfile) !== canonical(localProfile);
-
-    // 네트워크 대기 중 로컬에 새 삭제가 발생했다면 같은 회차에 서버로 즉시 전파
-    const unpushedDeletes = (mergedProfile.deletedLogIds || []).filter(
-      id => !pushDeletedIds.includes(id) && (!canUseDelta || !tombstonedLedger.has(id))
-    );
-    if (unpushedDeletes.length > 0 && !abortToken?.aborted) {
-      await cloudClient.postSync(normalizedKey, clientId, {
-        pushDeletedIds: unpushedDeletes,
+    // 6. 증분 당겨 받기: 전체 모드인 회차는 건너뜁니다.
+    while (!fullMode && !skipIncremental && !endRound && !abortedRound) {
+      if (isAborted()) { abortedRound = true; break; }
+      if (elapsed() >= timing.cycleBudgetMs) { continuing = true; break; }
+      const after: SyncCursor = ledger.pullAfter ?? { updatedAt: ledger.cursorMillis, logId: '' };
+      const limit = effectiveLimit(ledger.limits, 'pull');
+      let res: SyncDataResponse;
+      try {
+        res = await cloudClient.postSync(key, clientId, {
+          ...(await profilePart()),
+          pull: { afterUpdatedAt: after.updatedAt, afterLogId: after.logId, limit },
+        });
+        const next = res.hasMore ? readNextAfter(res.nextAfter) : null;
+        if (res.hasMore && (!next || !isCursorAfter(next, after))) throw protocolError('서버 응답의 nextAfter가 올바르지 않습니다.');
+      } catch (error) {
+        if (isAborted()) { abortedRound = true; break; }
+        await onFailure('pull', error, limit);
+        break;
+      }
+      if (isAborted()) { abortedRound = true; break; }
+      profileSent = true;
+      const nextAfter = res.hasMore ? readNextAfter(res.nextAfter) : null;
+      const applied = await applyResponse(res, 'pull', {
+        mutate: next => {
+          // 끊겼다가 이어 받는 회차의 첫 페이지가 원래 커서를 덮지 않도록 값이 없을 때만 적습니다.
+          if (next.pullCursorAtStart === undefined) {
+            next.pullCursorAtStart = typeof res.cursorCandidate === 'number' ? res.cursorCandidate : next.cursorMillis;
+          }
+          if (nextAfter) {
+            next.pullAfter = nextAfter;
+          } else {
+            next.cursorMillis = next.pullCursorAtStart;
+            delete next.pullAfter;
+            delete next.pullCursorAtStart;
+          }
+        },
       });
-    }
-
-    // 7. 증분 장부 갱신
-    if (!abortToken?.aborted && syncRes.serverTime) {
-      const nextUploaded: Record<string, number> = canUseDelta ? { ...uploadedLedger } : {};
-      mergedLogs.forEach(log => {
-        nextUploaded[log.id] = log.updatedAt || log.timestamp;
-      });
-
-      // 서버가 더 최신이라 받아들여지지 않은 기록은 장부에서 제거해 다음 회차에 전체 대조
-      const supersededSet = new Set(syncRes.supersededIds || []);
-      supersededSet.forEach(id => {
-        delete nextUploaded[id];
-      });
-
-      const nextTombstoned = new Set(canUseDelta ? tombstonedLedger : []);
-      combinedDeletedIds.forEach(id => nextTombstoned.add(id));
-
-      const nextLedger: FamilySyncLedger = {
-        familyKey: normalizedKey,
-        cursorMillis: syncRes.serverTime,
-        lastFullReadAt: supersededSet.size > 0
-          ? 0
-          : canUseDelta && ledger ? ledger.lastFullReadAt : Date.now(),
-        uploaded: nextUploaded,
-        tombstoned: Array.from(nextTombstoned),
-      };
-      await writeSyncLedger(nextLedger, mergedLogs.map(l => l.id));
+      if (!applied.success || !nextAfter) break;
     }
 
-    return {
-      logs: mergedLogs,
-      profile: mergedProfile,
-      success: true,
-      merged: changedLocally,
-    };
+    // 전체 모드가 끝나지 않은 채 끝났다면 다음 회차가 이어 갑니다.
+    if (fullMode && ledger.full && !failure && !abortedRound && !endRound && !uploadStalled) continuing = true;
+
+    return compose();
   } catch (error: any) {
-    if (error?.status === 404 || error?.message?.includes('family_not_found')) {
-      readyFamilyKeys.delete(normalizedKey);
-      return {
-        logs: localLogs,
-        profile: localProfile,
-        success: false,
-        merged: false,
-        familyUnavailable: true,
-        error: describeSyncError(error),
-      };
-    }
-    return {
-      logs: localLogs,
-      profile: localProfile,
-      success: false,
-      merged: false,
-      error: describeSyncError(error),
-    };
+    const kind = classifyFailure(error);
+    if (kind === 'notFound') { familyNotFound = true; readyFamilyKeys.delete(key); }
+    if (kind === 'gone') { familyUnavailable = true; readyFamilyKeys.delete(key); }
+    if (!failure) failure = { error, kind };
+    return compose();
   }
+
 };
 
 export interface FamilyDeletionStatus {
@@ -371,7 +534,12 @@ export const getFamilyDeletionStatus = async (syncKey: string): Promise<FamilyDe
       canDeleteNow: res.canDeleteNow,
     };
   } catch (error) {
-    return { scheduled: false, canDeleteNow: false, error: describeSyncError(error) };
+    if ((error as { status?: unknown } | null)?.status === 410) readyFamilyKeys.delete(normalizedKey);
+    return {
+      scheduled: false,
+      canDeleteNow: false,
+      error: (error as { status?: unknown } | null)?.status === 410 ? ALREADY_DELETED_MESSAGE : describeSyncError(error),
+    };
   }
 };
 
@@ -387,7 +555,7 @@ export const scheduleFamilyDeletion = async (
     const res = await cloudClient.scheduleFamilyDeletion(normalizedKey, clientId);
     return { success: true, readyAt: res.readyAt };
   } catch (error) {
-    return { success: false, error: describeSyncError(error) };
+    return { success: false, error: (error as { status?: unknown } | null)?.status === 410 ? ALREADY_DELETED_MESSAGE : describeSyncError(error) };
   }
 };
 
@@ -403,7 +571,7 @@ export const cancelFamilyDeletion = async (
     await cloudClient.cancelFamilyDeletion(normalizedKey, clientId);
     return { success: true };
   } catch (error) {
-    return { success: false, error: describeSyncError(error) };
+    return { success: false, error: (error as { status?: unknown } | null)?.status === 410 ? ALREADY_DELETED_MESSAGE : describeSyncError(error) };
   }
 };
 
@@ -420,6 +588,8 @@ export const deleteFamilyCloudData = async (
     await cloudClient.deleteFamilyData(normalizedKey, clientId);
     return { success: true };
   } catch (error) {
+    // 410: 다른 기기가 먼저 영구 삭제했습니다. 원하던 결과이므로 성공으로 봅니다.
+    if ((error as { status?: unknown } | null)?.status === 410) return { success: true };
     return { success: false, error: describeSyncError(error) };
   }
 };
@@ -435,6 +605,8 @@ export const subscribeToCloudChanges = async (
   const clientId = await getSyncClientId();
   let lastToken: string | null = null;
   let active = true;
+
+  let intervalId: ReturnType<typeof setInterval> | undefined;
 
   const check = async () => {
     if (!active) return;
@@ -456,7 +628,13 @@ export const subscribeToCloudChanges = async (
         }
       }
     } catch (err: any) {
-      if (active) onError(err instanceof Error ? err : new Error(String(err)));
+      if (!active) return;
+      // 410은 가족이 영구 삭제됐다는 뜻이라 폴링을 멈춥니다. 오류 객체의 status로 호출자가 구별합니다.
+      if (err?.status === 410) {
+        active = false;
+        if (intervalId) clearInterval(intervalId);
+      }
+      onError(err instanceof Error ? err : new Error(String(err)));
     }
   };
 
@@ -464,12 +642,12 @@ export const subscribeToCloudChanges = async (
   check().catch(() => {});
 
   // 90초 주기 경량 폴링
-  const intervalId = setInterval(() => {
+  intervalId = setInterval(() => {
     check().catch(() => {});
   }, 90_000);
 
   return () => {
     active = false;
-    clearInterval(intervalId);
+    if (intervalId) clearInterval(intervalId);
   };
 };

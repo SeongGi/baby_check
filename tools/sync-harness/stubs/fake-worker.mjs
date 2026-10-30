@@ -1,16 +1,54 @@
-// In-memory Cloudflare Worker & D1 mock for sync-harness tests
+// In-memory Cloudflare Worker & D1 mock for sync-harness tests (06 설계 2.5, 2.9).
+// 클라이언트만 보는 빠른 검사용입니다. 서버 동작의 최종 판정은 실제 서버 코드로 도는
+// 하네스 모드(2.10)에서 합니다. 한도(500건, 1MB), 삭제 표식 upsert, 같은 버전 무시,
+// 410, 올리기 분류, 페이지 당겨 받기를 실제 서버와 같은 규칙으로 흉내 냅니다.
+import { compareCodePoints } from '../../../src/utils/compareCodePoints.ts';
+
+const MAX_BODY_BYTES = 1024 * 1024;
+const MAX_REQUEST_ITEMS = 500;
+const MAX_PAGE_BYTES = 800 * 1024;
+const CURSOR_MARGIN_MS = 120_000;
 
 export const state = {
-  docs: new Map(),
+  // 가족: key -> { createdAt, updatedAt, lastClientId, pendingDeletionAt, sharedJson, profileUpdatedAt }
+  families: new Map(),
+  // 기록: key -> Map(logId -> { clientUpdatedAt, updatedAt, deletedAt, rawJson })
+  logs: new Map(),
+  // 영구 삭제한 가족 key (deleted_families)
+  deleted: new Set(),
+  // 쓰기가 있었던 요청마다 한 건: { logs, tombstones, profile }
   commits: [],
-  reads: [],
+  // 요청 목록: { kind, clientId, pushLogs, pushDeleted, pull, status, writes }
+  requests: [],
+  maxPushItems: 400,
+  maxPageRows: 500,
+  // 서버 시각을 정합니다. 없으면 Date.now().
+  clock: null,
   beforeRead: null,
   beforeTransaction: null,
   beforeCommit: null,
+  // 응답 본문을 바꿔치기합니다(아기 정보 가드 검사 등). (body, response) => response
+  tamperSyncResponse: null,
+  // 올리기 분류를 "항상 받아들이지 않음"으로 만듭니다(진전 없음 중단 검사).
+  rejectAllPushes: false,
+  // 다음 sync 요청에 이 상태 코드를 돌려줍니다(한 번만). 또는 함수(body)=>status|null.
+  failNextSync: null,
   offline: false,
 };
 
 const originalFetch = globalThis.fetch;
+const encoder = new TextEncoder();
+
+const now = () => (state.clock ? state.clock() : Date.now());
+
+const canonical = (value) =>
+  JSON.stringify(value, (_key, item) =>
+    item && typeof item === 'object' && !Array.isArray(item)
+      ? Object.keys(item).sort().reduce((sorted, key) => {
+          if (item[key] !== undefined) sorted[key] = item[key];
+          return sorted;
+        }, {})
+      : item);
 
 function makeJsonResponse(data, status = 200) {
   return new Response(JSON.stringify(data), {
@@ -19,13 +57,228 @@ function makeJsonResponse(data, status = 200) {
   });
 }
 
+const familyLogs = (key) => {
+  let logs = state.logs.get(key);
+  if (!logs) { logs = new Map(); state.logs.set(key, logs); }
+  return logs;
+};
+
+const missingResponse = (key) =>
+  state.deleted.has(key)
+    ? makeJsonResponse({ ok: false, error: 'family_deleted' }, 410)
+    : makeJsonResponse({ ok: false, error: 'family_not_found' }, 404);
+
+const createFamily = (key) => {
+  const t = now();
+  state.families.set(key, {
+    createdAt: t, updatedAt: t, lastClientId: '', pendingDeletionAt: null, sharedJson: null, profileUpdatedAt: 0,
+  });
+  familyLogs(key);
+};
+
+// 시험용 직접 조작: 상대 기기가 서버에 남긴 행을 흉내 냅니다(어댑터의 inject에 해당).
+state.ensureFamily = (key) => { if (!state.families.has(key)) createFamily(key); };
+state.injectLog = (key, log, serverTime = now()) => {
+  state.ensureFamily(key);
+  familyLogs(key).set(log.id, {
+    clientUpdatedAt: log.updatedAt || log.timestamp || 0,
+    updatedAt: serverTime,
+    deletedAt: null,
+    rawJson: canonical(log),
+  });
+};
+state.injectTombstone = (key, id, serverTime = now()) => {
+  state.ensureFamily(key);
+  familyLogs(key).set(id, {
+    clientUpdatedAt: 0, updatedAt: serverTime, deletedAt: serverTime, rawJson: canonical({ deleted: true, id }),
+  });
+};
+state.liveLogs = (key) =>
+  [...familyLogs(key).entries()].filter(([, row]) => row.deletedAt === null).map(([id, row]) => [id, row.rawJson]);
+state.deletedIds = (key) =>
+  [...familyLogs(key).entries()].filter(([, row]) => row.deletedAt !== null).map(([id]) => id);
+state.reset = () => {
+  state.families.clear();
+  state.logs.clear();
+  state.deleted.clear();
+  state.commits.length = 0;
+  state.requests.length = 0;
+};
+
+const isCompleteShared = (p) =>
+  p && typeof p === 'object'
+  && typeof p.name === 'string' && typeof p.birthDate === 'string' && typeof p.birthWeight === 'string'
+  && typeof p.targetFormula === 'number' && Number.isFinite(p.targetFormula);
+
+const remoteProfileOf = (family) =>
+  family.sharedJson === null ? undefined : { ...JSON.parse(family.sharedJson), sharedUpdatedAt: family.profileUpdatedAt };
+
+async function handleSync(key, clientId, bodyText) {
+  if (state.beforeRead) {
+    const hook = state.beforeRead;
+    state.beforeRead = null;
+    await hook();
+  }
+  const request = { kind: 'sync', clientId, pushLogs: 0, pushDeleted: 0, pull: null, status: 200, writes: 0 };
+  state.requests.push(request);
+  const fail = (response) => { request.status = response.status; return response; };
+
+  if (encoder.encode(bodyText).length > MAX_BODY_BYTES) {
+    return fail(makeJsonResponse({ ok: false, error: 'payload_too_large' }, 413));
+  }
+  let body;
+  try { body = bodyText ? JSON.parse(bodyText) : {}; } catch { return fail(makeJsonResponse({ ok: false, error: 'invalid_json' }, 400)); }
+  const pushLogs = Array.isArray(body.pushLogs) ? body.pushLogs : [];
+  const pushDeletedIds = Array.isArray(body.pushDeletedIds) ? body.pushDeletedIds : [];
+  request.pushLogs = pushLogs.length;
+  request.pushDeleted = pushDeletedIds.length;
+  request.hasProfile = !!body.pushProfile;
+  if (body.pull) {
+    request.pull = { after: [Number(body.pull.afterUpdatedAt) || 0, String(body.pull.afterLogId ?? '')], limit: body.pull.limit };
+  }
+  if (pushLogs.length + pushDeletedIds.length > MAX_REQUEST_ITEMS) {
+    return fail(makeJsonResponse({ ok: false, error: 'too_many_items' }, 413));
+  }
+  if (state.failNextSync) {
+    const status = typeof state.failNextSync === 'function' ? state.failNextSync(body, request) : state.failNextSync;
+    if (typeof state.failNextSync !== 'function') state.failNextSync = null;
+    if (status) return fail(makeJsonResponse({ ok: false, error: `injected_${status}` }, status));
+  }
+  const family = state.families.get(key);
+  if (!family) return fail(missingResponse(key));
+  if (state.beforeTransaction) await state.beforeTransaction();
+
+  const logs = familyLogs(key);
+  const t = now();
+  const written = { logs: [], tombstones: [], profile: false };
+
+  // 쓰기 계획: 확정 전에 커밋 실패 훅을 부를 수 있도록 먼저 모읍니다.
+  const plan = [];
+  for (const log of pushLogs) {
+    if (!log || typeof log.id !== 'string') continue;
+    const clientUpdatedAt = log.updatedAt || log.timestamp || 0;
+    const rawJson = canonical(log);
+    const existing = logs.get(log.id);
+    if (!existing) plan.push({ type: 'insert', id: log.id, clientUpdatedAt, rawJson });
+    else if (existing.deletedAt === null
+      && (clientUpdatedAt > existing.clientUpdatedAt
+        || (clientUpdatedAt === existing.clientUpdatedAt && compareCodePoints(rawJson, existing.rawJson) > 0))) {
+      plan.push({ type: 'update', id: log.id, clientUpdatedAt, rawJson });
+    }
+  }
+  for (const id of pushDeletedIds) {
+    if (typeof id !== 'string') continue;
+    const existing = logs.get(id);
+    if (!existing || existing.deletedAt === null) plan.push({ type: 'tombstone', id });
+  }
+  let profileRejected = false;
+  let profileWrite = null;
+  if (body.pushProfile) {
+    const p = body.pushProfile;
+    const ts = p.sharedUpdatedAt;
+    if (!isCompleteShared(p) || typeof ts !== 'number' || !Number.isFinite(ts)) profileRejected = true;
+    else {
+      const json = canonical({ name: p.name, birthDate: p.birthDate, birthWeight: p.birthWeight, targetFormula: p.targetFormula });
+      if (family.profileUpdatedAt < ts
+        || (family.profileUpdatedAt === ts && compareCodePoints(family.sharedJson ?? '', json) < 0)) {
+        profileWrite = { json, ts };
+      }
+    }
+  }
+  if (state.beforeCommit) {
+    try { await state.beforeCommit(plan); } catch (error) {
+      return fail(makeJsonResponse({ ok: false, error: String(error?.message || error) }, 500));
+    }
+  }
+  for (const w of plan) {
+    if (w.type === 'tombstone') {
+      logs.set(w.id, { clientUpdatedAt: 0, updatedAt: t, deletedAt: t, rawJson: canonical({ deleted: true, id: w.id }) });
+      written.tombstones.push(w.id);
+    } else {
+      logs.set(w.id, { clientUpdatedAt: w.clientUpdatedAt, updatedAt: t, deletedAt: null, rawJson: w.rawJson });
+      written.logs.push(w.id);
+    }
+  }
+  if (profileWrite) {
+    family.sharedJson = profileWrite.json;
+    family.profileUpdatedAt = profileWrite.ts;
+    written.profile = true;
+  }
+  request.writes = written.logs.length + written.tombstones.length + (written.profile ? 1 : 0);
+  if (request.writes > 0) {
+    family.updatedAt = t;
+    family.lastClientId = clientId;
+    state.commits.push(written);
+  }
+
+  // 올리기 분류: 보낸 기록 id의 서버 행을 다시 읽어 나눕니다. skipPull 요청도 같습니다.
+  const acceptedIds = [];
+  const remoteLogs = [];
+  const remoteDeletedIds = [];
+  const seen = new Set();
+  for (const log of pushLogs) {
+    if (!log || typeof log.id !== 'string' || seen.has(log.id)) continue;
+    seen.add(log.id);
+    const row = logs.get(log.id);
+    if (!row || state.rejectAllPushes) continue;
+    if (row.deletedAt !== null) remoteDeletedIds.push(log.id);
+    else if (row.rawJson === canonical(log)) acceptedIds.push(log.id);
+    else remoteLogs.push(JSON.parse(row.rawJson));
+  }
+
+  const response = {
+    ok: true,
+    acceptedIds,
+    remoteLogs,
+    remoteDeletedIds,
+    maxPushItems: state.maxPushItems,
+    maxPageRows: state.maxPageRows,
+  };
+  if (profileRejected) response.profileRejected = true;
+
+  if (body.pull) {
+    const [afterAt, afterId] = request.pull.after;
+    const limit = Math.min(state.maxPageRows, Math.max(25, Math.floor(Number(body.pull.limit)) || 500));
+    response.cursorCandidate = t - CURSOR_MARGIN_MS;
+    const rows = [...logs.entries()]
+      .filter(([id, row]) => row.updatedAt > afterAt || (row.updatedAt === afterAt && id > afterId))
+      .sort((a, b) => a[1].updatedAt - b[1].updatedAt || (a[0] < b[0] ? -1 : a[0] > b[0] ? 1 : 0));
+    const page = [];
+    let bytes = 0;
+    let hasMore = false;
+    for (const [id, row] of rows) {
+      if (page.length >= limit) { hasMore = true; break; }
+      page.push([id, row]);
+      bytes += encoder.encode(row.rawJson).length;
+      if (bytes >= MAX_PAGE_BYTES) { hasMore = rows.length > page.length; break; }
+    }
+    for (const [id, row] of page) {
+      if (seen.has(id) && (acceptedIds.includes(id) || remoteDeletedIds.includes(id) || remoteLogs.some(l => l.id === id))) {
+        // 올리기 분류에서 이미 담은 id는 한 번만 담습니다.
+        continue;
+      }
+      if (row.deletedAt !== null) remoteDeletedIds.push(id);
+      else remoteLogs.push(JSON.parse(row.rawJson));
+    }
+    response.hasMore = hasMore;
+    if (hasMore) {
+      const [lastId, lastRow] = page[page.length - 1];
+      response.nextAfter = { updatedAt: lastRow.updatedAt, logId: lastId };
+    }
+  }
+  const profile = remoteProfileOf(family);
+  if (profile) response.remoteProfile = profile;
+  return state.tamperSyncResponse
+    ? makeJsonResponse(state.tamperSyncResponse(body, response))
+    : makeJsonResponse(response);
+}
+
 globalThis.fetch = async function fakeFetch(url, options = {}) {
   if (state.offline) {
     throw new TypeError('Network request failed');
   }
 
-  const urlStr = String(url);
-  const parsedUrl = new URL(urlStr);
+  const parsedUrl = new URL(String(url));
   const pathname = parsedUrl.pathname;
   const method = (options.method || 'GET').toUpperCase();
   const headers = new Headers(options.headers || {});
@@ -33,242 +286,74 @@ globalThis.fetch = async function fakeFetch(url, options = {}) {
   const authHeader = headers.get('Authorization') || '';
   const match = authHeader.match(/^Bearer\s+([a-zA-Z0-9_-]+)$/i);
   const syncKey = match ? match[1] : '';
-  const familyPath = `families/${syncKey}`;
   const clientId = headers.get('X-Client-Id') || 'test-client';
 
   // 1. POST /api/family/connect
   if (pathname === '/api/family/connect' && method === 'POST') {
+    state.requests.push({ kind: 'connect', clientId, status: 200 });
     const body = options.body ? JSON.parse(options.body) : {};
-    const exists = state.docs.has(familyPath);
-
-    if (exists) {
-      return makeJsonResponse({ ok: true, isNewFamily: false });
-    }
-
-    if (!body.allowCreate) {
-      return makeJsonResponse({ ok: false, error: 'family_not_found' }, 404);
-    }
-
-    state.docs.set(familyPath, {
-      id: syncKey,
-      createdAt: Date.now(),
-      updatedAt: Date.now(),
-      pendingDeletionAt: null,
-      profile: {},
-    });
-    state.commits.push([{ ref: { path: familyPath }, type: 'family_create' }]);
+    if (state.families.has(syncKey)) return makeJsonResponse({ ok: true, isNewFamily: false });
+    // 영구 삭제한 가족은 allowCreate와 상관없이 410이고 다시 생기지 않습니다.
+    if (state.deleted.has(syncKey) || !body.allowCreate) return missingResponse(syncKey);
+    createFamily(syncKey);
     return makeJsonResponse({ ok: true, isNewFamily: true });
   }
 
   // 2. GET /api/family/token
   if (pathname === '/api/family/token' && method === 'GET') {
     if (state.beforeRead) await state.beforeRead();
-    const fam = state.docs.get(familyPath);
-    if (!fam) {
-      return makeJsonResponse({ ok: false, error: 'family_not_found' }, 404);
-    }
-    const changeToken = `${fam.updatedAt}:${fam.lastClientId || ''}`;
+    const fam = state.families.get(syncKey);
+    if (!fam) return missingResponse(syncKey);
     return makeJsonResponse({
       ok: true,
-      changeToken,
-      profileUpdatedAt: fam.profile?.sharedUpdatedAt || 0,
+      changeToken: `${fam.updatedAt}:${fam.lastClientId || ''}`,
+      profileUpdatedAt: fam.profileUpdatedAt || 0,
       deletionReadyAt: fam.pendingDeletionAt || null,
     });
   }
 
   // 3. POST /api/family/sync
   if (pathname === '/api/family/sync' && method === 'POST') {
-    if (state.beforeRead) {
-      const hook = state.beforeRead;
-      state.beforeRead = null;
-      await hook();
-    }
-    if (!state.docs.has(familyPath)) {
-      return makeJsonResponse({ ok: false, error: 'family_not_found' }, 404);
-    }
-    if (state.beforeTransaction) await state.beforeTransaction();
-
-    const body = options.body ? JSON.parse(options.body) : {};
-    const serverTime = Date.now();
-    const lastSyncedAt = Number(body.lastSyncedAt) || 0;
-    const pushLogs = Array.isArray(body.pushLogs) ? body.pushLogs : [];
-    const pushDeletedIds = Array.isArray(body.pushDeletedIds) ? body.pushDeletedIds : [];
-    const pushProfile = body.pushProfile || null;
-
-    const writes = [];
-    const supersededIds = [];
-
-    // Push logs
-    for (const log of pushLogs) {
-      const docKey = `${familyPath}/logs/${log.id}`;
-      const existing = state.docs.get(docKey);
-      const clientUpdated = log.updatedAt || log.timestamp || serverTime;
-
-      if (existing) {
-        if (existing.deleted) {
-          supersededIds.push(log.id);
-          continue;
-        }
-        const existingClientUpdated = existing.payload?.updatedAt || existing.payload?.timestamp || existing.updatedAt || 0;
-        if (existingClientUpdated > clientUpdated) {
-          supersededIds.push(log.id);
-          continue;
-        }
-      }
-      writes.push({ ref: { path: docKey }, type: 'log', log });
-    }
-
-    // Push deletions
-    for (const delId of pushDeletedIds) {
-      const docKey = `${familyPath}/logs/${delId}`;
-      writes.push({ ref: { path: docKey }, type: 'delete', id: delId });
-    }
-
-    // Push profile
-    if (pushProfile && typeof pushProfile.sharedUpdatedAt === 'number') {
-      const fam = state.docs.get(familyPath);
-      if (pushProfile.sharedUpdatedAt > (fam?.profile?.sharedUpdatedAt || 0) || (fam?.profile?.sharedUpdatedAt || 0) === 0) {
-        writes.push({ ref: { path: familyPath }, type: 'profile', profile: pushProfile });
-      }
-    }
-
-    if (writes.length > 0) {
-      writes.unshift({ ref: { path: familyPath }, type: 'family_update' });
-    }
-
-    if (state.beforeCommit) {
-      await state.beforeCommit(writes);
-    }
-
-    // Apply writes
-    if (writes.length > 0) {
-      const fam = state.docs.get(familyPath) || {};
-      fam.updatedAt = serverTime;
-      fam.lastClientId = clientId;
-
-      for (const w of writes) {
-        if (w.type === 'log') {
-          state.docs.set(w.ref.path, {
-            payload: w.log,
-            deleted: false,
-            updatedAt: serverTime,
-          });
-        } else if (w.type === 'delete') {
-          const existing = state.docs.get(w.ref.path) || {};
-          state.docs.set(w.ref.path, {
-            ...existing,
-            deleted: true,
-            updatedAt: serverTime,
-          });
-        } else if (w.type === 'profile') {
-          fam.profile = { ...(fam.profile || {}), ...w.profile };
-        }
-      }
-      state.docs.set(familyPath, fam);
-      state.commits.push(writes);
-    }
-
-    // Pull logs
-    const prefix = `${familyPath}/logs/`;
-    const remoteLogs = [];
-    const remoteDeletedIds = [];
-    let readDocsCount = 0;
-
-    for (const [key, doc] of state.docs.entries()) {
-      if (!key.startsWith(prefix)) continue;
-      const docUpdated = doc.updatedAt || 0;
-      if (lastSyncedAt === 0) {
-        readDocsCount++;
-        if (doc.deleted) {
-          remoteDeletedIds.push(doc.payload?.id || key.split('/').at(-1));
-        } else if (doc.payload) {
-          remoteLogs.push(doc.payload);
-        }
-      } else {
-        if (docUpdated > lastSyncedAt) {
-          readDocsCount++;
-          if (doc.deleted) {
-            remoteDeletedIds.push(doc.payload?.id || key.split('/').at(-1));
-          } else if (doc.payload) {
-            remoteLogs.push(doc.payload);
-          }
-        }
-      }
-    }
-
-    // Ensure pushed logs that match server tombstones are marked as superseded
-    for (const log of pushLogs) {
-      if (remoteDeletedIds.includes(log.id) && !supersededIds.includes(log.id)) {
-        supersededIds.push(log.id);
-      }
-    }
-
-    state.reads.push({
-      path: `${familyPath}/logs`,
-      constraints: lastSyncedAt > 0 ? [{ field: 'updatedAt', op: '>', value: lastSyncedAt }] : [],
-      count: readDocsCount,
-    });
-
-    return makeJsonResponse({
-      ok: true,
-      serverTime,
-      remoteLogs,
-      remoteDeletedIds,
-      remoteProfile: state.docs.get(familyPath)?.profile || {},
-      supersededIds,
-    });
+    return handleSync(syncKey, clientId, options.body ? String(options.body) : '');
   }
 
   // 4. POST /api/family/delete-schedule
   if (pathname === '/api/family/delete-schedule' && method === 'POST') {
-    if (!state.docs.has(familyPath)) {
-      return makeJsonResponse({ ok: false, error: 'family_not_found' }, 404);
-    }
-    const readyAt = Date.now() + 60 * 60 * 1000;
-    const fam = state.docs.get(familyPath);
+    const fam = state.families.get(syncKey);
+    if (!fam) return missingResponse(syncKey);
+    const readyAt = now() + 60 * 60 * 1000;
     fam.pendingDeletionAt = readyAt;
-    state.docs.set(familyPath, fam);
     return makeJsonResponse({ ok: true, readyAt });
   }
 
   // 5. POST /api/family/cancel-delete
   if (pathname === '/api/family/cancel-delete' && method === 'POST') {
-    if (!state.docs.has(familyPath)) {
-      return makeJsonResponse({ ok: false, error: 'family_not_found' }, 404);
-    }
-    const fam = state.docs.get(familyPath);
+    const fam = state.families.get(syncKey);
+    if (!fam) return missingResponse(syncKey);
     fam.pendingDeletionAt = null;
-    state.docs.set(familyPath, fam);
     return makeJsonResponse({ ok: true });
   }
 
   // 6. POST /api/family/delete (냉각 기간 검증 강제)
   if (pathname === '/api/family/delete' && method === 'POST') {
-    if (!state.docs.has(familyPath)) {
-      return makeJsonResponse({ ok: false, error: 'family_not_found' }, 404);
-    }
-    const fam = state.docs.get(familyPath);
-    const now = Date.now();
-    if (!fam.pendingDeletionAt || fam.pendingDeletionAt > now) {
+    const fam = state.families.get(syncKey);
+    if (!fam) return missingResponse(syncKey);
+    if (!fam.pendingDeletionAt || fam.pendingDeletionAt > now()) {
       return makeJsonResponse({ ok: false, error: 'cooling_period_active' }, 400);
     }
-    for (const key of [...state.docs.keys()]) {
-      if (key === familyPath || key.startsWith(`${familyPath}/`)) {
-        state.docs.delete(key);
-      }
-    }
+    state.families.delete(syncKey);
+    state.logs.delete(syncKey);
+    state.deleted.add(syncKey);
     return makeJsonResponse({ ok: true });
   }
 
   // 7. GET /api/family/deletion-status
   if (pathname === '/api/family/deletion-status' && method === 'GET') {
-    if (!state.docs.has(familyPath)) {
-      return makeJsonResponse({ ok: false, error: 'family_not_found' }, 404);
-    }
-    const fam = state.docs.get(familyPath);
+    const fam = state.families.get(syncKey);
+    if (!fam) return missingResponse(syncKey);
     const scheduled = !!fam.pendingDeletionAt;
     const readyAt = fam.pendingDeletionAt || undefined;
-    const canDeleteNow = scheduled && (readyAt <= Date.now());
+    const canDeleteNow = scheduled && (readyAt <= now());
     return makeJsonResponse({ ok: true, scheduled, readyAt, canDeleteNow });
   }
 
