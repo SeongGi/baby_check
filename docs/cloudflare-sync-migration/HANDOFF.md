@@ -460,6 +460,23 @@
 - Play용 AAB를 만들었다: `android/app/build/outputs/bundle/release/app-release.aab`(65,515,164바이트). 서명 SHA-256은 EAS 키 `6A:92:…:09:ED:73`이고, 매니페스트에는 `1.8.0`만 있으며, JS 묶음에 새 Worker 주소가 1회 있고 옛 임시 주소는 0회다.
 
 ### 다음 할 일 (승인 전)
-1. Play Alpha 업로드: 비어 있는 Alpha 초안(release 13)을 재사용한다. 파일 선택은 성기님에게 부탁한다(`⌘⇧G` → 위 AAB 경로 붙여넣기).
+1. (완료, 30장) Play Alpha 업로드.
 2. 원스토어 APK: `EXPO_PUBLIC_DISTRIBUTION_STORE=onestore ./gradlew app:assembleRelease`(EAS 키). 등록 절차는 `docs/ONESTORE_RELEASE.md`.
 3. (출시 뒤) Firestore 운영자 정리와 정리 전 점검.
+
+## 30. 진행 기록과 다음 세션이 할 일 (2026-10-31, 세션 65c1a118 마무리)
+- 이 세션 ID: `65c1a118-2ed4-45ea-ab9f-b734dbf2faa8` (`claude --resume`으로 복구할 수 있다)
+- **성기님 승인(2026-10-31): "진행해"로 Play Alpha 업로드와 검토 제출을 승인했다.**
+- Alpha 초안(release 13)에 AAB를 올렸다. 브라우저 도구의 파일 첨부는 10MB 제한이라 쓸 수 없었고, macOS 파일 선택 창은 별도 프로세스라 `orca computer`와 `osascript` 키 입력이 들어가지 않았다. 파일 선택은 성기님이 했다. 이때 macOS가 Orca의 화면 접근 권한 요청 창을 띄웠으며, 허용하지 말고 닫으라고 안내했다.
+- 출시명 `28 (1.8.0)`, 한국어 출시 노트(동기화 서버 변경, 자동 이전, 가족 모두 업데이트 안내, 체온 기록, 키보드 문제 수정). 출시 노트 칸에 예시 문구가 미리 들어 있어 `</ko-KR>` 형식 오류가 났고, 값을 통째로 바꿔 해결했다.
+- 검토 화면: 경고 1개(가독화 파일 없음, R8 미사용이라 해당 없음), 지원 기기 감소 0. 저장 → 게시 개요 → "검토를 위해 변경사항 1개 제출" → 확인. 상태는 **검토 중**이다. 관리형 게시가 꺼져 있어 검토를 통과하면 자동으로 Alpha 테스터에게 나간다.
+- 이 브랜치의 문서 커밋(`fe18225` 이후)은 아직 푸시하지 않았다. master는 PR #15 머지(`6cf8027`) 상태다.
+
+### 다음 세션이 할 일 (이 순서대로)
+1. `git log --oneline -3`, `git status --short`로 맨 위가 이 문서 커밋이고 작업 트리가 깨끗한지 확인한다.
+2. Play Console → 아기기록 → 게시 개요(`/app/4975124721118467893/publishing`)에서 검토 결과를 확인해 성기님께 알린다. 거절되면 사유를 쉬운 말로 전한다.
+3. 원스토어 APK(**승인 전**, 실행 직전에 성기님께 확인): `android/`에서 `EXPO_PUBLIC_DISTRIBUTION_STORE=onestore ./gradlew app:assembleRelease`. 서명은 `../baby-check/credentials.json` 값을 `ORG_GRADLE_PROJECT_BABY_CHECK_RELEASE_*` 환경 변수로 넘기고 화면에 내지 않는다(이 세션의 AAB 빌드와 같은 방식, `JAVA_HOME=/opt/homebrew/opt/openjdk@17`, `ANDROID_HOME=~/Library/Android/sdk`, `ulimit -u` 상한). `apksigner verify --print-certs`로 SHA-256 `6A:92:…:09:ED:73`을 확인하고, APK의 JS 묶음에 Worker 주소가 있는지 본다. 등록 절차는 `docs/ONESTORE_RELEASE.md`이며, 원스토어 개발자센터 가입·등록은 성기님이 한다.
+4. 문서 커밋 푸시와 master 반영 방법(작은 문서 PR)은 성기님께 여쭌 뒤 한다(**승인 전**).
+5. (출시 뒤, 두 가족이 1.8.0으로 업데이트한 것을 확인한 다음) Firestore 운영자 정리와 정리 전 점검. **승인 전**이다.
+- 보고 방식: 쉬운 말로 먼저 요약한다(좋음/문제).
+- 하지 말 것: 5장 그대로. Firestore에 쓰거나 지우지 않는다. macOS 권한 요청 창에서 "허용"을 누르지 않는다.
