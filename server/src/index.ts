@@ -85,7 +85,10 @@ async function sha256Hex(message: string): Promise<string> {
 
 async function getAuthContext(request: Request): Promise<{ familyId: string; clientId: string } | null> {
   const authHeader = request.headers.get('Authorization') || '';
-  const match = authHeader.match(/^Bearer\s+([a-zA-Z0-9_-]{16,64})$/i);
+  // 키 길이의 하한이 1인 까닭: 오래된 앱(Firestore 이전 시기)에서 사용자가 직접 친 그룹 비밀번호가
+  // 가족 키로 남아 있고, 1.7.9는 길이와 상관없이 형식(영문, 숫자, _, -)만 맞으면 동기화를 받아 주었습니다.
+  // 그 키로 동기화하던 사용자가 이전 단계에서 401을 받지 않도록 1.7.9가 받던 키를 모두 받습니다.
+  const match = authHeader.match(/^Bearer\s+([a-zA-Z0-9_-]{1,256})$/i);
   if (!match) return null;
 
   const syncKey = match[1].toLowerCase();

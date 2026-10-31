@@ -302,7 +302,7 @@ globalThis.fetch = async function fakeFetch(url, options = {}) {
   const headers = new Headers(options.headers || {});
 
   const authHeader = headers.get('Authorization') || '';
-  const match = authHeader.match(/^Bearer\s+([a-zA-Z0-9_-]+)$/i);
+  const match = authHeader.match(/^Bearer\s+([a-zA-Z0-9_-]{1,256})$/i);
   const syncKey = match ? match[1] : '';
   const clientId = headers.get('X-Client-Id') || 'test-client';
 
