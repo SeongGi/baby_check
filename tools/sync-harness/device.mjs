@@ -25,7 +25,9 @@ let db;
 if (!REAL) {
   firestore = await import('firebase/firestore');
   cryptoStub = await import('./stubs/expo-crypto.mjs');
-  ({ auth, db } = await import(`${SRC}/database/firebase.ts`));
+  const firebase = await import(`${SRC}/database/firebase.ts`);
+  auth = firebase.getFirebaseAuth();
+  db = firebase.getFirestoreDb();
 }
 const storage = await import(`${SRC}/database/storage.ts`);
 const sync = await import(`${SRC}/database/sync.ts`);

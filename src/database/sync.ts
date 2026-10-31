@@ -131,6 +131,8 @@ export interface SyncWithCloudResult {
   uploadStalled?: boolean;
   oversizedIds?: string[];
   pullTooSlow?: boolean;
+  /** 러너 관문이 이전 준비 중이라 D1에 요청하지 않았습니다(07 2.3). 오류가 아닙니다. */
+  migrationPending?: boolean;
 }
 
 const protocolError = (message: string): Error => {

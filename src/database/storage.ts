@@ -14,6 +14,13 @@ const SCHEMA_VERSION_STORAGE_KEY = '@baby_schema_version';
 const SYNC_LEDGER_STORAGE_KEY = '@baby_sync_ledger_cf_v1';
 const LEGACY_SYNC_LEDGER_STORAGE_KEY = '@baby_sync_ledger_v1';
 const CURRENT_SCHEMA_VERSION = 2;
+// 1.7.9(Firestore) 가족을 1.8.0(D1)으로 옮기는 단계 B의 값입니다(07 2.1, 2.2, 2.4, 2.6).
+// 가져오기, 백업 복원, 영구 삭제, 연결 해제는 아래 키를 지우지 않습니다. 지우면 이전이 처음부터 다시 돕니다.
+const LEGACY_KEY_MARKER_STORAGE_KEY = '@baby_cf_legacy_key_v1';
+const MIGRATION_STATE_KEY_PREFIX = '@baby_cf_migration_v1:';
+const TRANSITION_STATE_KEY_PREFIX = '@baby_cf_transition_v1:';
+const PRE_MIGRATION_BACKUP_STORAGE_KEY = '@baby_pre_cloudflare_backup_v1';
+const PRE_MIGRATION_BACKUP_META_STORAGE_KEY = '@baby_pre_cloudflare_backup_meta_v1';
 
 // AsyncStorage의 읽기→수정→쓰기는 원자적이지 않습니다. 서버 동기화와 사용자의
 // 기록 추가가 겹쳐도 늦게 끝난 쓰기가 최신 기록을 지우지 않도록 모든 저장을 직렬화합니다.
@@ -70,6 +77,86 @@ const normalizeProfile = (profile: BabyProfile): BabyProfile => ({
       : 180,
 });
 
+// ────────────── 1.7.9 연결 근거 표식 (07 2.1) ──────────────
+
+/** "1.7.9 시절 이 기기가 이 가족에 연결돼 있었다"를 판단하는 유일한 값입니다. */
+export interface LegacyKeyMarker {
+  checkedAt: number;
+  /** 첫 실행 시점의 프로필 syncKey와 옛 장부(@baby_sync_ledger_v1)의 familyKey. 없으면 빈 배열 */
+  keys: string[];
+}
+
+const isLegacyKeyMarker = (value: unknown): value is LegacyKeyMarker =>
+  !!value && typeof value === 'object'
+  && typeof (value as LegacyKeyMarker).checkedAt === 'number'
+  && Array.isArray((value as LegacyKeyMarker).keys)
+  && (value as LegacyKeyMarker).keys.every(key => typeof key === 'string');
+
+/** 표식이 없을 때만 적습니다. 있으면 다시 계산하지도 덮어쓰지도 않습니다. 실패해도 앱 시작을 막지 않습니다. */
+const recordLegacyKeyMarkerIfAbsent = async (profileRaw: string | null): Promise<void> => {
+  try {
+    if (await AsyncStorage.getItem(LEGACY_KEY_MARKER_STORAGE_KEY) !== null) return;
+    const keys = new Set<string>();
+    if (profileRaw) {
+      try {
+        const syncKey = (JSON.parse(profileRaw) as { syncKey?: unknown } | null)?.syncKey;
+        if (typeof syncKey === 'string' && syncKey) keys.add(syncKey);
+      } catch {
+        // 프로필을 읽지 못해도 장부에서 근거를 찾습니다. 원본은 아래 마이그레이션 백업이 보존합니다.
+      }
+    }
+    const ledgerRaw = await AsyncStorage.getItem(LEGACY_SYNC_LEDGER_STORAGE_KEY);
+    if (ledgerRaw) {
+      try {
+        const familyKey = (JSON.parse(ledgerRaw) as { familyKey?: unknown } | null)?.familyKey;
+        if (typeof familyKey === 'string' && familyKey) keys.add(familyKey);
+      } catch {
+        // 옛 장부가 깨졌으면 근거로 쓸 수 없습니다.
+      }
+    }
+    const marker: LegacyKeyMarker = { checkedAt: Date.now(), keys: Array.from(keys) };
+    await AsyncStorage.setItem(LEGACY_KEY_MARKER_STORAGE_KEY, JSON.stringify(marker));
+  } catch (error) {
+    console.warn('[storage] 1.7.9 연결 근거 표식을 적지 못했습니다. 다음 실행에서 다시 시도합니다.', error);
+  }
+};
+
+export const getLegacyKeyMarker = async (): Promise<LegacyKeyMarker | null> => {
+  try {
+    await storageWriteQueue.catch(() => undefined);
+    const raw = await AsyncStorage.getItem(LEGACY_KEY_MARKER_STORAGE_KEY);
+    if (!raw) return null;
+    const parsed: unknown = JSON.parse(raw);
+    return isLegacyKeyMarker(parsed) ? parsed : null;
+  } catch (error) {
+    console.warn('[storage] 1.7.9 연결 근거 표식을 읽지 못했습니다.', error);
+    return null;
+  }
+};
+
+/**
+ * 개발 메뉴용(시험 빌드를 쓴 기기). 키를 지우지 않고 빈 표식으로 덮어씁니다. 지우면 다음 실행이
+ * 표식을 다시 계산해 지금 프로필 키를 근거로 적습니다(07 2.1, 4판).
+ */
+export const clearLegacyKeyMarker = async (): Promise<boolean> =>
+  runStorageWrite(async () => {
+    try {
+      const marker: LegacyKeyMarker = { checkedAt: Date.now(), keys: [] };
+      await AsyncStorage.setItem(LEGACY_KEY_MARKER_STORAGE_KEY, JSON.stringify(marker));
+      return true;
+    } catch (error) {
+      console.warn('[storage] 1.7.9 연결 근거 표식을 비우지 못했습니다.', error);
+      return false;
+    }
+  });
+
+/** 하네스 전용. null이면 표식을 지워 "첫 실행 전" 상태로 만듭니다. */
+export const setLegacyKeyMarkerForTests = async (value: LegacyKeyMarker | null): Promise<void> =>
+  runStorageWrite(async () => {
+    if (value === null) await AsyncStorage.removeItem(LEGACY_KEY_MARKER_STORAGE_KEY);
+    else await AsyncStorage.setItem(LEGACY_KEY_MARKER_STORAGE_KEY, JSON.stringify(value));
+  });
+
 /**
  * Runs before normal reads. It first stores the exact legacy values and only
  * then adds new defaults, so an app upgrade never replaces existing logs.
@@ -80,6 +167,8 @@ export const migrateStoredData = async (): Promise<void> => {
     AsyncStorage.getItem(LOGS_STORAGE_KEY),
     AsyncStorage.getItem(PROFILE_STORAGE_KEY),
   ]);
+  // 1.7.9 기기는 이미 스키마 2라서 아래 조기 반환 뒤에 두면 표식이 적히지 않습니다(07 2.1). 반드시 반환 앞입니다.
+  await recordLegacyKeyMarkerIfAbsent(profileRaw);
   const version = Number(versionRaw || 0);
   if (version >= CURRENT_SCHEMA_VERSION) return;
 
@@ -752,6 +841,7 @@ export const importDataWithoutLoss = async (
     [PROFILE_STORAGE_KEY, JSON.stringify(restored)],
   ]);
   // 가져온 기록은 서버에 없을 수 있으므로 다음 동기화는 전체를 대조합니다.
+  // 지우는 것은 장부 두 개뿐입니다. 연결 근거 표식, 이전 상태, 전환기 상태, 직전 백업은 그대로 둡니다(07 2.2).
   await AsyncStorage.removeItem(LEGACY_SYNC_LEDGER_STORAGE_KEY);
   await AsyncStorage.removeItem(SYNC_LEDGER_STORAGE_KEY);
   return { logs, profile: restored };
@@ -823,3 +913,296 @@ export const restoreFromLocalBackup = async (): Promise<{ success: boolean; back
     }
   });
 };
+
+// ────────────── 이전 상태와 전환기 상태 (07 2.2, 2.6) ──────────────
+
+/** 가족 키마다 `@baby_cf_migration_v1:<syncKey>`에 둡니다. 필드 설명은 07 2.2입니다. */
+export interface MigrationState {
+  /** 'ok'는 Firestore를 읽어 합침, 'skipped'는 읽을 필요가 없거나 읽기를 멈춤 */
+  mergeSource?: 'ok' | 'skipped';
+  mergedAt?: number;
+  /** 합친 기록을 D1에 전체 모드로 모두 올린 시각 */
+  d1UploadedAt?: number;
+  /** 페이지 나눠 읽기에서 마지막으로 합친 문서 id */
+  firestoreReadAfter?: string;
+  /** 첫 읽기 시도에서 읽은 가족 문서 lastChangedAt */
+  baselineChangedAt?: number;
+  /** Firestore를 다시 읽어도 되는 시각 */
+  nextFirestoreAttemptAt?: number;
+  failureCount?: number;
+  /** denied 또는 pending_deletion이 처음 관측된 시각 */
+  blockedSince?: number;
+  /** 1.7.9 가족 합류를 시작한 시각. D1 가족을 만들기 전에 적습니다 */
+  legacyJoinedAt?: number;
+  /** exists + pending_deletion 안내를 보인 시각 */
+  legacyDeletionNoticeAt?: number;
+  /** 이미 물어본 1.7.9 예약의 pendingDeletionAt 값(밀리초) */
+  promptedPendingDeletionAt?: number;
+  /** 화면 안내용 */
+  lastError?: string;
+}
+
+/** 전환기 상태는 `@baby_cf_transition_v1:<syncKey>`에 따로 둡니다. */
+export interface TransitionState {
+  /** 마지막으로 처리한 가족 문서 lastChangedAt */
+  seenFamilyChangedAt: number;
+  /** otherMembers >= 1을 처음 관측한 시각 */
+  partnerSeenAt?: number;
+}
+
+/** 필드 값이 undefined인 패치는 그 필드를 지웁니다. */
+export type StatePatch<T> = { [K in keyof T]?: T[K] | undefined };
+
+const readScopedState = async (storageKey: string): Promise<Record<string, unknown>> => {
+  const raw = await AsyncStorage.getItem(storageKey);
+  if (!raw) return {};
+  const parsed: unknown = JSON.parse(raw);
+  return parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed as Record<string, unknown> : {};
+};
+
+const getScopedState = async <T extends object>(storageKey: string): Promise<Partial<T>> => {
+  try {
+    await storageWriteQueue.catch(() => undefined);
+    return await readScopedState(storageKey) as Partial<T>;
+  } catch (error) {
+    // 깨진 값은 없는 것으로 봅니다. 이전은 처음부터 다시 판단하고, 기록은 건드리지 않습니다.
+    console.warn(`[storage] ${storageKey} 값을 읽지 못해 빈 상태로 봅니다.`, error);
+    return {};
+  }
+};
+
+/** 읽고 합쳐 쓰는 일을 저장 큐 안에서 한 번에 합니다. 저장에 실패하면 오류를 그대로 던집니다. */
+const updateScopedState = async <T extends object>(
+  storageKey: string,
+  patch: StatePatch<T>,
+): Promise<Partial<T>> =>
+  runStorageWrite(async () => {
+    let current: Record<string, unknown> = {};
+    try {
+      current = await readScopedState(storageKey);
+    } catch (error) {
+      console.warn(`[storage] ${storageKey} 값이 깨져 있어 패치만으로 다시 만듭니다.`, error);
+    }
+    const next = { ...current };
+    Object.entries(patch).forEach(([field, value]) => {
+      if (value === undefined) delete next[field];
+      else next[field] = value;
+    });
+    await AsyncStorage.setItem(storageKey, JSON.stringify(next));
+    return next as Partial<T>;
+  });
+
+export const getMigrationState = (syncKey: string): Promise<MigrationState> =>
+  getScopedState<MigrationState>(`${MIGRATION_STATE_KEY_PREFIX}${syncKey}`);
+
+export const updateMigrationState = (
+  syncKey: string,
+  patch: StatePatch<MigrationState>,
+): Promise<MigrationState> =>
+  updateScopedState<MigrationState>(`${MIGRATION_STATE_KEY_PREFIX}${syncKey}`, patch);
+
+/** 전환기가 아직 없으면(seenFamilyChangedAt이 없으면) 빈 객체입니다. */
+export const getTransitionState = (syncKey: string): Promise<Partial<TransitionState>> =>
+  getScopedState<TransitionState>(`${TRANSITION_STATE_KEY_PREFIX}${syncKey}`);
+
+export const updateTransitionState = (
+  syncKey: string,
+  patch: StatePatch<TransitionState>,
+): Promise<Partial<TransitionState>> =>
+  updateScopedState<TransitionState>(`${TRANSITION_STATE_KEY_PREFIX}${syncKey}`, patch);
+
+// ────────────── 이전 직전 백업 (07 2.4-1, 2.10) ──────────────
+
+/**
+ * 백업을 저장한 뒤 적는 작은 표지입니다. "백업이 이미 있음"을 수 MB인 백업 값이 아니라 이 표지로 판단합니다
+ * (관문이 멈출 때마다 ensure가 불리므로). 표지만 있고 savedAt이 없으면 사용자가 "백업 없이 계속"을 고른 것입니다.
+ */
+interface PreMigrationBackupMeta {
+  savedAt?: number;
+  logCount?: number;
+  skippedAt?: number;
+}
+
+const readPreMigrationBackupMeta = async (): Promise<PreMigrationBackupMeta | null> => {
+  const raw = await AsyncStorage.getItem(PRE_MIGRATION_BACKUP_META_STORAGE_KEY);
+  if (!raw) return null;
+  const parsed: unknown = JSON.parse(raw);
+  return parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed as PreMigrationBackupMeta : null;
+};
+
+/** 표지가 없는데 백업 값이 있으면(표지 쓰기 직전 종료) 백업 값을 한 번 읽어 표지를 채웁니다. */
+const fillMetaFromBackupValue = async (): Promise<PreMigrationBackupMeta | null> => {
+  const raw = await AsyncStorage.getItem(PRE_MIGRATION_BACKUP_STORAGE_KEY);
+  if (raw === null) return null;
+  let savedAt = Date.now();
+  let logCount = 0;
+  try {
+    const parsed = JSON.parse(raw) as { timestamp?: unknown; logs?: unknown } | null;
+    if (typeof parsed?.timestamp === 'number') savedAt = parsed.timestamp;
+    if (Array.isArray(parsed?.logs)) logCount = parsed.logs.length;
+  } catch {
+    // 읽지 못하는 값도 덮어쓰지 않습니다. 있다는 사실만 표지에 적습니다.
+  }
+  const meta: PreMigrationBackupMeta = { savedAt, logCount };
+  await AsyncStorage.setItem(PRE_MIGRATION_BACKUP_META_STORAGE_KEY, JSON.stringify(meta));
+  return meta;
+};
+
+/**
+ * 이전 직전의 기록과 프로필을 `@baby_pre_cloudflare_backup_v1`에 저장합니다. 이미 있으면 덮어쓰지 않습니다.
+ * 'created' 새로 저장, 'exists' 이미 있음, 'skipped' 사용자가 "백업 없이 계속"을 고름, 'failed' 저장 실패(용량 부족 포함).
+ */
+export const ensurePreMigrationBackup = async (): Promise<'created' | 'exists' | 'skipped' | 'failed'> =>
+  runStorageWrite(async () => {
+    try {
+      const meta = (await readPreMigrationBackupMeta()) ?? (await fillMetaFromBackupValue());
+      if (typeof meta?.savedAt === 'number') return 'exists';
+      if (typeof meta?.skippedAt === 'number') return 'skipped';
+
+      const logs = await readLogsUnsafe();
+      const profile = await readProfileUnsafe();
+      const savedAt = Date.now();
+      await AsyncStorage.setItem(
+        PRE_MIGRATION_BACKUP_STORAGE_KEY,
+        JSON.stringify({ timestamp: savedAt, logs, profile } satisfies LocalBackup),
+      );
+      try {
+        const next: PreMigrationBackupMeta = { savedAt, logCount: logs.length };
+        await AsyncStorage.setItem(PRE_MIGRATION_BACKUP_META_STORAGE_KEY, JSON.stringify(next));
+      } catch (error) {
+        // 백업은 이미 저장됐습니다. 표지는 다음 호출이 백업 값을 한 번 읽어 채웁니다.
+        console.warn('[storage] 이전 직전 백업 표지를 적지 못했습니다.', error);
+      }
+      return 'created';
+    } catch (error) {
+      console.error('Error creating pre-migration backup', error);
+      return 'failed';
+    }
+  });
+
+/** 사용자가 "백업 없이 계속"을 골랐음을 표지에 적습니다. 이후 백업을 다시 시도하지도 묻지도 않습니다. */
+export const markPreMigrationBackupSkipped = async (): Promise<boolean> =>
+  runStorageWrite(async () => {
+    try {
+      const meta = (await readPreMigrationBackupMeta()) ?? {};
+      await AsyncStorage.setItem(
+        PRE_MIGRATION_BACKUP_META_STORAGE_KEY,
+        JSON.stringify({ ...meta, skippedAt: Date.now() }),
+      );
+      return true;
+    } catch (error) {
+      console.error('Error marking pre-migration backup as skipped', error);
+      return false;
+    }
+  });
+
+/** 설정 화면의 백업 목록용. 저장된 백업이 없으면(건너뜀 포함) null입니다. */
+export const getPreMigrationBackupInfo = async (): Promise<{ savedAt: number; logCount: number } | null> => {
+  try {
+    await storageWriteQueue.catch(() => undefined);
+    const meta = (await readPreMigrationBackupMeta()) ?? (await fillMetaFromBackupValue());
+    if (typeof meta?.savedAt !== 'number') return null;
+    return { savedAt: meta.savedAt, logCount: typeof meta.logCount === 'number' ? meta.logCount : 0 };
+  } catch (error) {
+    console.error('Error reading pre-migration backup info', error);
+    return null;
+  }
+};
+
+const isRestorableLog = (log: unknown): log is BabyLogEntry =>
+  !!log && typeof log === 'object'
+  && typeof (log as BabyLogEntry).id === 'string'
+  && typeof (log as BabyLogEntry).type === 'string'
+  && typeof (log as BabyLogEntry).timestamp === 'number'
+  && Number.isFinite((log as BabyLogEntry).timestamp);
+
+/**
+ * 이전 직전 백업에서 기록을 되돌립니다(07 2.10). 기존 복원(통째로 바꿈)과 가져오기(새 id, 프로필 덮어쓰기, 장부 삭제)는
+ * 기록을 줄이거나 바꾸므로 쓰지 않습니다. id가 지금 기록에도 지금 프로필의 deletedLogIds에도 없는 기록만
+ * 새 id 없이, updatedAt을 그대로 추가합니다. 프로필, 삭제 표식, 장부, 이전 상태는 바꾸지 않습니다.
+ */
+export const restorePreMigrationBackup = async (): Promise<{
+  success: boolean;
+  added: number;
+  logs?: BabyLogEntry[];
+}> =>
+  runStorageWrite(async () => {
+    try {
+      const raw = await AsyncStorage.getItem(PRE_MIGRATION_BACKUP_STORAGE_KEY);
+      if (!raw) return { success: false, added: 0 };
+      const backup = JSON.parse(raw) as { logs?: unknown } | null;
+      if (!Array.isArray(backup?.logs)) throw new Error('이전 직전 백업 형식이 올바르지 않습니다.');
+      const currentLogs = await readLogsUnsafe();
+      const currentProfile = await readProfileUnsafe();
+      const knownIds = new Set([
+        ...currentLogs.map(log => log.id),
+        ...(currentProfile.deletedLogIds || []),
+      ]);
+      const additions: BabyLogEntry[] = [];
+      backup.logs.forEach(log => {
+        if (!isRestorableLog(log) || knownIds.has(log.id)) return;
+        knownIds.add(log.id);
+        additions.push(log);
+      });
+      if (additions.length === 0) return { success: true, added: 0, logs: currentLogs };
+      const logs = [...currentLogs, ...additions].sort((a, b) => b.timestamp - a.timestamp);
+      await AsyncStorage.setItem(LOGS_STORAGE_KEY, JSON.stringify(logs));
+      return { success: true, added: additions.length, logs };
+    } catch (error) {
+      console.error('Error restoring pre-migration backup', error);
+      return { success: false, added: 0 };
+    }
+  });
+
+// ────────────── Firestore에서 읽은 것 합치기 (07 2.4-4) ──────────────
+
+/** 1.7.9와 같은 공유 프로필 시각: sharedUpdatedAt, 없으면 예전 앱의 updatedAt. */
+const legacySharedStamp = (profile: { sharedUpdatedAt?: unknown; updatedAt?: unknown }): number =>
+  isFiniteNumber(profile.sharedUpdatedAt) ? profile.sharedUpdatedAt
+    : isFiniteNumber(profile.updatedAt) ? profile.updatedAt : 0;
+
+/**
+ * Firestore(1.7.9)에서 읽은 기록, 삭제 표식, 공유 프로필을 기기에 합칩니다. `saveSyncedDataWithoutLoss`와 같은
+ * 규칙입니다. 저장 큐 안에서 저장된 syncKey가 `expectedSyncKey`와 같은지 확인하고 합쳐 쓰며, 다르면 저장하지 않고
+ * false를 돌려줍니다(가족 연결이 바뀐 뒤의 오래된 결과 폐기). 기록은 합치기만 하고 줄이지 않으며(삭제 표식이 가리키는
+ * 기록만 빠집니다), 프로필은 기존 LWW 규칙을 따릅니다. 기기 저장소 오류는 false가 아니라 오류로 던집니다
+ * (호출한 쪽이 키 변경과 저장 실패를 구분하도록).
+ */
+export const mergeLegacyFirestoreData = async (
+  expectedSyncKey: string,
+  data: { logs: BabyLogEntry[]; deletedIds: string[]; profile?: unknown },
+): Promise<boolean> =>
+  runStorageWrite(async () => {
+    const currentLogs = await readLogsUnsafe();
+    const currentProfile = await readProfileUnsafe();
+    if ((currentProfile.syncKey || null) !== expectedSyncKey) {
+      console.warn('[storage] 가족 연결이 바뀌어 오래된 Firestore 병합 결과를 폐기했습니다.');
+      return false;
+    }
+    // 형식이 깨진 기록 하나가 기기 저장소 전체를 못 쓰게 만들지 않도록(readLogsUnsafe) 한 번 더 거릅니다.
+    const incomingLogs = data.logs.filter(isRestorableLog);
+    const remoteShared = isCompleteSharedProfile(data.profile) ? data.profile : null;
+    const syncedProfile: BabyProfile = {
+      ...currentProfile,
+      deletedLogIds: Array.from(new Set([...(currentProfile.deletedLogIds || []), ...data.deletedIds])),
+      ...(remoteShared ? {
+        name: remoteShared.name,
+        birthDate: remoteShared.birthDate,
+        birthWeight: remoteShared.birthWeight,
+        targetFormula: remoteShared.targetFormula,
+        sharedUpdatedAt: legacySharedStamp(data.profile as { sharedUpdatedAt?: unknown; updatedAt?: unknown }),
+      } : {}),
+    };
+    const { logs, profile } = mergeSyncedState(currentLogs, currentProfile, incomingLogs, syncedProfile);
+    const [oldLogs, oldProfile] = await Promise.all([
+      AsyncStorage.getItem(LOGS_STORAGE_KEY),
+      AsyncStorage.getItem(PROFILE_STORAGE_KEY),
+    ]);
+    const pairs: [string, string][] = [];
+    const logsJson = JSON.stringify(logs);
+    const profileJson = JSON.stringify(profile);
+    if (logsJson !== oldLogs) pairs.push([LOGS_STORAGE_KEY, logsJson]);
+    if (profileJson !== oldProfile) pairs.push([PROFILE_STORAGE_KEY, profileJson]);
+    if (pairs.length > 0) await AsyncStorage.multiSet(pairs);
+    return true;
+  });

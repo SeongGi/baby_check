@@ -12,6 +12,8 @@ export interface SyncTokenResponse {
   changeToken?: string;
   profileUpdatedAt?: number;
   deletionReadyAt?: number | null;
+  /** `members: true`로 요청했을 때만 옵니다. 요청한 클라이언트가 아닌 회원 수입니다(07 2.7-2). */
+  otherMembers?: number;
   error?: string;
 }
 
@@ -143,9 +145,10 @@ export const connectFamily = async (
 
 export const getSyncToken = async (
   syncKey: string,
-  clientId: string
+  clientId: string,
+  options: { members?: boolean } = {}
 ): Promise<SyncTokenResponse> => {
-  return requestJson<SyncTokenResponse>('/api/family/token', syncKey, clientId, {
+  return requestJson<SyncTokenResponse>(`/api/family/token${options.members ? '?members=1' : ''}`, syncKey, clientId, {
     method: 'GET',
   });
 };
@@ -187,13 +190,16 @@ export const cancelFamilyDeletion = async (
 
 export const deleteFamilyData = async (
   syncKey: string,
-  clientId: string
+  clientId: string,
+  // 1.7.9에서 삭제를 예약한 가족의 "삭제에 따르기"(07 2.4.1) 한 곳만 true로 부릅니다.
+  // D1에 가족이 없을 때만 삭제 기록을 남기고, 가족이 있으면 409(family_exists)입니다.
+  options: { legacyDeletion?: boolean } = {}
 ): Promise<{ ok: boolean; error?: string }> => {
   return requestJson<{ ok: boolean; error?: string }>(
     '/api/family/delete',
     syncKey,
     clientId,
-    { method: 'POST' }
+    options.legacyDeletion ? { method: 'POST', body: { legacyDeletion: true } } : { method: 'POST' }
   );
 };
 
