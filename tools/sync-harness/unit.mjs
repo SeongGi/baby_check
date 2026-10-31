@@ -429,6 +429,19 @@ check('shouldMarkD1Uploaded: continuing이면 적지 않는다(첫 성공에 적
 check('shouldMarkD1Uploaded: 장부에 full이 남았거나 장부를 읽지 못하면 적지 않는다', up({ ledgerHasFull: true }) === false && up({ ledgerHasFull: undefined }) === false);
 check('shouldMarkD1Uploaded: 7단계 요청 번호를 모르면 적지 않는다', up({ uploadRequestId: undefined }) === false);
 
+// Firestore 읽기를 실패 간격 때문에 미루는 판정(병합 완료 + missing의 가족 문서 다시 읽기도 같은 간격을 지킴)
+const defer = (over) => mig.isFirestoreReadDeferred({ now: 1_000, nextFirestoreAttemptAt: 2_000, ...over });
+check('isFirestoreReadDeferred: 다음 시도 시각 전이면 미룬다', defer({}) === true);
+check('isFirestoreReadDeferred: 시각이 지났거나 같으면 읽는다', defer({ now: 2_000 }) === false && defer({ now: 3_000 }) === false);
+check('isFirestoreReadDeferred: 간격이 적히지 않았으면 읽는다', defer({ nextFirestoreAttemptAt: undefined }) === false);
+check('isFirestoreReadDeferred: ignoreBackoff(예약 취소 뒤 재실행)면 간격 안이어도 읽는다', defer({ ignoreBackoff: true }) === false);
+check('isFirestoreReadDeferred: 할당량 소진의 자정 뒤 시각도 같은 규칙(자정 전 미룸, 자정 뒤 읽음)', (() => {
+  const t = Date.UTC(2026, 0, 15, 12);
+  const next = mig.nextFailureSchedule({ now: t, weight: 'light', quotaExhausted: true }).nextFirestoreAttemptAt;
+  return mig.isFirestoreReadDeferred({ now: next - 1, nextFirestoreAttemptAt: next }) === true
+    && mig.isFirestoreReadDeferred({ now: next, nextFirestoreAttemptAt: next }) === false;
+})());
+
 // 소스 검사: 순수 모듈과 불변 조건
 const decisionSource = readFileSync(`${SRC}/database/migrationDecision.ts`, 'utf8');
 const migrationSource = readFileSync(`${SRC}/database/familyMigration.ts`, 'utf8');

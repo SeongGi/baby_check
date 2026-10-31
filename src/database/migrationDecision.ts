@@ -142,6 +142,20 @@ export const nextFailureSchedule = (input: FailureScheduleInput): FailureSchedul
   return { failureCount, nextFirestoreAttemptAt: input.now + failureDelayMs(input.weight, failureCount) };
 };
 
+/**
+ * 실패 간격 안이라 이번에는 Firestore를 읽지 않는가. `ignoreBackoff`는 사용자가 방금 예약을 취소하는 따위로 곧바로
+ * 다시 판정해야 하는 재실행에서만 참입니다. 병합을 마친 키(`mergeSource: 'ok'`)의 가족 문서 다시 읽기도 같은
+ * 간격을 지킵니다(저장, 앱 복귀, 새로고침마다 `ensure`가 불리므로 간격이 없으면 그때마다 읽습니다).
+ */
+export const isFirestoreReadDeferred = (input: {
+  now: number;
+  nextFirestoreAttemptAt?: number;
+  ignoreBackoff?: boolean;
+}): boolean =>
+  !input.ignoreBackoff
+  && typeof input.nextFirestoreAttemptAt === 'number'
+  && input.nextFirestoreAttemptAt > input.now;
+
 export const DEFAULT_PAGE_SIZE = 500;
 export const MIN_PAGE_SIZE = 50;
 

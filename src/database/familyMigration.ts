@@ -18,6 +18,7 @@ import {
   DEFAULT_PAGE_SIZE,
   hasLegacyEvidence,
   isBlockedLong,
+  isFirestoreReadDeferred,
   isMigrationComplete,
   isPartnerSeen,
   isTransitionReadDue,
@@ -270,7 +271,8 @@ type DocRecheck =
   | { kind: 'ok'; pendingDeletionAt: number | null; lastChangedAt: number }
   | { kind: 'denied' }
   | { kind: 'absent' }
-  | { kind: 'error' };
+  /** `quota`: 할당량 소진(`resource-exhausted`). 실패 간격이 태평양 시간 자정 뒤로 밀립니다. */
+  | { kind: 'error'; quota?: boolean };
 
 const MAX_RERUNS = 3;
 const MAX_REPROMPTS = 3;
@@ -299,6 +301,9 @@ export function createFamilyMigrator(deps: FamilyMigratorDeps): FamilyMigrator {
   const d1StatusByKey = new Map<string, D1Status>();
   // 앱 코드에는 삭제 호출 문자열을 두지 않습니다(불변 조건 점검이 grep으로 찾습니다). 비울 때는 undefined를 적습니다.
   const uploadRequestIds: Record<string, number | undefined> = {};
+  // 7단계 요청이 끝맺지 못했음(실패, 키 불일치로 버려짐 등)을 표시합니다. 번호는 남겨 두어 뒤의 평소 요청이 업로드를
+  // 마치면 완료로 적고, 다음 ensure는 이 표시가 있을 때만 7단계를 다시 넣습니다(표시가 없으면 아직 진행 중이라 쌓지 않음).
+  const uploadAbandoned: Record<string, true | undefined> = {};
   const pageSizes = new Map<string, number>();
   const retryTimers: Record<string, unknown> = {};
   const lastTransitionReadAt = new Map<string, number>();
@@ -353,17 +358,21 @@ export function createFamilyMigrator(deps: FamilyMigratorDeps): FamilyMigrator {
 
   // ── 러너 사건 구독: d1UploadedAt 판정(2.3) ──
 
-  const markUploaded = async (key: string, eventRequestId: number): Promise<void> => {
+  const markUploaded = async (key: string, eventRequestId: number, uploadId: number): Promise<void> => {
     try {
       const ledger = await storage.readSyncLedger(key);
+      // 사건을 받은 뒤 장부를 읽는 사이에 7단계 번호가 바뀌었으면(병합 뒤 다시 올림 등) 이 사건은 옛 업로드의 것입니다.
+      if (uploadRequestIds[key] !== uploadId) return;
       if (!shouldMarkD1Uploaded({
         eventRequestId,
-        uploadRequestId: uploadRequestIds[key],
+        uploadRequestId: uploadId,
         continuing: false,
         ledgerHasFull: ledger ? !!ledger.full : undefined,
       })) return;
-      uploadRequestIds[key] = undefined;
       const state = await storage.getMigrationState(key);
+      if (uploadRequestIds[key] !== uploadId) return;
+      uploadRequestIds[key] = undefined;
+      uploadAbandoned[key] = undefined;
       if (typeof state.d1UploadedAt === 'number') return;
       const next = await storage.updateMigrationState(key, { d1UploadedAt: clock() });
       if (isMigrationComplete(next)) emit({ type: 'completed', syncKey: key });
@@ -379,10 +388,15 @@ export function createFamilyMigrator(deps: FamilyMigratorDeps): FamilyMigrator {
     if (event.type === 'succeeded') {
       // 이어 가기 회차가 남았으면(continuing) 마지막 회차까지 기다립니다.
       if (event.result.continuing) return;
-      void markUploaded(event.syncKey, event.requestId);
-    } else if (event.type === 'failed') {
-      // 실패한 7단계는 다음 ensure가 다시 넣을 수 있게 합니다. 전체 모드의 진행은 장부에 남아 이어집니다.
-      uploadRequestIds[event.syncKey] = undefined;
+      void markUploaded(event.syncKey, event.requestId, uploadId);
+    } else if (
+      event.type === 'failed' || event.type === 'dropped' || event.type === 'migrationPending'
+      || event.type === 'detached' || event.type === 'disconnected'
+    ) {
+      // 7단계 사슬이 끝맺지 못했습니다. 번호는 지우지 않습니다: D1이 exists인 키는 관문이 ensure를 부르지 않으므로,
+      // 뒤의 평소 요청이 업로드를 마치면(장부에 full 없음) 그 성공 사건이 완료를 적게 해야 합니다(2.3). 전체 모드의 진행은
+      // 장부에 남아 이어집니다. 다음 ensure는 이 표시를 보고 7단계를 다시 넣습니다.
+      uploadAbandoned[event.syncKey] = true;
     }
   };
 
@@ -472,7 +486,8 @@ export function createFamilyMigrator(deps: FamilyMigratorDeps): FamilyMigrator {
           if (!family.exists) return { kind: 'absent' } as DocRecheck;
           return { kind: 'ok', pendingDeletionAt: family.pendingDeletionAt, lastChangedAt: family.lastChangedAt } as DocRecheck;
         } catch (error) {
-          return { kind: session.fs.classifyFirestoreError(error) === 'denied' ? 'denied' : 'error' } as DocRecheck;
+          const kind = session.fs.classifyFirestoreError(error);
+          return (kind === 'denied' ? { kind: 'denied' } : { kind: 'error', quota: kind === 'quota' }) as DocRecheck;
         }
       });
     } catch (error) {
@@ -764,9 +779,11 @@ export function createFamilyMigrator(deps: FamilyMigratorDeps): FamilyMigrator {
     // 병합 전 업로드로 d1UploadedAt이 이미 있고 이번 시도에서 새로 병합하지 않았으면 건너뜁니다(2.2).
     if (typeof state.d1UploadedAt === 'number' && !mergedNow) return 'skipped';
     if (!isCurrent(run)) return 'superseded';
-    // 이미 넣은 7단계가 끝나기 전에 ensure가 다시 불려도 요청을 쌓지 않습니다. 새로 병합했으면 다시 올립니다.
-    if (uploadRequestIds[key] !== undefined && !mergedNow) return 'pending';
+    // 이미 넣은 7단계가 끝나기 전에 ensure가 다시 불려도 요청을 쌓지 않습니다. 새로 병합했거나, 넣은 요청이
+    // 끝맺지 못했으면(uploadAbandoned) 다시 올립니다.
+    if (uploadRequestIds[key] !== undefined && !mergedNow && !uploadAbandoned[key]) return 'pending';
     uploadRequestIds[key] = undefined;
+    uploadAbandoned[key] = undefined;
     const runner = getRunner();
     // `onAccepted`는 요청을 받는 즉시 번호를 알려 줍니다. 결과는 기다리지 않습니다(관문 교착 방지, 4판).
     runner.request({ syncKey: key, forceFullRead: true }, {
@@ -861,13 +878,18 @@ export function createFamilyMigrator(deps: FamilyMigratorDeps): FamilyMigrator {
     let firestoreState: FirestoreState;
     let outcome: FirestoreReadOutcome | undefined;
     let mergedNow = false;
-    if (state.mergeSource === 'ok') firestoreState = 'merged_before_ok';
-    else if (state.mergeSource === 'skipped') firestoreState = 'merged_before_skipped';
+    if (state.mergeSource === 'ok') {
+      // 병합을 마친 키도 D1이 missing이면 가족 문서를 다시 읽습니다(결정표 recheck_then_adopt). 그 읽기도 실패 간격을 지킵니다.
+      // 간격 안이면 읽지 않고 not_due와 같은 대기 결과로 끝냅니다(exists이면 어차피 7번이라 결과가 같습니다).
+      firestoreState = isFirestoreReadDeferred({ now: clock(), nextFirestoreAttemptAt: state.nextFirestoreAttemptAt, ignoreBackoff })
+        ? 'not_due'
+        : 'merged_before_ok';
+    } else if (state.mergeSource === 'skipped') firestoreState = 'merged_before_skipped';
     else if (d1 === 'exists' && !evidence) {
       // 근거가 없는 exists는 읽지 않습니다. 상대가 이미 옮긴 1.8.0 가족입니다.
       state = await storage.updateMigrationState(key, { mergeSource: 'skipped', mergedAt: clock() });
       firestoreState = 'unread';
-    } else if (!ignoreBackoff && typeof state.nextFirestoreAttemptAt === 'number' && state.nextFirestoreAttemptAt > clock()) {
+    } else if (isFirestoreReadDeferred({ now: clock(), nextFirestoreAttemptAt: state.nextFirestoreAttemptAt, ignoreBackoff })) {
       firestoreState = 'not_due';
     } else {
       outcome = await readFirestoreFamily(run, key, state);
@@ -876,6 +898,11 @@ export function createFamilyMigrator(deps: FamilyMigratorDeps): FamilyMigrator {
         firestoreState = 'merged_now';
         mergedNow = true;
         const firstMerge = state.mergeSource === undefined;
+        // 병합 전에 넣은 7단계(U1)의 번호를 먼저 무효로 합니다. 아래에서 d1UploadedAt을 지운 뒤 병합 뒤 업로드(U2)를 넣기까지
+        // U1의 성공 사건이 오면 d1UploadedAt이 다시 적혀 U2 완료가 무시됩니다. 동기로 비우므로 이미 도는 markUploaded도
+        // (번호가 바뀌었으니) 적지 않습니다.
+        uploadRequestIds[key] = undefined;
+        uploadAbandoned[key] = undefined;
         // 5. 병합 완료. d1UploadedAt이 있으면 지워 병합한 기록을 올리는 7단계를 한 번 더 합니다(2.2).
         state = await storage.updateMigrationState(key, {
           mergeSource: 'ok',
@@ -929,6 +956,10 @@ export function createFamilyMigrator(deps: FamilyMigratorDeps): FamilyMigrator {
       if (recheck.kind === 'ok') {
         if (recheck.pendingDeletionAt === null) {
           action = 'adopt';
+          // 예약이 없어졌으면 이미 물어본 예약 값을 지웁니다(2.2). 다음 예약은 새 예약으로 다시 묻습니다.
+          if (state.promptedPendingDeletionAt !== undefined) {
+            state = await storage.updateMigrationState(key, { promptedPendingDeletionAt: undefined });
+          }
         } else {
           firestoreState = 'pending_deletion';
           outcome = {
@@ -939,7 +970,8 @@ export function createFamilyMigrator(deps: FamilyMigratorDeps): FamilyMigrator {
       } else {
         firestoreState = recheck.kind;
         outcome = {
-          state: recheck.kind, progressed: false, heavy: false, quota: false, pageTimedOut: false, invalidCount: 0,
+          state: recheck.kind, progressed: false, heavy: false, quota: recheck.kind === 'error' && recheck.quota === true,
+          pageTimedOut: false, invalidCount: 0,
         };
       }
       if (action !== 'adopt') {

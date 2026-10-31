@@ -792,6 +792,8 @@ await scenario('8', '병합 완료 + D1 missing: mergeSource ok 뒤 이어받기
     assert.equal(await syncKeyOf(A), K);
     // 상대가 예약을 취소하면 가족 문서를 다시 읽어 이어받는다.
     await fs.legacy179Cancel(K, { uid: 'legacy-B' });
+    // 직전 예약 확인이 가벼운 실패 간격(30분)을 적었으므로, 간격이 지난 뒤 다시 읽는다(B8 리뷰 1 A).
+    await harness_advance(A, fs, 31 * MINUTE);
     const adopted = await A.send('runMigration');
     assert.equal(adopted.result.status, 'uploading', JSON.stringify(adopted));
     await waitMigrationComplete(A, { syncKey: K });
