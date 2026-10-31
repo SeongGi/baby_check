@@ -17,6 +17,17 @@
 //   injectStorageFault {mode:'throw'|'exit'|'delay', nth?, keys?} | releaseWrite -> {released} | storageFaultStatus | clearStorageFault
 //   readChangeToken {syncKey?} -> {token} | rawToken {syncKey?} -> {ok, changeToken, status} | scheduleDeletion / cancelDeletion / deleteFamily / deletionStatus {syncKey?}
 //   newFamilyKey -> {key}
+// 이전 모듈(07 설계 5.1, 앱 App.tsx와 같은 방식으로 조립. loadFirestore는 주입하지 않아 앱과 같은 동적 import 경로):
+//   runMigration {syncKey?} -> {result:{status,message}, state} | join {key, allowFamilyCreation?, createBackup?, waitMigration?} -> {outcome, message, syncResult, migrationResult?}
+//   legacyJoin {key, createBackup?, waitMigration?} -> join과 같음 | transitionTick {syncKey?, force?} -> {status, reason, message}
+//   migrationState {syncKey?} -> {syncKey, state, transition, marker, backupMeta, hasBackupValue, gate, d1Status, complete}
+//   bootApp {} -> {marker} 앱 시작 때의 migrateStoredData | setLegacyMarker {value|keys, checkedAt?} (value:null이면 표식을 지움) | clearLegacyMarker {} (개발 메뉴의 비우기와 같은 함수)
+//   importData {logs?, profile?} | backupLocalData {} | restoreLocalBackup {} (가져오기와 로컬 백업 복원, 시나리오 11)
+//   restorePreMigrationBackup {} -> {success, added, logCount} | seedLegacyStorage {items} (값은 문자열 또는 JSON으로 적을 객체)
+//   setChoiceAnswers {backupFailure?, legacyDeletion?, defaults?, replace?} | choiceLog {clear?} -> {backupFailure, legacyDeletion, notices, pending} | answerChoice {kind, answer}
+//   migrationMessages {} -> {messages} 이전 모듈의 안내 문구 | migratorEvents {clear?} | migrationTimers {clear?} | migratorReset {firestoreBudgetMs?, firestoreCallTimeoutMs?} (앱을 다시 연 것처럼 이전 모듈과 러너를 새로 만듦)
+//   moduleLoads {} -> {loads, firestoreImportLoaded, firebaseLoaded, injectedLoads} 동적 import 기록 | storageReads {clear?} -> {reads, order, writes}
+//   firestoreUid {uid?|reset?} -> {uid} 가짜 Firebase 로그인 uid 조회와 변경(uid 변경, 07 2.5)
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -34,7 +45,9 @@ export async function createRealCommands({ name }) {
   const cloudClient = await import(`${SRC}/database/cloudClient.ts`);
   const { setCustomWorkerUrl } = await import(`${SRC}/database/cloudConfig.ts`);
   const { createSyncRunner } = await import(`${SRC}/database/syncRunner.ts`);
-  const { rawStorage, storageFaults } = await import('./stubs/async-storage.mjs');
+  const { rawStorage, storageFaults, storageStats } = await import('./stubs/async-storage.mjs');
+  const { createFamilyMigrator, MIGRATION_MESSAGES } = await import(`${SRC}/database/familyMigration.ts`);
+  const { harnessAuth } = await import('./stubs/fake-firestore.mjs');
 
   const workerUrl = process.env.HARNESS_WORKER_URL;
   if (!workerUrl) throw new Error('HARNESS_WORKER_URL 이 필요합니다');
@@ -69,6 +82,7 @@ export async function createRealCommands({ name }) {
     progressed: result.progressed,
     familyUnavailable: result.familyUnavailable,
     familyNotFound: result.familyNotFound,
+    migrationPending: result.migrationPending,
     uploadStalled: result.uploadStalled,
     oversizedIds: result.oversizedIds,
     pullTooSlow: result.pullTooSlow,
@@ -78,7 +92,7 @@ export async function createRealCommands({ name }) {
   });
 
   const summarizeEvent = (event) => {
-    const base = { seq: (eventSeq += 1), at: realNow(), type: event.type };
+    const base = { seq: (eventSeq += 1), at: realNow(), type: event.type, syncKey: event.syncKey, requestId: event.requestId };
     switch (event.type) {
       case 'succeeded':
         return { ...base, continuation: event.continuation, notice: event.notice, result: summarizeResult(event.result) };
@@ -91,6 +105,70 @@ export async function createRealCommands({ name }) {
     }
   };
 
+  // ── 이전 모듈(App.tsx의 조립과 같은 방식): 러너와 이전 모듈은 서로를 참조합니다 ──
+  // 기기 프로세스는 Firestore 예산과 호출 상한도 10분의 1로 줄입니다(90초 -> 9초, 15초 -> 1.5초).
+  let migratorTiming = { firestoreBudgetMs: 9_000, firestoreCallTimeoutMs: 1_500 };
+  const injectLoadFirestore = process.env.HARNESS_LOAD_FIRESTORE === 'inject';
+  let injectedLoads = 0;
+  let migratorEvents = [];
+  let migrationTimers = [];
+  const choice = { backupFailure: [], legacyDeletion: [], defaults: { backupFailure: 'later', legacyDeletion: 'later' } };
+  const choiceLog = { backupFailure: [], legacyDeletion: [], notices: [] };
+  const pendingChoices = [];
+
+  const takeAnswer = (kind) => (choice[kind].length > 0 ? { entry: choice[kind].shift(), fromDefault: false } : { entry: choice.defaults[kind], fromDefault: true });
+  /** 화면 콜백의 답. 문자열이면 곧바로, {answer, delayMs}면 늦게, {hold: true}면 answerChoice가 올 때까지 기다립니다. */
+  const answerFor = (kind, log) => {
+    const { entry, fromDefault } = takeAnswer(kind);
+    const record = { ...log, at: realNow(), fromDefault, answer: null, pending: false };
+    choiceLog[kind].push(record);
+    const done = (answer) => { record.answer = answer; record.pending = false; return answer; };
+    if (entry && typeof entry === 'object' && entry.hold) {
+      record.pending = true;
+      return new Promise((resolve) => { pendingChoices.push({ kind, record, resolve: (answer) => resolve(done(answer)) }); });
+    }
+    if (entry && typeof entry === 'object' && entry.delayMs) {
+      return new Promise((resolve) => setTimeout(() => resolve(done(entry.answer)), entry.delayMs));
+    }
+    return Promise.resolve(done(entry));
+  };
+
+  let runner = null;
+  let migrator = null;
+  const makeMigrator = () => {
+    const created = createFamilyMigrator({
+      storage,
+      cloud: {
+        connectFamily: cloudClient.connectFamily,
+        deleteFamilyData: cloudClient.deleteFamilyData,
+        getSyncToken: cloudClient.getSyncToken,
+        scheduleFamilyDeletion: cloudClient.scheduleFamilyDeletion,
+      },
+      getClientId: sync.getSyncClientId,
+      getRunner: () => runner,
+      ...(injectLoadFirestore ? {
+        loadFirestore: async () => { injectedLoads += 1; return import(`${SRC}/database/firestoreImport.ts`); },
+      } : {}),
+      askBackupFailure: () => answerFor('backupFailure', {}),
+      askLegacyDeletionChoice: (prompt) => answerFor('legacyDeletion', { context: prompt.context, pendingDeletionAt: prompt.pendingDeletionAt, options: prompt.options }),
+      notify: (notice) => { choiceLog.notices.push({ ...notice, at: realNow() }); },
+      setTimer: (callback, ms) => {
+        const handle = setTimeout(callback, ms);
+        handle.unref?.();
+        migrationTimers.push({ ms, at: Date.now(), cleared: false, handle });
+        return handle;
+      },
+      clearTimer: (handle) => {
+        clearTimeout(handle);
+        const timer = migrationTimers.find((t) => t.handle === handle);
+        if (timer) timer.cleared = true;
+      },
+      ...migratorTiming,
+    });
+    created.subscribe((event) => migratorEvents.push({ ...event, seq: (eventSeq += 1), at: realNow() }));
+    return created;
+  };
+
   const makeRunner = () => createSyncRunner({
     syncWithCloud: sync.syncWithCloud,
     getLogs: storage.getLogs,
@@ -99,9 +177,21 @@ export async function createRealCommands({ name }) {
     readProfileAfterPendingWrites: storage.readProfileAfterPendingWrites,
     // 러너가 회차마다 읽는 값이라서, 명령에서 정한 상한이 다음 회차부터 적용됩니다.
     get timeoutMs() { return runnerTimeoutMs; },
+    // 근거가 없는 키(1.8.0 가족, 혼자 쓰기)는 관문이 곧바로 proceed를 돌려줍니다(07 2.3).
+    migrationGate: (key) => migrator.migrationGate(key),
     onEvent: (event) => runnerEvents.push(summarizeEvent(event)),
   });
-  let runner = makeRunner();
+  runner = makeRunner();
+  migrator = makeMigrator();
+
+  const completeOf = (state) => typeof state.mergedAt === 'number' && typeof state.d1UploadedAt === 'number';
+  const summarizeJoin = async (result, waitMigration) => ({
+    outcome: result.outcome,
+    message: result.message,
+    syncResult: result.syncResult ? summarizeResult(result.syncResult) : undefined,
+    hasMigration: Boolean(result.migration),
+    ...(waitMigration && result.migration ? { migrationResult: await result.migration } : {}),
+  });
 
   const currentKey = async (payload) => payload.syncKey ?? (await storage.getProfile()).syncKey;
 
@@ -240,6 +330,133 @@ export async function createRealCommands({ name }) {
       return { timeoutMs: runnerTimeoutMs };
     },
     async runnerAbort() { runner.abortActive(); return { aborted: true }; },
+
+    // ── 이전 모듈(07 설계 5.1) ──
+    async runMigration(payload = {}) {
+      const key = await currentKey(payload);
+      // 앱도 syncKey가 없으면 ensure를 부르지 않습니다(혼자 쓰기, 불변 조건 5).
+      if (!key) return { result: { status: 'no_key' }, state: {}, skipped: true };
+      const result = await migrator.ensure(key);
+      return { result, state: await storage.getMigrationState(key) };
+    },
+    async join({ key, allowFamilyCreation = false, createBackup, waitMigration = false }) {
+      return summarizeJoin(await migrator.joinFamily(key, { allowFamilyCreation, createBackup }), waitMigration);
+    },
+    async legacyJoin({ key, createBackup, waitMigration = false }) {
+      return summarizeJoin(await migrator.legacyJoin(key, { createBackup }), waitMigration);
+    },
+    async transitionTick(payload = {}) {
+      return migrator.transitionTick(await currentKey(payload), { force: payload.force });
+    },
+    async migrationState(payload = {}) {
+      const key = await currentKey(payload);
+      if (!key) return { syncKey: null, complete: false, state: {}, transition: {}, marker: null, gate: 'proceed' };
+      const state = await storage.getMigrationState(key);
+      const meta = await rawStorage.getItem('@baby_pre_cloudflare_backup_meta_v1');
+      return {
+        syncKey: key,
+        state,
+        transition: await storage.getTransitionState(key),
+        marker: await storage.getLegacyKeyMarker(),
+        backupMeta: meta ? JSON.parse(meta) : null,
+        hasBackupValue: (await rawStorage.getItem('@baby_pre_cloudflare_backup_v1')) !== null,
+        gate: await migrator.peekGate(key),
+        d1Status: migrator.getD1Status(key) ?? null,
+        complete: completeOf(state),
+      };
+    },
+    async bootApp() {
+      await storage.migrateStoredData();
+      return { marker: await storage.getLegacyKeyMarker() };
+    },
+    async setLegacyMarker({ value, keys, checkedAt }) {
+      const next = keys !== undefined ? { checkedAt: checkedAt ?? Date.now(), keys } : value;
+      await storage.setLegacyKeyMarkerForTests(next ?? null);
+      return { marker: await storage.getLegacyKeyMarker() };
+    },
+    async clearLegacyMarker() {
+      return { ok: await storage.clearLegacyKeyMarker(), marker: await storage.getLegacyKeyMarker() };
+    },
+    async restorePreMigrationBackup() {
+      const result = await storage.restorePreMigrationBackup();
+      return { success: result.success, added: result.added, logCount: result.logs?.length };
+    },
+    // 가져오기와 로컬 백업 복원(시나리오 11: 전환기 상태가 이 경로에서 지워지지 않는지)
+    async importData({ logs = [], profile }) {
+      const result = await storage.importDataWithoutLoss(logs, { ...(await storage.getProfile()), ...(profile || {}) });
+      return { logCount: result.logs.length };
+    },
+    async backupLocalData() { return { ok: await storage.backupLocalData() }; },
+    async restoreLocalBackup() {
+      const result = await storage.restoreFromLocalBackup();
+      return { success: result.success };
+    },
+    async seedLegacyStorage({ items }) {
+      for (const [key, value] of Object.entries(items)) {
+        await rawStorage.setItem(key, typeof value === 'string' ? value : JSON.stringify(value));
+      }
+      return { count: Object.keys(items).length };
+    },
+    // 화면 콜백의 답 대기열. 항목은 'continue' 같은 문자열, {answer, delayMs}, {hold: true}(answerChoice가 올 때까지 기다림).
+    // 대기열이 비면 defaults(기본 'later')를 쓰고 기록에 fromDefault: true로 남습니다.
+    async setChoiceAnswers({ backupFailure, legacyDeletion, defaults, replace = false } = {}) {
+      if (replace) { choice.backupFailure = []; choice.legacyDeletion = []; }
+      if (backupFailure) choice.backupFailure.push(...backupFailure);
+      if (legacyDeletion) choice.legacyDeletion.push(...legacyDeletion);
+      if (defaults) Object.assign(choice.defaults, defaults);
+      return { queued: { backupFailure: choice.backupFailure.length, legacyDeletion: choice.legacyDeletion.length }, defaults: choice.defaults };
+    },
+    async choiceLog({ clear = false } = {}) {
+      const snapshot = JSON.parse(JSON.stringify({ ...choiceLog, pending: pendingChoices.map((p) => ({ kind: p.kind, ...p.record })) }));
+      if (clear) { choiceLog.backupFailure = []; choiceLog.legacyDeletion = []; choiceLog.notices = []; }
+      return snapshot;
+    },
+    async answerChoice({ kind, answer }) {
+      const index = pendingChoices.findIndex((p) => p.kind === kind);
+      if (index < 0) return { answered: false };
+      pendingChoices.splice(index, 1)[0].resolve(answer);
+      return { answered: true };
+    },
+    async migrationMessages() { return { messages: MIGRATION_MESSAGES }; },
+    async migratorEvents({ clear = false } = {}) {
+      const events = migratorEvents;
+      if (clear) migratorEvents = [];
+      return { events };
+    },
+    async migrationTimers({ clear = false } = {}) {
+      const timers = migrationTimers.map(({ handle: _handle, ...t }) => t);
+      if (clear) migrationTimers = [];
+      return { timers };
+    },
+    // 앱을 다시 연 것처럼 이전 모듈(메모리 상태 d1Status 등)과 러너를 새로 만듭니다. 프로세스 재시작(restart)과 달리 저장소와 시계는 그대로입니다.
+    async migratorReset(timing = {}) {
+      migratorTiming = { ...migratorTiming, ...timing };
+      migrator.dispose();
+      runnerEvents = [];
+      migratorEvents = [];
+      runner = makeRunner();
+      migrator = makeMigrator();
+      return migratorTiming;
+    },
+    async moduleLoads() {
+      const loads = globalThis.__harnessModuleLoads || [];
+      return {
+        loads,
+        firestoreImportLoaded: loads.some((l) => l.module === 'firestoreImport.ts'),
+        firebaseLoaded: loads.some((l) => l.module === 'firebase.ts'),
+        injectedLoads,
+      };
+    },
+    async storageReads({ clear = false } = {}) {
+      const snapshot = { reads: { ...storageStats.reads }, order: [...storageStats.order], writes: { ...storageStats.writes } };
+      if (clear) storageStats.clear();
+      return snapshot;
+    },
+    async firestoreUid({ uid, reset = false } = {}) {
+      if (reset) harnessAuth.setUid(null);
+      else if (uid !== undefined) harnessAuth.setUid(uid);
+      return { uid: harnessAuth.getUid() };
+    },
 
     // ── 저장 고장 주입 ──
     async injectStorageFault(payload) { return storageFaults.arm(payload); },

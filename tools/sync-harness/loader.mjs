@@ -18,10 +18,22 @@ const STUBS = {
 
 const EXTENSIONS = ['.ts', '.tsx', '.js', '.mjs'];
 
+// 07 설계 5.1: firestoreImport.ts와 firebase.ts에서 온 firebase/* import만 가짜 Firestore(stubs/fake-firestore.mjs)로 보냅니다.
+// 그래서 이 두 파일의 실제 코드가 그대로 돌고, 다른 파일(기존 가짜 Worker 모드, compat, full)은 영향을 받지 않습니다.
+// 실제 서버 모드(HARNESS_REAL_WORKER=1)와 HARNESS_FAKE_FIRESTORE=1에서만 켜집니다. 실제 Firebase에는 접속하지 않습니다.
+const FAKE_FIRESTORE_ON = process.env.HARNESS_FAKE_FIRESTORE === '1' || process.env.HARNESS_REAL_WORKER === '1';
+const FAKE_FIRESTORE_SPECIFIERS = new Set(['firebase/firestore', 'firebase/auth', 'firebase/app']);
+const FAKE_FIRESTORE_PARENT = /\/src\/database\/(firestoreImport|firebase)\.ts$/;
+// 이 두 모듈이 평가된 시각을 기기 프로세스가 기록하게 합니다(동적 import 판정, 불변 조건 5·6).
+const TRACKED_MODULE = /\/src\/database\/(firestoreImport|firebase)\.ts$/;
+
 export async function resolve(specifier, context, nextResolve) {
   if (process.env.HARNESS_FAKE_CLOUD === '1'
     && (specifier.endsWith('fake-cloud.mjs') || specifier === 'firebase/firestore' || specifier === 'firebase/auth' || specifier === './firebase')) {
     return { url: pathToFileURL(path.join(HARNESS_DIR, 'stubs/fake-worker.mjs')).href, shortCircuit: true };
+  }
+  if (FAKE_FIRESTORE_ON && FAKE_FIRESTORE_SPECIFIERS.has(specifier) && FAKE_FIRESTORE_PARENT.test(context.parentURL ?? '')) {
+    return { url: pathToFileURL(path.join(HARNESS_DIR, 'stubs/fake-firestore.mjs')).href, shortCircuit: true };
   }
   if (STUBS[specifier]) return { url: pathToFileURL(STUBS[specifier]).href, shortCircuit: true };
 
@@ -65,7 +77,11 @@ export async function load(url, context, nextLoad) {
       },
       fileName: fileURLToPath(url),
     });
-    return { format: 'module', source: outputText, shortCircuit: true };
+    const tracked = FAKE_FIRESTORE_ON && TRACKED_MODULE.exec(url);
+    const marker = tracked
+      ? `(globalThis.__harnessModuleLoads ||= []).push({ module: ${JSON.stringify(`${tracked[1]}.ts`)}, at: Date.now(), monotonicMs: Math.round(performance.now()) });\n`
+      : '';
+    return { format: 'module', source: marker + outputText, shortCircuit: true };
   }
   return nextLoad(url, context);
 }

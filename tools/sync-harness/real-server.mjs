@@ -13,6 +13,8 @@
 //   inject   {key, ensureFamily?, family?, log?, logs?, tombstone?, tombstones?, serverTime?, member?, remove?, gone?}
 //   wipe     {scope:'logs'|'all'|'snapshot'|'restore'|'reset', name?}
 //   config   {maxPushItems?, maxPageRows?} 서버 상수 변경
+//   fs       {op, ...} 가짜 Firestore 제어(상태 시드, 시계, 집계, 오류 주입, 걸쇠, 1.7.9 흉내). 사용법은 stubs/fake-firestore-state.mjs 머리말
+//            기기의 가짜 Firebase SDK는 POST /__fs/rpc 로 같은 상태에 질의합니다(07 설계 5.1).
 // match 필드: kind(push|pull|connect|token|other|sync, 배열 가능), clientId, hasPushItems, batch(write|read).
 // at: start(Worker 호출 전, 기본) | response(Worker 처리 뒤 응답 전) | batch(match.batch가 있으면 기본).
 // skip: 앞의 N번은 건너뜀(기본 0). times: 적용 횟수(기본 1, 'always'는 무제한).
@@ -23,6 +25,7 @@ import path from 'node:path';
 import { performance } from 'node:perf_hooks';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { createD1Mock } from './stubs/d1-mock.mjs';
+import { createFakeFirestore } from './stubs/fake-firestore-state.mjs';
 
 const HARNESS_DIR = path.dirname(fileURLToPath(import.meta.url));
 const PROJECT_DIR = path.resolve(HARNESS_DIR, '../..');
@@ -43,6 +46,7 @@ const applyEnvConfig = () => {
   env.MAX_PUSH_ITEMS = String(config.maxPushItems);
   env.MAX_PAGE_ROWS = String(config.maxPageRows);
 };
+const fakeFirestore = createFakeFirestore();
 const env = { DB: null, clock: nowMs, MAX_PUSH_ITEMS: '', MAX_PAGE_ROWS: '' };
 if (process.env.HARNESS_MAX_PUSH_ITEMS) config.maxPushItems = Number(process.env.HARNESS_MAX_PUSH_ITEMS);
 if (process.env.HARNESS_MAX_PAGE_ROWS) config.maxPageRows = Number(process.env.HARNESS_MAX_PAGE_ROWS);
@@ -430,6 +434,7 @@ function wipeState(body) {
     failRules.length = 0;
     requests.length = 0;
     snapshots.clear();
+    fakeFirestore.reset();
     clock.fixed = null;
     clock.offset = 0;
     config.maxPushItems = DEFAULT_MAX_PUSH_ITEMS;
@@ -525,6 +530,7 @@ function control(name, body) {
         default: throw new Error(`알 수 없는 state 질의: ${body.q}`);
       }
     }
+    case 'fs': return fakeFirestore.control(body);
     case 'inject': return injectState(body);
     case 'wipe': return wipeState(body);
     case 'config': {
@@ -551,9 +557,18 @@ async function handleControl(req, res, url) {
   }
 }
 
+// 기기의 가짜 Firebase SDK 요청. D1 요청 기록과 섞이지 않게 따로 처리합니다.
+async function handleFirestoreRpc(req, res) {
+  const text = (await readBody(req)).toString('utf8');
+  const result = await fakeFirestore.rpc(JSON.parse(text));
+  res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
+  res.end(JSON.stringify(result));
+}
+
 const server = http.createServer((req, res) => {
   const url = new URL(req.url, 'http://127.0.0.1');
-  const run = url.pathname.startsWith('/__harness/') ? handleControl : handleWorkerRequest;
+  const run = url.pathname === '/__fs/rpc' ? handleFirestoreRpc
+    : url.pathname.startsWith('/__harness/') ? handleControl : handleWorkerRequest;
   run(req, res, url).catch((error) => {
     if (!res.headersSent) res.writeHead(500);
     res.end(String(error?.message || error));
@@ -563,6 +578,7 @@ server.keepAliveTimeout = 5_000;
 
 const shutdown = () => {
   for (const item of [...held]) releaseItem(item);
+  fakeFirestore.release();
   server.closeAllConnections?.();
   server.close(() => process.exit(0));
   setTimeout(() => process.exit(0), 500).unref();

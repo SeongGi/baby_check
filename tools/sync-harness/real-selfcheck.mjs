@@ -1,12 +1,14 @@
 // 실제 서버 모드 기반 구조의 자체 점검입니다(06 설계 2.10, 계획 A6). 서버의 제어 엔드포인트, D1 흉내의 한도와
 // 집계, 기기 명령, 저장 고장 주입, 프로세스 정리, 자기 검사가 의도대로 동작하는지만 봅니다.
 // 서버 동작의 판정은 regression.mjs(real 모드)와 real-scenarios.mjs가 합니다.
+// 07 설계 5.1의 가짜 Firestore 점검(규칙 가정 8가지, 쓰기 목록, 읽기 수 집계, 걸쇠, 끝나지 않는 호출과 terminate, 시계,
+// 동적 import 기록, 기기 명령)과 시나리오 1·2의 연기 시험도 여기에 있습니다. 연기 시험은 B5b가 정식 시나리오로 다시 씁니다.
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import path from 'node:path';
 import { createD1Mock } from './stubs/d1-mock.mjs';
 import {
-  HARNESS_DIR, startRealHarness, selfCheckDevices, selfCheckMembers,
+  HARNESS_DIR, startRealHarness, selfCheckDevices, selfCheckMembers, make179Storage, waitMigrationComplete, waitFor, auditFirestoreWrites,
 } from './real-harness.mjs';
 
 const KEY = 's'.repeat(32);
@@ -361,6 +363,463 @@ try {
   await check('기기: 요청 상한을 실제의 10분의 1로 줄여서 시작한다', async () => {
     assert.deepEqual(await A.send('getTiming'), { requestTimeoutMs: 1000, pullBudgetMs: 600, cycleBudgetMs: 800 });
   });
+
+  // ════════════════════════════════════════════════════════════════════
+  // 가짜 Firestore (07 설계 5.1). 규칙 가정 8가지는 tools/rules-check/rules.test.mjs와 같은 순서와 내용입니다.
+  // ════════════════════════════════════════════════════════════════════
+  const fs = server.fs;
+  const rpc = async (body) => (await fetch(`${server.url}/__fs/rpc`, {
+    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ device: 'sc', actor: 'sc', ...body }),
+  })).json();
+  const fsOk = (res, what) => assert.ok(!res.error && !res.hang, `${what}: ${JSON.stringify(res.error || res)}`);
+  const fsDenied = (res, what, code = 'permission-denied') => assert.equal(res.error?.code, code, `${what} 거부여야 합니다: ${JSON.stringify(res)}`);
+  const FK = 'F'.repeat(8) + 'abcdef0123456789abcdef01';
+  const famPath = (key) => `families/${fs.familyId(key)}`;
+  const nowOf = async () => (await fs.clock({})).now;
+  const setDocRpc = (uid, path, data, merge = true, extra = {}) => rpc({ op: 'set', uid, path, data, merge, ...extra });
+  const joinRpc = (key, uid, hash = fs.inviteHash(key)) =>
+    setDocRpc(uid, `${famPath(key)}/members/${uid}`, { inviteHash: hash, joinedAt: { __serverTs: true } });
+  const seedBasic = async (key = FK) => {
+    await fs.reset();
+    return fs.seed(key, { members: ['uid-member'], logs: ['log-a', 'log-b', 'log-c', 'log-d', 'log-e'].map((id, i) => ({ id, type: 'formula', timestamp: 1000 + i })) });
+  };
+
+  await check('가짜 Firestore 규칙 1: 초대 해시가 맞으면 회원 문서를 만들 수 있다(틀린 해시와 남의 uid는 거부)', async () => {
+    await seedBasic();
+    fsOk(await joinRpc(FK, 'uid-joiner'), '해시 일치');
+    assert.deepEqual((await fs.snapshot(FK)).members.sort(), ['uid-joiner', 'uid-member']);
+    fsDenied(await joinRpc(FK, 'uid-wrong', 'hash-wrong'), '해시 불일치');
+    fsDenied(await setDocRpc('uid-someone', `${famPath(FK)}/members/uid-other`, { inviteHash: fs.inviteHash(FK), joinedAt: { __serverTs: true } }), '남의 uid');
+  });
+
+  await check('가짜 Firestore 규칙 2: 예전 가족 문서처럼 inviteHash가 없으면 회원 생성이 거부된다', async () => {
+    await fs.seed('L'.repeat(32), { family: { inviteHash: 'omit', schemaVersion: 2 }, members: ['uid-member'] });
+    fsDenied(await joinRpc('L'.repeat(32), 'uid-joiner'), 'inviteHash 없는 가족');
+  });
+
+  await check('가짜 Firestore 규칙 3: 비회원은 가족 문서와 기록을 읽을 수 없고 자기 회원 문서는 읽을 수 있다', async () => {
+    await seedBasic();
+    const out = 'uid-outsider';
+    fsDenied(await rpc({ op: 'get', uid: out, path: famPath(FK) }), '비회원 가족 문서');
+    fsDenied(await rpc({ op: 'get', uid: out, path: `${famPath(FK)}/logs/log-a` }), '비회원 기록');
+    fsDenied(await rpc({ op: 'list', uid: out, path: `${famPath(FK)}/logs` }), '비회원 기록 목록');
+    const own = await rpc({ op: 'get', uid: out, path: `${famPath(FK)}/members/${out}` });
+    fsOk(own, '자기 회원 문서');
+    assert.equal(own.exists, false);
+    fsDenied(await rpc({ op: 'get', uid: out, path: `${famPath(FK)}/members/uid-member` }), '남의 회원 문서');
+    fsOk(await rpc({ op: 'get', uid: out, path: `${famPath('M'.repeat(32))}/members/${out}` }), '가족 문서가 없는 곳의 자기 회원 문서');
+  });
+
+  await check('가짜 Firestore 규칙 4: 회원은 pendingDeletionAt: null을 쓸 수 있다(비회원 거부, 예전 가족도 가능)', async () => {
+    await seedBasic();
+    await fs.seed('L'.repeat(32), { family: { inviteHash: 'omit', schemaVersion: 2 }, members: ['uid-member'] });
+    fsOk(await setDocRpc('uid-member', famPath(FK), { pendingDeletionAt: null }), '회원 취소 쓰기');
+    fsDenied(await setDocRpc('uid-outsider', famPath(FK), { pendingDeletionAt: null }), '비회원 취소 쓰기');
+    fsOk(await setDocRpc('uid-member', famPath('L'.repeat(32)), { pendingDeletionAt: null }), '예전 가족의 취소 쓰기');
+  });
+
+  await check('가짜 Firestore 규칙 5: 회원 목록 쿼리는 회원이어도 거부된다', async () => {
+    await seedBasic();
+    fsDenied(await rpc({ op: 'list', uid: 'uid-member', path: `${famPath(FK)}/members` }), '회원의 회원 목록');
+    fsDenied(await rpc({ op: 'list', uid: 'uid-outsider', path: `${famPath(FK)}/members` }), '비회원의 회원 목록');
+  });
+
+  await check('가짜 Firestore 규칙 6: 가족 문서가 없으면 회원 생성이 거부된다', async () => {
+    await fs.reset();
+    fsDenied(await joinRpc('N'.repeat(32), 'uid-joiner'), '가족 문서 없음');
+    await fs.seed('N'.repeat(32), { family: null, members: ['uid-ghost'] });
+    fsDenied(await joinRpc('N'.repeat(32), 'uid-joiner'), '회원 문서만 남은 가족');
+  });
+
+  await check('가짜 Firestore 규칙 7: 회원은 logs 목록 쿼리(문서 id 순서, startAfter, limit)를 할 수 있다', async () => {
+    await seedBasic();
+    const page = (query) => rpc({ op: 'list', uid: 'uid-member', path: `${famPath(FK)}/logs`, query });
+    const first = await page({ orderBy: '__name__', limit: 2 });
+    assert.deepEqual(first.docs.map((d) => d.id), ['log-a', 'log-b']);
+    assert.deepEqual((await page({ orderBy: '__name__', startAfter: 'log-b', limit: 2 })).docs.map((d) => d.id), ['log-c', 'log-d']);
+    assert.deepEqual((await page({ orderBy: '__name__', startAfter: 'log-d', limit: 2 })).docs.map((d) => d.id), ['log-e']);
+    fsDenied(await rpc({ op: 'list', uid: 'uid-outsider', path: `${famPath(FK)}/logs`, query: { limit: 2 } }), '비회원 같은 쿼리');
+  });
+
+  await check('가짜 Firestore 규칙 8: merge로 pendingDeletionAt: null을 쓰면 다른 필드는 그대로이고, 예약 상태에서도 취소된다', async () => {
+    await seedBasic();
+    const at = await nowOf();
+    const read = async () => (await fs.snapshot(FK)).family;
+    fsOk(await setDocRpc('uid-member', famPath(FK), { pendingDeletionAt: null }), 'null 쓰기');
+    const after = await read();
+    assert.equal(after.pendingDeletionAt, null);
+    assert.equal(after.inviteHash, fs.inviteHash(FK));
+    assert.equal(after.schemaVersion, 3);
+    fsOk(await setDocRpc('uid-member', famPath(FK), { pendingDeletionAt: { __ts: at + 3_600_000 } }), '60분 뒤 예약');
+    fsDenied(await setDocRpc('uid-member', famPath(FK), { pendingDeletionAt: { __ts: at + 10 * 60_000 } }), '10분 뒤 예약(50분 미만)');
+    fsOk(await setDocRpc('uid-member', famPath(FK), { pendingDeletionAt: null }), '예약 중 취소');
+    assert.equal((await read()).pendingDeletionAt, null);
+  });
+
+  await check('가짜 Firestore 쓰기 목록: 앱의 허용 쓰기는 통과하고 허용 목록 밖 쓰기와 삭제는 forbidden으로 집계된다', async () => {
+    await seedBasic();
+    const from = await fs.opCount();
+    const app = { actor: 'app' };
+    fsOk(await joinRpc(FK, 'uid-joiner').then(() => setDocRpc('uid-member', famPath(FK), { pendingDeletionAt: null }, true, app)), '취소 쓰기');
+    fsOk(await setDocRpc('uid-joiner', `${famPath(FK)}/members/uid-joiner`, { inviteHash: fs.inviteHash(FK), joinedAt: { __serverTs: true } }, true, app), '회원 생성 모양');
+    let audit = await fs.audit(from);
+    assert.equal(audit.appWrites.length, 2);
+    assert.deepEqual(audit.forbidden, []);
+    // 허용 목록 밖: 회원 문서 갱신(다른 필드), 기록 쓰기, 삭제
+    await setDocRpc('uid-joiner', `${famPath(FK)}/members/uid-joiner`, { joinedAt: { __serverTs: true }, extra: 1 }, true, app);
+    await setDocRpc('uid-member', `${famPath(FK)}/logs/log-z`, { payload: { id: 'log-z' }, deleted: false }, false, app);
+    await rpc({ op: 'delete', uid: 'uid-member', path: `${famPath(FK)}/logs/log-a`, ...app });
+    audit = await fs.audit(from);
+    assert.equal(audit.forbidden.length, 3, JSON.stringify(audit.forbidden.map((w) => [w.path, w.fields])));
+    assert.equal(audit.deletes.length, 1);
+    // 1.7.9 흉내의 쓰기는 앱 쓰기에 섞이지 않는다.
+    await fs.legacy179Write(FK, { uid: 'uid-member', logs: [{ id: 'log-w', type: 'formula', timestamp: 5 }] });
+    assert.equal((await fs.audit(from)).appWrites.length, audit.appWrites.length);
+  });
+
+  await check('가짜 Firestore 읽기 수 집계: 문서 읽기 수와 규칙 평가 읽기 수(요청마다 회원 확인 1회)를 따로 센다', async () => {
+    await seedBasic();
+    const run = async (body) => { const from = await fs.opCount(); await rpc(body); return fs.stats(from); };
+    let st = await run({ op: 'get', uid: 'uid-member', path: famPath(FK) });
+    assert.deepEqual([st.docReads, st.ruleReads, st.reads], [1, 1, 2], '가족 문서: 문서 1 + 규칙 평가 1');
+    st = await run({ op: 'list', uid: 'uid-member', path: `${famPath(FK)}/logs`, query: { orderBy: '__name__', limit: 3 } });
+    assert.deepEqual([st.docReads, st.ruleReads], [3, 1], '기록 3건 목록: 문서 3 + 규칙 평가 1(문서마다가 아님)');
+    st = await run({ op: 'list', uid: 'uid-member', path: `${famPath(FK)}/logs`, query: { startAfter: 'zzz' } });
+    assert.deepEqual([st.docReads, st.ruleReads], [1, 1], '빈 결과도 문서 1건으로 셈');
+    st = await run({ op: 'get', uid: 'uid-member', path: `${famPath(FK)}/members/uid-member` });
+    assert.deepEqual([st.docReads, st.ruleReads], [1, 0], '자기 회원 문서는 규칙 평가 읽기가 없다');
+    st = await run({ op: 'get', uid: 'uid-outsider', path: famPath(FK) });
+    assert.deepEqual([st.docReads, st.ruleReads, st.denied], [1, 1, 1], '거부된 요청도 읽기 1건이다');
+    st = await run({ op: 'set', uid: 'uid-joiner', path: `${famPath(FK)}/members/uid-joiner`, merge: true, data: { inviteHash: fs.inviteHash(FK), joinedAt: { __serverTs: true } } });
+    assert.deepEqual([st.writes, st.ruleReads], [1, 1], '회원 생성: 규칙이 가족 문서를 한 번 읽는다');
+  });
+
+  await check('가짜 Firestore 1.7.9 흉내: 기록 쓰기와 lastChangedAt은 같은 서버 시각, 삭제 표식에도 updatedAt, 예약은 lastChangedAt을 바꾸지 않는다', async () => {
+    await seedBasic();
+    await fs.reset();
+    await fs.seed(FK, { family: { lastChangedAt: 1000 }, members: ['uid-b'], logs: [{ id: 'old', type: 'formula', timestamp: 1 }] });
+    const written = await fs.legacy179Write(FK, { uid: 'uid-b', logs: [{ id: 'new1', type: 'formula', timestamp: 2 }], deleteIds: ['old'] });
+    const snap = await fs.snapshot(FK);
+    const T = written.serverTime;
+    assert.equal(snap.family.lastChangedAt.__ts, T);
+    assert.equal(snap.family.lastChangedBy, 'uid-b');
+    assert.deepEqual(snap.live.map(([id]) => id), ['new1']);
+    assert.deepEqual(snap.deleted, ['old']);
+    assert.equal((await fs.getDoc(`${famPath(FK)}/logs/new1`)).updatedAt.__ts, T);
+    const tomb = await fs.getDoc(`${famPath(FK)}/logs/old`);
+    assert.equal(tomb.updatedAt.__ts, T, '삭제 표식에도 updatedAt');
+    assert.equal(tomb.deleted, true);
+    assert.ok(tomb.payload, '삭제 표식은 merge라서 payload가 남는다');
+    const scheduled = await fs.legacy179Schedule(FK, { uid: 'uid-b' });
+    const afterSchedule = (await fs.snapshot(FK)).family;
+    assert.equal(afterSchedule.pendingDeletionAt.__ts, scheduled.readyAt);
+    assert.equal(afterSchedule.lastChangedAt.__ts, T, '예약은 lastChangedAt을 바꾸지 않는다');
+    await fs.legacy179Cancel(FK, { uid: 'uid-b' });
+    const afterCancel = (await fs.snapshot(FK)).family;
+    assert.equal(afterCancel.pendingDeletionAt, null);
+    assert.equal(afterCancel.lastChangedAt.__ts, T);
+    await assert.rejects(fs.legacy179Write(FK, { uid: 'uid-nobody', logs: [{ id: 'x', type: 'formula', timestamp: 3 }] }), /거부/, '비회원의 1.7.9 쓰기는 규칙이 거부한다');
+    const profileWrite = await fs.legacy179Write(FK, { uid: 'uid-b', profile: { name: '바뀐 이름', sharedUpdatedAt: 5 } });
+    assert.ok(profileWrite.serverTime > T);
+    assert.equal((await fs.snapshot(FK)).family.lastChangedAt.__ts, profileWrite.serverTime, '프로필 쓰기도 lastChangedAt을 갱신한다');
+  });
+
+  await check('가짜 Firestore 걸쇠: 페이지 읽기 사이에 다른 기기의 쓰기를 끼워 넣을 수 있다', async () => {
+    await fs.reset();
+    await fs.seed(FK, { members: ['uid-a', 'uid-b'], logs: ['a', 'b', 'c', 'd'].map((id) => ({ id, type: 'formula', timestamp: 1, amount: 1 })) });
+    const page = (after) => rpc({ op: 'list', uid: 'uid-a', device: 'reader', path: `${famPath(FK)}/logs`, query: { orderBy: '__name__', limit: 2, ...(after ? { startAfter: after } : {}) } });
+    const first = await page();
+    assert.deepEqual(first.docs.map((d) => d.id), ['a', 'b']);
+    // 두 번째 페이지 요청을 걸쇠로 멈추고, 그 사이 이미 읽은 문서 'a'를 다른 기기가 고친다.
+    const second = fs.interleave({ op: 'list', kind: 'logs', device: 'reader' }, {}, {
+      call: () => page('b'),
+      between: async (item) => {
+        assert.equal(item.op, 'list');
+        await fs.legacy179Write(FK, { uid: 'uid-b', logs: [{ id: 'a', type: 'formula', timestamp: 1, amount: 99, updatedAt: 50 }] });
+      },
+    });
+    const result = await second;
+    assert.deepEqual(result.docs.map((d) => d.id), ['c', 'd']);
+    assert.equal((await fs.snapshot(FK)).live.find(([id]) => id === 'a')[1].amount, 99, '걸쇠 사이의 쓰기가 반영됐다');
+    assert.equal((await fs.held()).length, 0);
+  });
+
+  await check('가짜 Firestore 오류 주입: resource-exhausted, 일반 오류, offline, delay, hang(응답 없음), skip과 times', async () => {
+    await seedBasic();
+    const get = () => rpc({ op: 'get', uid: 'uid-member', path: famPath(FK) });
+    await fs.exhaust({ op: 'get' });
+    fsDenied(await get(), 'resource-exhausted', 'resource-exhausted');
+    await fs.clearFaults();
+    await fs.fail({ match: { op: 'get' }, code: 'unavailable', skip: 1, times: 1 });
+    fsOk(await get(), '첫 요청은 건너뜀');
+    fsDenied(await get(), 'unavailable', 'unavailable');
+    fsOk(await get(), 'times를 다 씀');
+    await fs.offline(true);
+    fsDenied(await get(), 'offline', 'unavailable');
+    await fs.offline(false);
+    await fs.delay({ op: 'get' }, 200);
+    const started = Date.now();
+    fsOk(await get(), 'delay');
+    assert.ok(Date.now() - started >= 190);
+    await fs.hang({ op: 'get' });
+    assert.equal((await get()).hang, true, '끝나지 않는 호출은 hang으로 답한다(기기 SDK는 이때 결코 끝나지 않는 약속을 돌려줌)');
+    fsOk(await get(), 'hang도 한 번만');
+    await fs.clearFaults();
+  });
+
+  await check('가짜 Firestore terminate: 닫힌 인스턴스의 요청은 거부되고 새 인스턴스는 된다. 종료 횟수와 인스턴스 목록이 남는다', async () => {
+    await seedBasic();
+    const from = await fs.opCount();
+    const get = (instance) => rpc({ op: 'get', uid: 'uid-member', path: famPath(FK), instance });
+    fsOk(await get('i1'), '새 인스턴스');
+    fsOk(await rpc({ op: 'terminate', instance: 'i1' }), 'terminate');
+    fsDenied(await get('i1'), '닫힌 인스턴스', 'failed-precondition');
+    fsOk(await get('i2'), '다시 만든 인스턴스');
+    assert.equal((await fs.stats(from)).terminates, 1);
+    const instances = (await fs.instances()).filter((i) => ['i1', 'i2'].includes(i.id));
+    assert.deepEqual(instances.map((i) => [i.id, i.terminated]), [['i1', true], ['i2', false]]);
+  });
+
+  await check('가짜 Firestore 시계: 서버 시각과 규칙의 request.time이 주입한 시계를 따른다', async () => {
+    await seedBasic();
+    await fs.clock({ set: 2_000_000_000_000 });
+    const written = await fs.legacy179Write(FK, { uid: 'uid-member', logs: [{ id: 'clk', type: 'formula', timestamp: 1 }] });
+    assert.ok(written.serverTime >= 2_000_000_000_000 && written.serverTime < 2_000_000_000_100);
+    const sched = await fs.legacy179Schedule(FK, { uid: 'uid-member' });
+    assert.equal(sched.readyAt, 2_000_000_000_000 + 3_600_000);
+    await fs.clock({ advance: 7_200_000 });
+    assert.equal((await fs.clock({})).now, 2_000_000_000_000 + 7_200_000);
+    // 예약 시각이 지난 뒤(시계가 앞으로 감) 가족 문서를 지울 수 있는 것은 규칙의 time 판정이다.
+    const del = await rpc({ op: 'delete', uid: 'uid-member', path: famPath(FK), actor: 'sc' });
+    assert.ok(!del.error, '예약 시각이 지나면 규칙이 삭제를 허용한다(앱은 삭제하지 않지만 규칙 흉내가 시계를 따르는지 본다)');
+    await fs.clock({ real: true });
+  });
+
+  // ── 기기 쪽 ──
+  const startFs = (names, options = {}) => startRealHarness({
+    devices: names,
+    deviceOptions: Object.fromEntries(names.map((n) => [n, options[n] || {}])),
+  });
+  const fsHarness = await startFs(['fsA', 'fsB', 'fsC', 'fsD', 'fsE'], {
+    fsA: { initialStorage: make179Storage({ syncKey: FK }) },
+    fsB: { initialStorage: make179Storage({ syncKey: FK }) },
+    fsC: { initialStorage: make179Storage({ syncKey: FK }) },
+    fsD: { initialStorage: make179Storage({}) },
+    fsE: { initialStorage: make179Storage({ syncKey: FK }), env: { HARNESS_LOAD_FIRESTORE: 'inject' } },
+  });
+  try {
+    const { fsA, fsB, fsC, fsD, fsE } = fsHarness.devices;
+    const fsSrv = fsHarness.server;
+    await fsSrv.adapter.reset();
+
+    await check('기기: 혼자 쓰는 기기는 이전 모듈을 돌려도 firestoreImport.ts와 firebase.ts를 불러오지 않는다(동적 import 기록)', async () => {
+      assert.equal((await fsD.send('bootApp')).marker.keys.length, 0, '혼자 쓰는 기기도 표식은 적는다(빈 배열)');
+      assert.equal((await fsD.send('runMigration')).result.status, 'no_key', '앱도 키가 없으면 ensure를 부르지 않는다');
+      assert.equal((await fsD.send('runMigration', { syncKey: FK })).result.status, 'not_connected', '다른 키를 억지로 넣어도 아무것도 하지 않는다');
+      assert.equal((await fsD.send('runnerRequest', { request: { syncKey: FK } })).success !== undefined, true);
+      const loads = await fsD.send('moduleLoads');
+      assert.deepEqual([loads.firestoreImportLoaded, loads.firebaseLoaded, loads.loads.length], [false, false, 0]);
+    });
+
+    await check('기기: 기본 경로(loadFirestore 주입 없음)에서 이전을 돌리면 그 시점에 두 모듈이 불러와지고 로드 시각이 남는다', async () => {
+      await fsSrv.fs.seed(FK, { members: ['legacy-B'], logs: [{ id: 'p1', type: 'formula', timestamp: 1000, updatedAt: 1000 }] });
+      await fsC.send('bootApp');
+      assert.equal((await fsC.send('moduleLoads')).loads.length, 0, '이전 전에는 불러오지 않는다');
+      const before = Date.now();
+      assert.equal((await fsC.send('runMigration')).result.status, 'uploading');
+      const loads = await fsC.send('moduleLoads');
+      assert.deepEqual(loads.loads.map((l) => l.module), ['firestoreImport.ts', 'firebase.ts']);
+      assert.ok(loads.loads.every((l) => l.at >= before - 50), '로드 시각이 이전을 시작한 뒤다');
+      assert.equal(loads.injectedLoads, 0);
+      await waitMigrationComplete(fsC);
+    });
+
+    await check('기기: HARNESS_LOAD_FIRESTORE=inject 기기는 주입한 loadFirestore가 한 번 불린다', async () => {
+      await fsE.send('bootApp');
+      await fsE.send('runMigration');
+      const loads = await fsE.send('moduleLoads');
+      assert.equal(loads.injectedLoads, 1);
+      assert.equal(loads.firestoreImportLoaded, true);
+      await waitMigrationComplete(fsE);
+    });
+
+    await check('기기: 가짜 Firestore 위에서 실제 firestoreImport.ts가 돈다(앱 쓰기 목록은 회원 문서 생성뿐, 같은 uid 재사용)', async () => {
+      const audit = await fsSrv.fs.audit();
+      assert.deepEqual(audit.forbidden, []);
+      assert.deepEqual(audit.deletes, []);
+      assert.ok(audit.appWrites.length >= 2 && audit.appWrites.every((w) => w.path.includes('/members/') && w.kind === 'set'));
+      assert.ok((await fsSrv.fs.stats()).byDevice.fsC.reads > 0);
+    });
+
+    await check('기기: 익명 uid는 재시작해도 유지되고 firestoreUid로 바꿀 수 있다(uid 변경)', async () => {
+      const uid1 = (await fsC.send('firestoreUid')).uid;
+      assert.match(uid1, /^anon-fsC-/);
+      await fsC.restart();
+      assert.equal((await fsC.send('firestoreUid')).uid, uid1);
+      assert.equal((await fsC.send('firestoreUid', { uid: 'uid-changed' })).uid, 'uid-changed');
+      assert.equal((await fsC.send('firestoreUid', { reset: true })).uid, null);
+    });
+
+    await check('기기: 끝나지 않는 호출은 상한(스케일 1.5초) 뒤 terminate되고 다음 시도는 새 인스턴스로 돈다', async () => {
+      await fsSrv.adapter.reset();
+      await fsSrv.fs.seed(FK, { members: ['legacy-B'], logs: [{ id: 'h1', type: 'formula', timestamp: 1000, updatedAt: 1000 }] });
+      await fsB.send('bootApp');
+      await fsSrv.fs.hang({ op: 'get', kind: 'family', device: 'fsB' });
+      const from = await fsSrv.fs.opCount();
+      const started = Date.now();
+      const first = await fsB.send('runMigration');
+      assert.equal(first.result.status, 'firestore_failed', JSON.stringify(first));
+      assert.ok(Date.now() - started >= 1_400, '상한까지 기다렸다');
+      assert.equal((await fsSrv.fs.stats(from)).terminates, 1, 'terminate가 불렸다');
+      const state = await fsB.send('migrationState');
+      assert.ok(state.state.nextFirestoreAttemptAt > Date.now(), '가벼운 실패 간격이 적용됐다');
+      await fsHarness.advanceClocks(31 * 60_000, { d1: false });
+      assert.equal((await fsB.send('runMigration')).result.status, 'uploading');
+      const instances = (await fsSrv.fs.instances()).filter((i) => i.device === 'fsB');
+      assert.ok(instances.length >= 2 && instances[0].terminated && !instances.at(-1).terminated, JSON.stringify(instances));
+      await waitMigrationComplete(fsB);
+    });
+
+    await check('기기: setChoiceAnswers 대기열, 답 보류와 answerChoice, 안내 기록, 저장소 읽기 집계', async () => {
+      await fsA.send('setChoiceAnswers', { legacyDeletion: [{ hold: true }, 'cancelRequest'], backupFailure: ['continue'] });
+      const queued = await fsA.send('setChoiceAnswers', { defaults: { legacyDeletion: 'later' } });
+      assert.equal(queued.queued.legacyDeletion, 2);
+      await fsSrv.adapter.reset();
+      await fsSrv.fs.seed(FK, { members: ['legacy-B'], family: { pendingDeletionAt: Date.now() + 3_600_000 }, logs: [{ id: 'd1', type: 'formula', timestamp: 1000, updatedAt: 1000 }] });
+      await fsA.send('bootApp');
+      await fsA.send('storageReads', { clear: true });
+      const pending = fsA.send('runMigration');
+      const log = await waitFor(async () => {
+        const entries = await fsA.send('choiceLog');
+        return entries.pending.length ? entries : null;
+      }, { label: '보류된 선택 화면' });
+      assert.equal(log.legacyDeletion[0].context, 'missing');
+      assert.deepEqual(log.legacyDeletion[0].options.sort(), ['cancelRequest', 'followDeletion', 'later']);
+      assert.equal((await fsA.send('answerChoice', { kind: 'legacyDeletion', answer: 'later' })).answered, true);
+      assert.equal((await pending).result.status, 'pending_deletion');
+      const reads = await fsA.send('storageReads');
+      assert.ok(reads.reads['@baby_cf_migration_v1:' + FK] >= 1 && reads.order.length > 0, '저장소 읽기를 센다');
+      const after = await fsA.send('choiceLog', { clear: true });
+      assert.equal(after.legacyDeletion[0].answer, 'later');
+      assert.equal(after.pending.length, 0);
+      assert.deepEqual((await fsA.send('choiceLog')).legacyDeletion, []);
+      assert.equal((await fsA.send('migrationMessages')).messages.absent, '가족 정보를 찾지 못했습니다.');
+    });
+
+    await check('기기: 저장 고장 주입 reject(용량 부족)와 접두어 키는 백업 저장을 막고 백업 실패 화면을 부른다', async () => {
+      await fsC.send('setChoiceAnswers', { backupFailure: ['later', 'continue'] });
+      await fsC.send('writeStorage', { key: `@baby_cf_migration_v1:${FK}`, value: null });
+      await fsC.send('writeStorage', { key: '@baby_pre_cloudflare_backup_v1', value: null });
+      await fsC.send('writeStorage', { key: '@baby_pre_cloudflare_backup_meta_v1', value: null });
+      await fsC.send('injectStorageFault', { mode: 'reject', keys: ['@baby_pre_cloudflare_backup_v1'], times: 'always' });
+      await fsC.send('bootApp');
+      const first = await fsC.send('runMigration');
+      assert.equal(first.result.status, 'backup_pending');
+      assert.equal((await fsC.send('choiceLog')).backupFailure.length, 1);
+      assert.equal((await fsC.send('migrationState')).hasBackupValue, false, '거부된 쓰기는 파일에 반영되지 않는다');
+      await fsC.send('clearStorageFault');
+      await fsC.send('injectStorageFault', { mode: 'throw', keys: ['@baby_cf_migration_v1:*'], nth: 1 });
+      assert.equal((await fsC.send('storageFaultStatus')).state, 'armed');
+      await fsC.send('clearStorageFault');
+    });
+
+    await check('기기: 표식 명령(setLegacyMarker, clearLegacyMarker)과 migratorReset, 타이머와 이벤트 기록', async () => {
+      assert.equal((await fsD.send('setLegacyMarker', { keys: ['abc'] })).marker.keys[0], 'abc');
+      assert.equal((await fsD.send('setLegacyMarker', { value: null })).marker, null);
+      await fsD.send('bootApp');
+      assert.deepEqual((await fsD.send('clearLegacyMarker')).marker.keys, []);
+      assert.equal((await fsD.send('bootApp')).marker.keys.length, 0, '비운 뒤에는 다시 계산하지 않는다');
+      assert.equal((await fsD.send('migratorReset', { firestoreCallTimeoutMs: 500 })).firestoreCallTimeoutMs, 500);
+      assert.ok(Array.isArray((await fsD.send('migrationTimers')).timers));
+      assert.ok((await fsA.send('migratorEvents')).events.length >= 0);
+    });
+  } finally {
+    await fsHarness.stop();
+  }
+
+  // ════════════════════════════════════════════════════════════════════
+  // 연기 시험: 시나리오 1(두 기기 차례 업데이트)과 2(부활 금지)를 끝까지 한 번 돌려 도구가 이어지는지 봅니다.
+  // 정식 시나리오는 B5b가 real-scenarios-4a.mjs에서 다시 씁니다.
+  // ════════════════════════════════════════════════════════════════════
+  const smoke = await startFs(['smA', 'smB', 'smC'], {
+    smA: { initialStorage: make179Storage({ syncKey: FK }) },
+    smB: { initialStorage: make179Storage({ syncKey: FK }) },
+    smC: { initialStorage: make179Storage({ syncKey: 'G'.repeat(8) + 'abcdef0123456789abcdef01' }) },
+  });
+  try {
+    const { smA, smB, smC } = smoke.devices;
+    const { server: sv } = smoke;
+    const idsOf = async (device) => (await device.send('getLogs')).logs.map((l) => l.id).sort();
+
+    await check('연기 시험 시나리오 1: A가 먼저 이전하고 B가 나중에 이전해도 연결이 유지되고 세 곳의 기록 집합이 같다(3,000건, 삭제 표식 300건)', async () => {
+      await sv.adapter.reset();
+      const logs = Array.from({ length: 3000 }, (_, i) => ({ id: `fs-${String(i).padStart(4, '0')}`, type: 'formula', amount: 90, timestamp: 1_000_000 + i, updatedAt: 1_000_000 + i }));
+      const tombstones = Array.from({ length: 300 }, (_, i) => `gone-${i}`);
+      await sv.fs.seed(FK, { members: ['legacy-C'], logs, tombstones });
+      await smA.send('bootApp');
+      await smB.send('bootApp');
+      // 이전 전 첫 동기화는 관문이 막는다: 404 오류도 D1 요청도 없다.
+      const mark = await sv.adapter.requestCount();
+      const gated = await smA.send('runnerRequest', { request: { syncKey: FK } });
+      assert.equal(gated.success, false);
+      assert.equal(gated.migrationPending, true);
+      assert.equal(gated.error, undefined, '관문이 막은 회차는 오류가 아니다');
+      assert.equal((await sv.adapter.requests(mark)).length, 0, 'D1 요청 0회');
+
+      const first = await smA.send('runMigration');
+      assert.equal(first.result.status, 'uploading', JSON.stringify(first));
+      const aState = await waitMigrationComplete(smA, { timeoutMs: 60_000 });
+      assert.equal(aState.state.mergeSource, 'ok');
+      assert.equal(aState.gate, 'proceed');
+      assert.equal((await sv.adapter.logs(FK)).live.length, 3000, 'D1 가족이 생기고 기록이 모두 올라갔다');
+      assert.equal((await smA.send('getProfile')).profile.syncKey, FK, 'A의 연결이 유지된다');
+
+      const second = await smB.send('runMigration');
+      assert.equal(second.result.status, 'uploading', JSON.stringify(second));
+      await waitMigrationComplete(smB, { timeoutMs: 60_000 });
+      assert.equal((await smB.send('getProfile')).profile.syncKey, FK, 'B의 연결이 유지된다');
+      for (const device of [smA, smB]) {
+        const done = await device.send('runnerRequest', { request: { syncKey: FK }, timeoutMs: 20_000 });
+        assert.equal(done.success, true, done.error);
+      }
+      const expected = logs.map((l) => l.id).sort();
+      const fsLive = (await sv.fs.snapshot(FK)).live.map(([id]) => id).sort();
+      assert.deepEqual(fsLive, expected, 'Firestore');
+      assert.deepEqual((await sv.adapter.logs(FK)).live.map(([id]) => id).sort(), expected, 'D1');
+      assert.deepEqual(await idsOf(smA), expected, 'A');
+      assert.deepEqual(await idsOf(smB), expected, 'B');
+      const audit = await auditFirestoreWrites(smoke);
+      assert.ok(audit.appWrites.length >= 2, '회원 문서 생성 쓰기는 기록돼 있다');
+      // 가져오기와 로컬 백업 복원은 이전 상태를 지우지 않는다(시나리오 11에 쓰는 명령)
+      await smA.send('importData', { logs: [] });
+      await smA.send('backupLocalData');
+      assert.equal((await smA.send('restoreLocalBackup')).success, true);
+      assert.equal((await smA.send('migrationState')).complete, true);
+    });
+
+    await check('연기 시험 시나리오 2: 영구 삭제한 가족에 다른 기기가 이전을 시도하면 410이고 D1에 가족이 생기지 않는다', async () => {
+      const key2 = 'G'.repeat(8) + 'abcdef0123456789abcdef01';
+      await sv.fs.seed(key2, { members: ['legacy-C'], logs: [{ id: 'z1', type: 'formula', timestamp: 5, updatedAt: 5 }] });
+      await sv.adapter.markGone(key2);
+      await smC.send('bootApp');
+      await smC.send('addLog', { log: { type: 'formula', amount: 10, timestamp: 77 } });
+      const result = await smC.send('runMigration');
+      assert.equal(result.result.status, 'deleted', JSON.stringify(result));
+      const family = await sv.adapter.family(key2);
+      assert.deepEqual([family.exists, family.deleted], [false, true], 'D1에 가족이 생기지 않는다');
+      await waitFor(async () => !(await smC.send('getProfile')).profile.syncKey, { label: 'C의 연결 해제(410 회차)' });
+      assert.ok((await smC.send('getLogs')).logs.some((l) => l.timestamp === 77), '기기 기록은 남는다');
+      // legacyDeletion 없는 delete는 가족이 없으면 404이고 deleted_families가 그대로다.
+      const other = 'H'.repeat(8) + 'abcdef0123456789abcdef01';
+      const res = await fetch(`${sv.url}/api/family/delete`, {
+        method: 'POST', headers: { Authorization: `Bearer ${other}`, 'X-Client-Id': 'smoke-client', 'Content-Type': 'application/json' }, body: '{}',
+      });
+      assert.equal(res.status, 404);
+      assert.deepEqual([(await sv.adapter.family(other)).exists, (await sv.adapter.family(other)).deleted], [false, false]);
+    });
+  } finally {
+    await smoke.stop();
+  }
 } finally {
   await harness.stop();
 }

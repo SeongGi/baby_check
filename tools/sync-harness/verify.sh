@@ -13,6 +13,8 @@
 #                           tools/rules-check 에서 npm install 을 먼저 하세요. 실제 Firebase에는 접속하지 않음)
 #   ./verify.sh offline     unit + regression + real + reminder. 할당량을 쓰지 않는 전부
 #   ./verify.sh all         offline 다음에 compat, full을 순서대로
+# real 모드의 기기는 firestoreImport.ts와 firebase.ts의 firebase/* import를 가짜 Firestore(stubs/fake-firestore.mjs)로 보냅니다
+# (loader.mjs, HARNESS_REAL_WORKER=1에서 자동). 실제 Firebase에는 접속하지 않습니다.
 # real 모드는 프로세스를 여러 개 띄웁니다. 아래처럼 프로세스 수 상한 안에서 돌리세요.
 #   (ulimit -u $(( $(ps -u $(id -u) -o pid= | wc -l) + 150 )); ./verify.sh real)
 set -euo pipefail

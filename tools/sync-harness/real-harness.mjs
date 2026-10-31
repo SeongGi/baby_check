@@ -12,11 +12,14 @@
 // SIGKILL로 죽어도 자식이 stdin 종료를 보고 스스로 끝납니다. 자식을 띄울 때 process.argv[1]을 쓰지 않고
 // 이 모듈의 위치로 경로를 구합니다.
 import { spawn } from 'node:child_process';
-import { existsSync, rmSync } from 'node:fs';
+import { existsSync, rmSync, writeFileSync } from 'node:fs';
 import { StringDecoder } from 'node:string_decoder';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { createRealAdapter } from './server-adapter.mjs';
+import { createFirestoreAdapter } from './firestore-adapter.mjs';
+
+export { firestoreFamilyId, firestoreInviteHash, tsMillis } from './firestore-adapter.mjs';
 
 export const HARNESS_DIR = path.dirname(fileURLToPath(import.meta.url));
 const LOADER = path.join(HARNESS_DIR, 'loader.mjs');
@@ -114,6 +117,8 @@ export class RealServer {
     this.port = port;
     this.url = `http://127.0.0.1:${port}`;
     this.adapter = createRealAdapter((name, body) => this.control(name, body));
+    /** 가짜 Firestore 조작 어댑터(firestore-adapter.mjs). 서버 프로세스가 상태를 갖습니다. */
+    this.fs = createFirestoreAdapter((name, body) => this.control(name, body));
   }
 
   async control(name, body = {}) {
@@ -141,9 +146,11 @@ export class RealServer {
 // ────────────── 기기 ──────────────
 export class RealDevice {
   /**
-   * @param {{ name: string, serverUrl: string, storageFile?: string, fresh?: boolean, env?: Record<string,string> }} options
+   * @param {{ name: string, serverUrl: string, storageFile?: string, fresh?: boolean, env?: Record<string,string>,
+   *   initialStorage?: Record<string,string> }} options
+   *   initialStorage: 처음 띄울 때(fresh) 저장 파일에 먼저 적을 항목. 값은 문자열입니다. `make179Storage`가 1.7.9 기기의 저장소를 만듭니다.
    */
-  constructor({ name, serverUrl, storageFile, fresh = true, env = {} }) {
+  constructor({ name, serverUrl, storageFile, fresh = true, env = {}, initialStorage }) {
     this.name = name;
     this.serverUrl = serverUrl;
     this.storageFile = storageFile || path.join(HARNESS_DIR, `storage-real-${name}.json`);
@@ -152,6 +159,9 @@ export class RealDevice {
     this.seq = 0;
     this.proc = null;
     if (fresh && existsSync(this.storageFile)) rmSync(this.storageFile);
+    // 가짜 Firebase 로그인(익명 uid)을 저장 파일 옆에 둡니다. 새로 설치한 기기는 uid도 새로 받습니다.
+    if (fresh) rmSync(this.storageFile.replace(/\.json$/, '') + '-fbauth.json', { force: true });
+    if (fresh && initialStorage) writeFileSync(this.storageFile, JSON.stringify(initialStorage, null, 2));
   }
 
   get alive() { return Boolean(this.proc) && this.proc.exitCode === null && this.proc.signalCode === null; }
@@ -161,6 +171,7 @@ export class RealDevice {
     const proc = spawnChild(DEVICE_SCRIPT, {
       ...this.env,
       HARNESS_REAL_WORKER: '1',
+      HARNESS_FAKE_FIRESTORE: '1',
       HARNESS_WORKER_URL: this.serverUrl,
       HARNESS_STORAGE_FILE: this.storageFile,
       HARNESS_DEVICE_NAME: this.name,
@@ -236,28 +247,96 @@ export class RealDevice {
 // ────────────── 묶음 시작과 자기 검사 ──────────────
 /**
  * 서버 하나와 기기 여러 대를 띄웁니다. stop()은 모두 정리합니다.
- * @param {{ devices?: string[], maxPushItems?: number, maxPageRows?: number }} options
+ * `deviceOptions`는 기기 이름별 옵션입니다: `{ A: { initialStorage, env } }`.
+ *   initialStorage: 처음 띄울 때 저장 파일에 적을 항목(`make179Storage`로 1.7.9 기기의 저장소를 만듭니다)
+ *   env: 기기 프로세스 환경 변수. `HARNESS_LOAD_FIRESTORE: 'inject'`면 이전 모듈에 `loadFirestore`를 주입하고
+ *        (호출 횟수를 기록), 없으면 앱과 같은 기본 경로(`import('./firestoreImport')`)입니다.
+ * @param {{ devices?: string[], maxPushItems?: number, maxPageRows?: number,
+ *   deviceOptions?: Record<string, { initialStorage?: Record<string,string>, env?: Record<string,string> }> }} options
  */
-export async function startRealHarness({ devices: names = ['A', 'B'], maxPushItems, maxPageRows } = {}) {
+export async function startRealHarness({ devices: names = ['A', 'B'], maxPushItems, maxPageRows, deviceOptions = {} } = {}) {
   const server = await RealServer.start({ maxPushItems, maxPageRows });
   const devices = {};
   try {
     for (const name of names) {
-      devices[name] = await new RealDevice({ name, serverUrl: server.url }).start();
+      devices[name] = await new RealDevice({ name, serverUrl: server.url, ...(deviceOptions[name] || {}) }).start();
     }
   } catch (error) {
     killAllChildren();
     throw error;
   }
-  return {
+  const harness = {
     server,
+    fs: server.fs,
     devices,
+    /** 기기 시계(Date.now)와 가짜 Firestore 시계를 함께 옮깁니다. `d1: true`면 서버(D1) 시계도 옮깁니다. */
+    async advanceClocks(ms, { d1 = false, firestore = true, only } = {}) {
+      const targets = Object.entries(devices).filter(([name]) => !only || only.includes(name));
+      await Promise.all(targets.map(([, device]) => device.send('advanceClock', { ms })));
+      if (firestore) await server.fs.clock({ advance: ms });
+      if (d1) await server.control('clock', { advance: ms });
+    },
     async stop() {
       await Promise.all(Object.values(devices).map((d) => d.quit().catch(() => undefined)));
       await server.stop();
-      killAllChildren();
+      // 이 묶음의 프로세스만 확실히 끝냅니다(다른 묶음이 함께 떠 있을 수 있으므로 killAllChildren은 쓰지 않습니다).
+      for (const proc of [...Object.values(devices).map((d) => d.proc), server.proc]) {
+        try { proc?.kill('SIGKILL'); } catch { /* 이미 끝남 */ }
+      }
     },
   };
+  return harness;
+}
+
+/**
+ * 불변 조건 2 판정(시나리오 25): 앱이 Firestore에 쓴 것이 회원 문서 생성과 `pendingDeletionAt: null`뿐이고 지운 문서가 0건인지
+ * 확인합니다. 시나리오마다 서버가 따로 뜨므로, 각 시나리오가 끝나기 전에 부릅니다. 통과하면 감사 결과를 돌려줍니다.
+ */
+export async function auditFirestoreWrites(harness, from = 0) {
+  const audit = await harness.server.fs.audit(from);
+  if (audit.forbidden.length > 0 || audit.deletes.length > 0) {
+    throw new Error(`불변 조건 2 위반: 허용 목록 밖 Firestore 쓰기 ${audit.forbidden.length}건, 삭제 ${audit.deletes.length}건 ${JSON.stringify(audit.forbidden.map((w) => [w.path, w.fields]))}`);
+  }
+  return audit;
+}
+
+/** 조건이 참이 될 때까지 기다립니다. 시간이 지나면 예외를 던집니다. */
+export async function waitFor(fn, { timeoutMs = 15_000, intervalMs = 20, label = '조건' } = {}) {
+  const started = Date.now();
+  for (;;) {
+    const value = await fn();
+    if (value) return value;
+    if (Date.now() - started > timeoutMs) throw new Error(`${label}이(가) ${timeoutMs}ms 안에 참이 되지 않았습니다`);
+    await new Promise((resolve) => setTimeout(resolve, intervalMs));
+  }
+}
+
+/** 기기의 이전이 끝날 때까지(`mergedAt`과 `d1UploadedAt`이 모두 적힐 때까지) 기다립니다. 마지막 `migrationState`를 돌려줍니다. */
+export const waitMigrationComplete = (device, { syncKey, timeoutMs = 20_000 } = {}) =>
+  waitFor(async () => {
+    const state = await device.send('migrationState', { syncKey });
+    return state.complete ? state : null;
+  }, { timeoutMs, label: `${device.name}의 이전 완료` });
+
+/**
+ * 1.7.9 기기의 저장소(스키마 2)를 만듭니다. `startRealHarness({ deviceOptions: { A: { initialStorage } } })`에 넘깁니다.
+ * 1.7.9는 프로필에 syncKey를 두고, 옛 장부(`@baby_sync_ledger_v1`)에 familyKey를 둡니다(07 2.1).
+ *   syncKey: 프로필의 가족 키 | legacyLedgerKey: 옛 장부의 familyKey(스스로 연결을 끊은 기기는 프로필 키 없이 이것만 있음)
+ */
+export function make179Storage({ syncKey, legacyLedgerKey, logs = [], profile = {}, deletedLogIds = [] } = {}) {
+  const items = {
+    '@baby_schema_version': '2',
+    '@baby_profile': JSON.stringify({
+      name: '희성이', birthDate: '2026-01-01', birthWeight: '3.2', targetFormula: 800, deletedLogIds,
+      feedingReminderEnabled: false, feedingIntervalMinutes: 180, updatedAt: 1_000, sharedUpdatedAt: 1_000,
+      ...(syncKey ? { syncKey } : {}), ...profile,
+    }),
+    '@baby_logs': JSON.stringify(logs),
+  };
+  if (legacyLedgerKey) {
+    items['@baby_sync_ledger_v1'] = JSON.stringify({ familyKey: legacyLedgerKey, cursorMillis: 0, lastFullReadAt: 0, uploaded: {}, tombstoned: [] });
+  }
+  return items;
 }
 
 /** 기기들의 clientId와 저장 파일이 서로 모두 다른지 확인합니다. 하나라도 같으면 예외를 던집니다. */
