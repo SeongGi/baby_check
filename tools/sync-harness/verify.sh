@@ -34,17 +34,20 @@ run_regression() {
 
 # node:sqlite 의 실험 기능 경고를 숨기는 옵션을 더해 서버와 기기 프로세스를 띄웁니다.
 run_real() {
+  # 한 파일이 실패해도 나머지를 모두 돌리고, 하나라도 실패하면 1을 돌려줍니다(마지막 파일의 결과만 보지 않음).
+  local rc=0
   rm -f "$DIR"/storage-real-*.json "$DIR/storage-regression-real.json" "$DIR"/storage-scenarios-real*.json
-  node --disable-warning=ExperimentalWarning --import "$LOADER_IMPORT" "$DIR/real-selfcheck.mjs"
+  node --disable-warning=ExperimentalWarning --import "$LOADER_IMPORT" "$DIR/real-selfcheck.mjs" || rc=1
   HARNESS_REAL_WORKER=1 HARNESS_STORAGE_FILE="$DIR/storage-regression-real.json" \
-    node --disable-warning=ExperimentalWarning --import "$LOADER_IMPORT" "$DIR/regression.mjs"
+    node --disable-warning=ExperimentalWarning --import "$LOADER_IMPORT" "$DIR/regression.mjs" || rc=1
   # 설계 06 5.1의 시나리오 파일(real-scenarios-1.mjs, real-scenarios-2.mjs …)을 이름 순서로 모두 돌립니다.
   local scenario
   for scenario in "$DIR"/real-scenarios-*.mjs; do
     [ -f "$scenario" ] || continue
     HARNESS_STORAGE_FILE="$DIR/storage-scenarios-real-$(basename "$scenario" .mjs).json" \
-      node --disable-warning=ExperimentalWarning --import "$LOADER_IMPORT" "$scenario"
+      node --disable-warning=ExperimentalWarning --import "$LOADER_IMPORT" "$scenario" || rc=1
   done
+  return $rc
 }
 
 # 시나리오 파일 하나만 돌립니다. 예: ./verify.sh scenario real-scenarios-1.mjs
