@@ -18,7 +18,17 @@ import { KeyboardAwareScrollView } from '../components/KeyboardAwareScrollView';
 import { getDDay, formatTime, getRelativeDateString, formatDateTime } from '../utils/date';
 import { BottleSlider } from '../components/BottleSlider';
 import { getLatestFeeding, getNextFeedingAt } from '../utils/feedingReminder';
-import { withoutDiaryLogs } from '../utils/diary';
+import { DiaryEditor } from '../components/DiaryEditor';
+import {
+  DIARY_MAX_LENGTH,
+  DIARY_ROLE_EMOJI,
+  DIARY_ROLE_LABEL,
+  diaryText,
+  groupDiaryByDate,
+  pickDiaryLine,
+  toDiaryDate,
+  withoutDiaryLogs,
+} from '../utils/diary';
 import { VoiceLogButton } from '../components/VoiceLogButton';
 
 // 시작/종료를 한 번씩 눌러 기록하는 활동(수면·터미타임·놀기시간)은 동작이 동일해서
@@ -113,7 +123,8 @@ interface DashboardProps {
   autoStartVoiceRequest: number;
   onAutoStartVoiceHandled: (request: number) => void;
   onVoiceRecognitionActivity: (active: boolean) => void;
-  onNavigate: (screen: 'dashboard' | 'formula' | 'diaper' | 'bath' | 'weight' | 'temperature' | 'statistics' | 'profile') => void;
+  onNavigate: (screen: 'dashboard' | 'formula' | 'diaper' | 'bath' | 'weight' | 'temperature' | 'statistics' | 'profile' | 'diary') => void;
+  onSaveDiaryLine: (date: string, text: string, targetId: string | null) => Promise<boolean>;
   refreshing?: boolean;
   onRefresh?: () => void;
   onSetNextFeedingTime: (timestamp: number | null, feedingLogId?: string) => Promise<void>;
@@ -131,6 +142,7 @@ export const Dashboard: React.FC<DashboardProps> = ({
   onAutoStartVoiceHandled,
   onVoiceRecognitionActivity,
   onNavigate,
+  onSaveDiaryLine,
   refreshing,
   onRefresh,
   onSetNextFeedingTime,
@@ -550,6 +562,18 @@ export const Dashboard: React.FC<DashboardProps> = ({
     return groups;
   }, {}), [visibleLogs]);
 
+  // 오늘의 한 줄(현지 날짜). 입력 창을 열 때 고른 줄(targetId)과 날짜를 기억해, 자정이 지나도 처음 연 날짜에 저장합니다.
+  const todayDate = toDiaryDate(now);
+  const todayDiary = useMemo(() => groupDiaryByDate(logs).find(group => group.date === todayDate), [logs, todayDate]);
+  const myDiaryRole = profile.diaryRole;
+  const myDiaryEntry = todayDiary?.entries.find(entry => entry.role === myDiaryRole);
+  const [diaryEditor, setDiaryEditor] = useState<{ date: string; targetId: string | null; initialText: string } | null>(null);
+  const openTodayDiaryEditor = () => {
+    if (!myDiaryRole) { onNavigate('profile'); return; }
+    const target = pickDiaryLine(logs, todayDate, myDiaryRole, { includeEmpty: true });
+    setDiaryEditor({ date: todayDate, targetId: target?.id ?? null, initialText: target ? diaryText(target) : '' });
+  };
+
   const poopColorGuides: Record<StoolColor, string> = {
     yellow: '황금',
     green: '녹색',
@@ -727,6 +751,47 @@ export const Dashboard: React.FC<DashboardProps> = ({
           </TouchableOpacity>
         </View>
 
+        {/* 오늘의 한 줄 */}
+        <View style={styles.diaryHeaderRow}>
+          <Text style={[styles.sectionHeader, styles.diaryHeaderTitle]}>오늘의 한 줄</Text>
+          <TouchableOpacity onPress={() => onNavigate('diary')} accessibilityRole="button" accessibilityLabel="일기 모아보기" style={styles.diaryMoreButton}>
+            <Text style={styles.diaryMoreText}>모아보기 ›</Text>
+          </TouchableOpacity>
+        </View>
+        <View style={styles.diaryCard}>
+          {(todayDiary?.entries ?? []).map(entry => {
+            const mine = entry.role === myDiaryRole;
+            return (
+              <TouchableOpacity
+                key={entry.role}
+                style={styles.diaryRow}
+                onPress={() => (mine ? openTodayDiaryEditor() : onNavigate('diary'))}
+                accessibilityRole="button"
+                accessibilityLabel={mine ? '오늘 내 일기 고치기' : `${DIARY_ROLE_LABEL[entry.role]}의 일기 보기`}
+              >
+                <Text style={styles.diaryRowText} numberOfLines={3}>
+                  {DIARY_ROLE_EMOJI[entry.role]} {DIARY_ROLE_LABEL[entry.role]}: {diaryText(entry.line)}
+                </Text>
+                {entry.comments.length > 0 && (
+                  <Text style={styles.diaryCommentCount}>💬 {entry.comments.length}</Text>
+                )}
+              </TouchableOpacity>
+            );
+          })}
+          {(todayDiary?.entries.length ?? 0) === 0 && (
+            <Text style={styles.diaryEmpty}>아직 오늘의 한 줄이 없어요.</Text>
+          )}
+          {!myDiaryRole ? (
+            <TouchableOpacity style={styles.diaryWriteButton} onPress={() => onNavigate('profile')} accessibilityRole="button">
+              <Text style={styles.diaryWriteText}>프로필에서 아빠·엄마를 먼저 정해 주세요</Text>
+            </TouchableOpacity>
+          ) : !myDiaryEntry ? (
+            <TouchableOpacity style={styles.diaryWriteButton} onPress={openTodayDiaryEditor} accessibilityRole="button">
+              <Text style={styles.diaryWriteText}>오늘 어땠나요? 한 줄 남겨 보세요</Text>
+            </TouchableOpacity>
+          ) : null}
+        </View>
+
         {/* Chronological History Timeline */}
         <Text style={styles.sectionHeader}>활동 타임라인</Text>
         {activityLogs.length === 0 ? (
@@ -831,6 +896,17 @@ export const Dashboard: React.FC<DashboardProps> = ({
           </View>
         </KeyboardAvoidingView>
       </Modal>
+
+      <DiaryEditor
+        visible={diaryEditor !== null}
+        title={`${myDiaryRole ? DIARY_ROLE_EMOJI[myDiaryRole] : ''} 오늘의 한 줄`}
+        description="하루에 한 줄, 내 줄은 다시 쓰면 고쳐져요."
+        placeholder="오늘 어땠나요?"
+        initialText={diaryEditor?.initialText ?? ''}
+        maxLength={DIARY_MAX_LENGTH}
+        onSave={text => (diaryEditor ? onSaveDiaryLine(diaryEditor.date, text, diaryEditor.targetId) : Promise.resolve(false))}
+        onClose={() => setDiaryEditor(null)}
+      />
 
       {/* Interactive Edit Modal */}
       {editingLog && (
@@ -1823,6 +1899,72 @@ const styles = StyleSheet.create({
   },
   overdueText: {
     color: '#D95D5D',
+  },
+  diaryHeaderRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+  },
+  diaryHeaderTitle: {
+    flex: 1,
+  },
+  diaryMoreButton: {
+    paddingHorizontal: 4,
+    paddingVertical: 8,
+    marginTop: 15,
+    marginBottom: 12,
+  },
+  diaryMoreText: {
+    color: COLORS.primary,
+    fontWeight: 'bold',
+    fontSize: 13,
+  },
+  diaryCard: {
+    backgroundColor: COLORS.card,
+    borderRadius: 20,
+    padding: 16,
+    marginBottom: 12,
+    borderWidth: 1,
+    borderColor: COLORS.border,
+  },
+  diaryRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    gap: 10,
+    paddingVertical: 8,
+  },
+  diaryRowText: {
+    flex: 1,
+    color: COLORS.text,
+    fontSize: 15,
+    lineHeight: 22,
+  },
+  diaryCommentCount: {
+    color: COLORS.textMuted,
+    fontSize: 12,
+    fontWeight: '600',
+  },
+  diaryEmpty: {
+    color: COLORS.textMuted,
+    fontSize: 13,
+    paddingVertical: 6,
+  },
+  diaryWriteButton: {
+    minHeight: 46,
+    borderRadius: 14,
+    backgroundColor: COLORS.lightPink,
+    borderWidth: 1,
+    borderColor: COLORS.primary + '55',
+    alignItems: 'center',
+    justifyContent: 'center',
+    marginTop: 8,
+    paddingHorizontal: 12,
+  },
+  diaryWriteText: {
+    color: COLORS.primary,
+    fontWeight: 'bold',
+    fontSize: 14,
   },
   nextTimeModalOverlay: {
     flex: 1,

@@ -18,7 +18,7 @@ import AsyncStorage from '@react-native-async-storage/async-storage';
 import { SafeAreaProvider, useSafeAreaInsets } from 'react-native-safe-area-context';
 import { COLORS } from './src/theme/colors';
 import { BabyLogEntry, BabyProfile } from './src/types';
-import { getLogs, getProfile, addLog, deleteLog, updateLog, saveProfile, migrateStoredData, importDataWithoutLoss, backupLocalData, readProfileAfterPendingWrites } from './src/database/storage';
+import { getLogs, getProfile, addLog, deleteLog, updateLog, saveProfile, migrateStoredData, importDataWithoutLoss, backupLocalData, readProfileAfterPendingWrites, saveDiaryLine, deleteDiaryGroup } from './src/database/storage';
 import * as storage from './src/database/storage';
 import * as cloudClient from './src/database/cloudClient';
 import { cancelFamilyDeletion, deleteFamilyCloudData, getFamilyDeletionStatus, getSyncClientId, parseFamilySyncId, readFamilyChangeToken, scheduleFamilyDeletion, subscribeToCloudChanges, syncWithCloud } from './src/database/sync';
@@ -39,6 +39,7 @@ import { LogWeight } from './src/screens/LogWeight';
 import { LogTemperature } from './src/screens/LogTemperature';
 import { Statistics } from './src/screens/Statistics';
 import { Profile } from './src/screens/Profile';
+import { Diary } from './src/screens/Diary';
 
 // 서버 응답이 오지 않아도 화면이 멈추지 않도록 한 번의 동기화에 상한을 둡니다.
 const SYNC_TIMEOUT_MS = 20_000;
@@ -85,7 +86,7 @@ const legacyDeletionMessage = (prompt: LegacyDeletionPrompt): string => {
 function MainApp() {
   const [logs, setLogs] = useState<BabyLogEntry[]>([]);
   const [profile, setProfile] = useState<BabyProfile | null>(null);
-  const [activeScreen, setActiveScreen] = useState<'dashboard' | 'formula' | 'diaper' | 'bath' | 'weight' | 'temperature' | 'statistics' | 'profile'>('dashboard');
+  const [activeScreen, setActiveScreen] = useState<'dashboard' | 'formula' | 'diaper' | 'bath' | 'weight' | 'temperature' | 'statistics' | 'profile' | 'diary'>('dashboard');
   const activeScreenRef = useRef(activeScreen);
   activeScreenRef.current = activeScreen;
   const [isLoading, setIsLoading] = useState(true);
@@ -754,6 +755,40 @@ function MainApp() {
     }
   };
 
+  // 일기 저장과 묶음 삭제는 handleAddLog, handleDeleteLog와 같은 순서(저장, 목록 갱신, 백업, 동기화)입니다.
+  // 동기화는 가족 연결(syncKey)이 있을 때만 부르므로, 혼자 쓰는 기기는 네트워크 요청이 0회입니다.
+  const afterDiaryWrite = async (failureLabel: string) => {
+    const updatedLogs = await getLogs();
+    setLogs(updatedLogs);
+    void backupLocalData();
+    if (profile?.syncKey) {
+      void syncLatestData(profile.syncKey, false).then(result => {
+        if (result.merged) {
+          setLogs(result.logs);
+          setProfile(result.profile);
+        }
+      }).catch(error => console.warn(failureLabel, error));
+    }
+  };
+
+  const handleSaveDiaryLine = async (date: string, text: string, targetId: string | null) => {
+    const role = profile?.diaryRole;
+    if (!role) return false;
+    const saved = await saveDiaryLine({ diaryDate: date, role, text, targetId });
+    if (!saved) return false;
+    await afterDiaryWrite('Background diary sync failed');
+    return true;
+  };
+
+  const handleDeleteDiaryGroup = async (date: string) => {
+    const role = profile?.diaryRole;
+    if (!role) return false;
+    const success = await deleteDiaryGroup({ diaryDate: date, role });
+    if (!success) return false;
+    await afterDiaryWrite('Background diary delete sync failed');
+    return true;
+  };
+
   const handleUpdateLog = async (updatedLog: BabyLogEntry) => {
     const success = await updateLog(updatedLog);
     if (success) {
@@ -861,6 +896,7 @@ function MainApp() {
               suppressAutoVoiceUntilRef.current = Date.now() + (active ? 60_000 : 5_000);
             }}
             onNavigate={setActiveScreen}
+            onSaveDiaryLine={handleSaveDiaryLine}
             refreshing={refreshing}
             onRefresh={profile.syncKey ? handleRefresh : undefined}
             onSetNextFeedingTime={async (timestamp, feedingLogId) => {
@@ -898,6 +934,18 @@ function MainApp() {
         return <LogTemperature onAddLog={handleAddLog} onNavigate={setActiveScreen} />;
       case 'statistics':
         return <Statistics logs={logs} />;
+      case 'diary':
+        return (
+          <Diary
+            logs={logs}
+            profile={profile}
+            onSaveDiaryLine={handleSaveDiaryLine}
+            onDeleteDiaryGroup={handleDeleteDiaryGroup}
+            onAddLog={handleAddLog}
+            onDeleteLog={handleDeleteLog}
+            onNavigate={setActiveScreen}
+          />
+        );
       case 'profile':
         return (
           <Profile 
@@ -942,7 +990,7 @@ function MainApp() {
     <View style={[
       styles.container, 
       { 
-        paddingTop: activeScreen === 'formula' || activeScreen === 'diaper' || activeScreen === 'bath' || activeScreen === 'weight' || activeScreen === 'temperature' ? insets.top : 0
+        paddingTop: activeScreen === 'formula' || activeScreen === 'diaper' || activeScreen === 'bath' || activeScreen === 'weight' || activeScreen === 'temperature' || activeScreen === 'diary' ? insets.top : 0
       }
     ]}>
       <StatusBar style="dark" />
