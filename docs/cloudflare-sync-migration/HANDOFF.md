@@ -353,3 +353,33 @@
 - B5a `8836409`: 가짜 Firestore(`stubs/fake-firestore.mjs`, `fake-firestore-state.mjs`, `firestore-adapter.mjs`), loader 교체, 기기 명령, 1.7.9 흉내, 자체 점검 50/50. 메인 세션 확인: `tsc` 두 개 0, `test:voice` 0, `verify.sh offline` 0(PASS 297, FAIL 0), `verify.sh rules` 8/8. 실제 `firestoreImport.ts` 코드가 가짜 SDK 위에서 돈다. 검증 밖: Firebase SDK 자체(캐시, 실제 `terminate`, 오류 코드 매핑), `Platform.OS === 'web'` 분기, `RESET_WAIT_MS` 3초.
 - B5b 진행 중: 시나리오 1~17(`real-scenarios-4a.mjs`)과 18~34(`real-scenarios-4b.mjs`, 28은 `runCleanupCheck` 호출)를 t1-worker 두 개에 맡겼다. 각자 자기 파일만 고치고, 저장소에 변이를 하나씩 넣었다가 원복한다. 이어받는 세션은 `git diff -- src server App.tsx`가 비었는지 먼저 확인하고(변이가 남았으면 되돌림), 두 파일을 보고 `verify.sh offline`을 직접 돌린다.
 - 그다음: B8(독립 리뷰 2개, 집계, `07` 5.3 변이 표 전체, `04-검증.md`). 리뷰에서 B3 판단 7번(업로드 재시도), B4 판단 1번(EAS 빌드의 개발 메뉴)을 함께 본다.
+
+## 25. 진행 기록과 다음 세션이 할 일 (2026-10-31, 세션 51506924 마무리)
+- B5b `654948c`: `real-scenarios-4a.mjs`(1~17)는 16/17이고, `real-scenarios-4b.mjs`(18~34)는 17/17이다. 작업자 변이는 4a 15개, 4b 16개를 모두 잡았고 원복했다(`git diff -- src server App.tsx`는 비어 있다). 메인 세션이 돌린 `verify.sh offline`은 PASS 330, FAIL 1(15번)이다.
+- **관문 결함 수정 `bdff48f`:** `verify.sh`의 `run_real`이 마지막 시나리오 파일의 종료 코드만 돌려줘서, 앞 파일이 실패해도 `offline`이 0이었다. 지금은 하나라도 실패하면 1이다. 이전 기록의 "FAIL 0"은 출력 줄을 세어 확인한 값이라 유효하다. 지금 `verify.sh offline`과 `real`은 15번 때문에 종료 코드 1이다.
+
+### 남은 판단 1: 시나리오 15 (하루 읽기 총량, 일부러 실패로 둠)
+- 관측: 전환기 읽기 1회에 Firestore 읽기가 3번 든다(회원 문서 1, 가족 문서 1, 규칙 평가 1). 설계 4.1 표는 2번으로 잡았다. 그래서 하루 720회가 표 상한 576회를 넘는다.
+- 원인: `familyMigration.ts:1230`이 전환기 읽기마다 `ensureFirestoreMembership`을 부르고, 그 함수가 `firestoreImport.ts:135`에서 `members/<uid>`를 읽는다.
+- **권장(메인 세션 판단):** 코드를 고친다. 회원 확인을 이 프로세스의 메모리에 키와 uid 단위로 기억하고, 가족 문서 읽기가 `denied`일 때만 기억을 지운 뒤 회원 확인을 다시 한다. 그러면 표와 같은 2회가 된다. 50줄 이하이므로 직접 고치거나 t1-worker에 맡긴다. 고친 뒤 `HARNESS_ONLY=15 bash tools/sync-harness/verify.sh scenario real-scenarios-4a.mjs`, 그다음 `verify.sh offline`이 종료 코드 0이어야 한다. 변이 "회원 확인 기억 빼기 → 15 실패"를 `07` 5.3에 한 줄 더한다.
+- 대안은 표를 기기당 864회로 고치는 것이다(전체 합계는 한도의 약 73%). 이 경우 시나리오 15의 상한도 바꾼다. 7장에 추정값으로 적힌 값이라 성기님 승인이 필요한 항목은 아니다.
+
+### 남은 판단 2: 리뷰에서 함께 볼 것 (B8)
+- B3 판단 7(7단계 업로드 `failed` 뒤 재시도가 앱 재시작까지 없을 수 있음), 24장의 B3 판단 1~8, B4 판단 1~7.
+- 4b 작업자의 결함 의심(경미): 평소 요청 R0가 이어 가기로 끝나는 회차와 7단계 요청이 합쳐지면, 사건이 모두 `requestId=1`이 되어 `d1UploadedAt`이 다음 평소 요청까지 적히지 않는다. 기록은 사라지지 않고 완료만 늦어진다. 의심 위치는 `syncRunner.ts`의 `enqueue`(합쳐진 요청의 `requestId`, 이어 가기의 `parentRequestId`)이고, 20번은 이 경우를 피해 두 구성으로 나눴다.
+- 4a 작업자 관찰: 연결된 기기가 다른 가족에 합류하려 하면 "Sync is not connected"로 실패한다(설계에 없는 동작). 시나리오 15의 첫 이전 행은 1% 여유, 시나리오 7의 관문 `deleted` 변이는 타임아웃으로 잡힌다.
+- 4b의 약한 판정: 24(서버 문장 사이 경쟁은 소스 검사), 23("D1 요청 0회"는 push/pull/token 0건으로 판정), 32(교착 대신 응답 시간), 28(가족 목록은 시드한 키).
+- `verify.sh scenario`는 경로가 아니라 파일 이름만 받는다(`verify.sh scenario real-scenarios-4a.mjs`).
+
+### 다음 세션이 할 일 (이 순서대로)
+1. `git log --oneline -4`로 맨 위가 이 문서 커밋이고 그 아래가 `654948c`, `bdff48f`인지, 작업 트리가 깨끗한지 확인한다.
+2. 남은 판단 1(시나리오 15)을 처리한다. 권장안대로 코드를 고친 뒤 `tsc` 두 개, `test:voice`, `verify.sh offline`(종료 코드 0, FAIL 0), `verify.sh rules`를 직접 돌리고 커밋한다.
+3. B8: 독립 리뷰 2개를 동시에 맡긴다(결론은 넘기지 않고 문서와 코드 위치만 준다). 범위는 `git diff 92561b4..HEAD`다.
+   - 리뷰 1: 서버(`server/src/index.ts`)와 이전 모듈(`familyMigration.ts`, `migrationDecision.ts`, `firestoreImport.ts`, `storage.ts`의 B2 부분, `syncRunner.ts`)을 `07` 0장, 2장과 대조한다.
+   - 리뷰 2: App·Profile, 하네스(`real-scenarios-4a/4b`, 가짜 Firestore), 점검 스크립트를 `07` 2.8~2.11, 5장과 대조한다. 헛도는 판정이 있는지 본다.
+   - 심각도, file:line, 재현 시나리오를 요구한다. 남은 판단 2의 항목을 함께 넘긴다.
+4. 집계: 지적마다 근거를 확인해 채택·기각을 정하고 `04-검증.md`에 표로 적은 뒤 반영한다(최대 3회).
+5. `07` 5.3 변이 표 전체를 저장소에서 하나씩 넣었다가 원복하며 확인한다. 반드시 순서대로 하나씩 하고, 매번 `git diff -- src server App.tsx`가 비었는지 확인한다. 4a·4b 작업자의 변이 스크립트 `/private/tmp/claude-501/-Users-seonggi-Desktop-PDS-dev-baby-check-cloudflare/51506924-fdb8-4c27-876f-4c249733ba8f/scratchpad/mutate.py`가 남아 있으면 참고할 수 있다. 결과는 `04-검증.md`에 적고 커밋한다.
+6. 그 뒤 18장 순서: 실데이터 점검(읽기 전용, `07` 6장) → Worker 배포(`server/deploy.sh`) → 푸시·PR·머지 → Play Alpha 업로드(1.8.0 코드 28, 파일 선택은 성기님) → 원스토어 APK → (출시 뒤) Firestore 운영자 정리와 정리 전 점검(`tools/firestore-cleanup-check/run.mjs`). **모두 승인 전**이고, 실행 직전에 그때까지의 검증 결과와 함께 성기님에게 확인한다.
+- 이미 받은 결정: `07` 4판은 검토 없이 구현한다. 앱은 Firestore 문서를 지우지 않는다. 로컬 커밋은 해도 된다.
+- 하지 말 것: 5장 그대로. 작업자는 커밋하지 않는다. 여러 프로세스를 띄우는 검사는 `ulimit -u` 상한 안에서 돌린다. 두 작업자가 동시에 저장소에 변이를 넣지 않게 한다(이번에는 동시에 넣었지만 서로 다른 파일이라 사고가 없었다).
