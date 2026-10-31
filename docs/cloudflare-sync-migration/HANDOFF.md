@@ -455,3 +455,11 @@
 ### 다음 할 일
 1. (완료) 성기님이 인증 메일과 workers.dev 이름 정하기를 마치면 `bash server/deploy.sh`를 다시 돌린다(승인 받음). 그 뒤 28장 3·4번(응답 확인, `cloudConfig.ts` 커밋, 전체 검사)을 한다.
 2. 그 뒤 푸시·PR·머지 → Play Alpha AAB(1.8.0 코드 28) → 원스토어 APK. **모두 승인 전**이다.
+- **성기님 승인(2026-10-31): "진행해"로 푸시·PR·머지를 승인했다.** PR #15(https://github.com/SeongGi/baby_check/pull/15)를 만들었고, CI가 없어 `mergeStateStatus: CLEAN`을 확인한 뒤 머지 커밋으로 합쳤다(`6cf8027`). 합친 master와 이 워크트리의 코드는 같다.
+- 이 워크트리의 `android/`에는 저장소가 관리하는 파일만 있어서 `gradlew`가 없었다. 원래 저장소 `../baby-check/android/`에서 빠진 파일만 `rsync --ignore-existing`(build, .gradle, .cxx 제외)으로 복사했다. 원래 저장소는 고치지 않았고, 두 저장소의 관리 대상 파일 중 다른 것은 버전을 올린 `android/app/build.gradle` 하나다.
+- Play용 AAB를 만들었다: `android/app/build/outputs/bundle/release/app-release.aab`(65,515,164바이트). 서명 SHA-256은 EAS 키 `6A:92:…:09:ED:73`이고, 매니페스트에는 `1.8.0`만 있으며, JS 묶음에 새 Worker 주소가 1회 있고 옛 임시 주소는 0회다.
+
+### 다음 할 일 (승인 전)
+1. Play Alpha 업로드: 비어 있는 Alpha 초안(release 13)을 재사용한다. 파일 선택은 성기님에게 부탁한다(`⌘⇧G` → 위 AAB 경로 붙여넣기).
+2. 원스토어 APK: `EXPO_PUBLIC_DISTRIBUTION_STORE=onestore ./gradlew app:assembleRelease`(EAS 키). 등록 절차는 `docs/ONESTORE_RELEASE.md`.
+3. (출시 뒤) Firestore 운영자 정리와 정리 전 점검.
