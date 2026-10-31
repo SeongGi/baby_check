@@ -438,3 +438,17 @@
 5. 18장 다음 순서: 푸시·PR·머지 → Play Alpha 업로드(1.8.0 코드 28, 파일 선택은 성기님) → 원스토어 APK. **모두 승인 전**이고, 실행 직전에 검증 결과와 함께 성기님께 확인한다.
 - 보고 방식: 성기님 요청으로 쉬운 말로 먼저 요약하고(좋음/문제), 용어는 풀어서 쓴다.
 - 하지 말 것: 5장 그대로. Firestore에 쓰거나 지우지 않는다. 서비스 계정 키를 저장소에 넣거나 화면에 출력하지 않는다.
+
+## 29. 진행 기록 (2026-10-31, 세션 65c1a118)
+- 이 세션 ID: `65c1a118-2ed4-45ea-ab9f-b734dbf2faa8` (`claude --resume`으로 복구할 수 있다)
+- 28장 1번: 맨 위가 `82d40cb`이고 작업 트리가 깨끗한 것을 확인했다.
+- 28장 2번: 성기님은 아직 Cloudflare 인증 메일을 받지 못했다. 대시보드는 로그인이 필요해서 메일 다시 보내기를 대신하지 못했다. 성기님이 시크릿 창에서 로그인해 다시 보내기와 workers.dev 이름 정하기를 하기로 했다. 그동안 막히지 않은 일을 먼저 하라고 지시했다.
+- `server/schema.sql`은 모두 `CREATE TABLE IF NOT EXISTS`, `CREATE INDEX IF NOT EXISTS`이다. 그래서 `bash server/deploy.sh`를 그대로 다시 돌려도 된다(D1은 기존 id를 찾아 쓴다).
+- `40e24ad`: 버전을 1.8.0(코드 28)으로 올렸다. `app.json`, `package.json`, `package-lock.json`, `android/app/build.gradle`이 모두 1.7.9(27)에 머물러 있었다.
+- `d799b4e`: `docs/ONESTORE_RELEASE.md`의 서명 키를 EAS 키로 고치고 지문 전체(`6A:92:D3:E2:…:09:ED:73`)를 적었다.
+- 전체 검사(`ulimit -u` 상한 안, 버전 변경 전 코드 기준이며 버전 숫자는 검사에 영향을 주지 않는다): `tsc` 두 개 0, `test:voice` 0(52/8/6), `verify.sh offline` 0(PASS 351, FAIL 0, 4c 15/15), `verify.sh rules` 0(8/8).
+- 현재 `src/database/cloudConfig.ts`의 `DEFAULT_WORKER_URL`은 하위 도메인이 빠진 임시 값 `https://baby-check-sync.workers.dev`이다. 실제 주소는 `https://baby-check-sync.<하위 도메인>.workers.dev`가 된다. **배포 전에는 Play·원스토어 빌드를 만들지 않는다.**
+
+### 다음 할 일
+1. 성기님이 인증 메일과 workers.dev 이름 정하기를 마치면 `bash server/deploy.sh`를 다시 돌린다(승인 받음). 그 뒤 28장 3·4번(응답 확인, `cloudConfig.ts` 커밋, 전체 검사)을 한다.
+2. 그 뒤 푸시·PR·머지 → Play Alpha AAB(1.8.0 코드 28) → 원스토어 APK. **모두 승인 전**이다.
