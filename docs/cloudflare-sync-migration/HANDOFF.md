@@ -338,3 +338,14 @@
   8. 전환기 읽기 실패는 이전 단계와 같은 실패 간격을 쓰고, 14일 종료는 적용하지 않는다.
 - B5가 알아야 할 점: 가짜 Firestore는 `MigratorFirestore`의 함수 9개를 모두 내야 한다. `loadFirestore`를 주입하지 않은 기본 경로 기기도 하나 둔다(지연 import 판정). 시계와 타이머는 `now`·`setTimer`·`clearTimer`로 주입한다.
 - 23장 3번 진행 중: B4(App·Profile 연결)를 t1-worker에 맡겼다. 작업자는 커밋하지 않는다. 이어받는 세션은 완료 알림을 받지 못하므로, `git status`로 `App.tsx`, `src/screens/Profile.tsx` 변경을 보고 23장의 검사(`tsc` 두 개, `test:voice`, `verify.sh offline` PASS 271 이상, 금지 grep, `07` 5.4)를 직접 돌린 뒤 판단한다.
+- 23장 3번: B4를 메인 세션이 다시 검사해 `84bdddf`로 커밋했다. `tsc` 두 개 0, `test:voice` 0, `verify.sh offline` 0(PASS 271, FAIL 0), `firestoreImport`·`firebase` 정적 import 없음. 직전 백업 복원은 없는 기록만 더하고(`storage.ts:1124-1158`), App의 `handleRestoredData`는 화면 상태만 바꾼다는 것을 확인했다.
+- B4 작업자의 판단(B8 리뷰에서 함께 본다):
+  1. 저장소에 개발 메뉴가 없어서 설정 화면 맨 아래에 `__DEV__` 카드를 새로 만들었다. EAS 시험 빌드에서는 보이지 않는다.
+  2. 1.7.9 상대의 변경을 받으려고 D1 토큰이 같은 폴링 주기에도 `transitionTick`을 부른다(`App.tsx:449`, 5분 간격은 모듈이 지킨다).
+  3. 실패한 합류 회차라도 `merged`면 화면에 반영한다(`App.tsx:668-674`).
+  4. 이전 단계 오류는 배너로, 사용자 동작 결과와 `info`는 경고창으로 보인다.
+  5. 설정 화면의 "지금 동기화"도 `migrationPending`이면 "이전 준비 중" 안내를 보인다.
+  6. 직전 백업 복원 뒤 대시보드로 이동한다.
+  7. 설정 화면은 이전 준비 중에 10초마다 관문을 다시 읽는다(네트워크 없음).
+- 23장 4번 진행 중: B5를 둘로 나눴다. B5a(가짜 Firestore, loader, 기기 명령, 1.7.9 흉내, 자체 점검; 소유 `tools/sync-harness/*`)와 B7(정리 전 점검; 소유 `tools/firestore-cleanup-check/*`)을 t1-worker 두 개에 동시에 맡겼다. B7의 `compare.mjs`는 `compareFamily({ firestoreLogs, d1Rows })`와 `runCleanupCheck({ keys, source })`를 내고, 시나리오 28이 이 함수를 부른다. 실데이터 어댑터(`firebase-admin`, `wrangler d1 execute --remote` SELECT)는 코드만 있고 실행하지 않는다(승인 전).
+- B5a가 끝나면 B5b로 시나리오 1~34를 두 작업자에게 나눠 맡긴다(`real-scenarios-4a.mjs` 접두어 `s4a`, `real-scenarios-4b.mjs` 접두어 `s4b`). 이어받는 세션은 완료 알림을 받지 못하므로, `git status`로 두 작업자의 변경을 보고 검사를 직접 돌린다.
