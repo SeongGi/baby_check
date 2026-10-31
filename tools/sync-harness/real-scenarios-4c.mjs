@@ -5,6 +5,9 @@
 //  C. 7단계가 실패하거나 버려져도 번호를 지우지 않아, 뒤의 평소 요청이 업로드를 마치면 완료가 적히고 ensure는 7단계를 다시 넣는다
 //  D. markUploaded가 사건을 받은 시점의 번호만 인정한다 (같은 가짜 세계)
 //  E. 병합 직후 병합 전 업로드(U1)의 성공 사건이 d1UploadedAt을 적어 병합 뒤 업로드(U2) 완료를 무시하게 하지 않는다 (같은 가짜 세계)
+//  D2. markUploaded가 getMigrationState를 기다리는 사이에 병합이 끼어들어도 d1UploadedAt을 적지 않는다 (두 번째 번호 확인)
+//  C6. 이미 넣은 7단계가 끝나기 전에 ensure를 순차로 다시 불러도 forceFullRead 요청이 늘지 않는다 (requestUpload의 'pending')
+//  P39. 장부가 6시간 안에 전체 읽기를 마친 기기가 병합한 뒤의 7단계는 forceFullRead라 전체 모드로 돈다 (실제 서버)
 //  H. 다시 읽기 결과가 예약 없음이면 promptedPendingDeletionAt을 지운다
 // 가짜 세계(`world`)는 앞의 B~E를 시간 순서까지 결정적으로 재현하려고 실제 러너(syncRunner.ts)와 실제 이전 모듈(familyMigration.ts)을
 // 그대로 쓰고 저장소, D1, Firestore, 동기화 함수만 가짜로 둡니다(관문과 번호 매기기 포함). 재현 순서는 각 시나리오 주석을 보세요.
@@ -127,6 +130,7 @@ const makeWorld = (opts = {}) => {
     state: { ...(opts.state ?? {}) },
     transition: {},
     transitionGate: null,
+    stateGate: null,
     syncCalls: [],
     syncHandlers: [],
     events: [],
@@ -136,7 +140,12 @@ const makeWorld = (opts = {}) => {
     : { uploaded: {}, tombstoned: [] });
   const storage = {
     getLegacyKeyMarker: async () => ({ checkedAt: 0, keys: (opts.evidence ?? true) ? [KEY] : [] }),
-    getMigrationState: async () => ({ ...world.state }),
+    getMigrationState: async () => {
+      // 한 번만 멈추는 문입니다(armed 뒤 첫 호출만). 멈춘 사이에 다른 호출(ensure)은 그대로 지나갑니다.
+      const held = world.stateGate;
+      if (held) { world.stateGate = null; held.reached = true; await held.promise; }
+      return { ...world.state };
+    },
     updateMigrationState: async (_key, patch) => {
       await Promise.resolve();
       const next = { ...world.state };
@@ -402,6 +411,31 @@ await inProcess('C4', '가족이 바뀐 사이에 끝난 7단계(회차 도중 �
   } finally { w.dispose(); }
 });
 
+await inProcess('C6', "진행 중인 7단계가 있으면 ensure를 순차로 여러 번 불러도 forceFullRead 요청이 더 들어가지 않는다(pending 판정)", async () => {
+  const w = makeWorld({ tag: 'C6', state: { mergeSource: 'ok', mergedAt: 1 } });
+  try {
+    // 러너 요청 기록: 이전 모듈이 러너에 넣는 요청을 그대로 센다(Promise.all로 겹쳐 부르는 C2와 달리 순차 호출이라 active 합치기로 가려지지 않는다).
+    const requested = [];
+    const originalRequest = w.runner.request;
+    w.runner.request = (request, ...rest) => { requested.push(Boolean(request.forceFullRead)); return originalRequest(request, ...rest); };
+    const hold = gate();
+    w.syncHandlers.push(async () => { await hold.promise; return {}; }); // 첫 7단계: 러너 회차를 끝내지 못하게 멈춘다
+    assert.equal((await w.migrator.ensure(w.KEY)).status, 'uploading');
+    await waitFor(() => w.syncCalls.length === 1, { label: '첫 7단계 시작' });
+    assert.deepEqual(requested, [true], '첫 ensure가 7단계 하나를 넣었다');
+    // 순차로 다시 부른다(앞의 호출이 끝난 뒤). 진행 중이므로 요청을 쌓지 않는다.
+    for (let i = 0; i < 3; i += 1) {
+      assert.equal((await w.migrator.ensure(w.KEY)).status, 'uploading');
+    }
+    assert.deepEqual(requested, [true], '진행 중인 7단계가 있는데 ensure를 순차로 다시 불러 forceFullRead 요청이 더 들어갔다');
+    hold.open();
+    await waitFor(() => typeof w.state.d1UploadedAt === 'number', { label: '7단계 완료', timeoutMs: 3_000 });
+    await settle(150);
+    assert.deepEqual(requested, [true], '완료 뒤에도 추가 요청이 없다');
+    assert.equal(w.syncCalls.length, 1, '러너 회차는 하나뿐이다');
+  } finally { w.dispose(); }
+});
+
 await scenario('C5', '실제 서버: 7단계가 서버 오류로 실패해도 뒤의 평소 동기화가 업로드를 마치면 이전이 완료되고 D1에 모든 기록이 있으며, 다음 ensure도 7단계를 다시 넣을 수 있다', ['A', 'B', 'C'], async ({ adapter, fs, A, B, C }) => {
   // (a) 평소 동기화가 마쳐 완료
   {
@@ -487,6 +521,55 @@ await inProcess('D', '장부를 읽는 사이에 7단계 번호가 바뀌면 옛
   } finally { w.dispose(); }
 });
 
+// D2: 위 D는 장부 읽기(첫 번호 확인 앞)에서만 멈춘다. 여기서는 장부 확인을 통과한 뒤 getMigrationState를 기다리는 동안 병합이 끼어든다.
+// 병합은 번호와 d1UploadedAt을 지우고(U2를 넣기 전에 멈춘다), 그 뒤 markUploaded가 이어져도 U2가 끝나기 전에는 d1UploadedAt을 적으면 안 된다.
+await inProcess('D2', 'markUploaded가 getMigrationState를 기다리는 사이에 병합이 번호를 무효로 하면 옛 업로드(U1)는 d1UploadedAt을 적지 않고 U2 완료만 인정한다', async () => {
+  const w = makeWorld({ tag: 'D2', d1: 'exists', state: {} });
+  try {
+    w.firestoreFailure = 'unavailable';
+    const hold1 = gate();
+    const hold2 = gate();
+    w.syncHandlers.push(async () => { await hold1.promise; return {}; }); // U1
+    w.syncHandlers.push(async () => { await hold2.promise; return {}; }); // U2
+    assert.equal((await w.migrator.ensure(w.KEY)).status, 'uploading', 'U1을 넣었다(Firestore 실패, 병합 없음)');
+    await waitFor(() => w.syncCalls.length === 1, { label: 'U1 시작' });
+
+    // U1 성공 → markUploaded가 장부 읽기에서 멈춘다. 장부 확인을 통과시키되 곧바로 getMigrationState에서 멈추게 문을 걸어 둔다.
+    w.ledgerGate = gate();
+    hold1.open();
+    await waitFor(() => w.ledgerGate.reached, { label: 'markUploaded가 장부를 읽는 중', timeoutMs: 3_000 });
+    const stateGate = gate();
+    w.stateGate = stateGate;
+    const ledgerGate = w.ledgerGate;
+    w.ledgerGate = null;
+    ledgerGate.open();
+    await waitFor(() => stateGate.reached, { label: 'markUploaded가 getMigrationState를 기다리는 중(장부 확인은 통과)', timeoutMs: 3_000 });
+    assert.equal(w.state.d1UploadedAt, undefined);
+
+    // 그 사이 병합이 끼어든다: 병합이 번호를 무효로 하고 d1UploadedAt을 지운 뒤 U2를 넣기 전(전환기 상태 읽기)에서 멈춘다.
+    w.firestoreFailure = null;
+    w.now += 31 * MINUTE;
+    w.transitionGate = gate();
+    const second = w.migrator.ensure(w.KEY);
+    await waitFor(() => w.transitionGate.reached, { label: '병합 직후(U2를 넣기 전)', timeoutMs: 3_000 });
+    assert.equal(w.state.mergeSource, 'ok');
+
+    // 멈췄던 markUploaded가 이어진다. 두 번째 번호 확인이 없으면 여기서 d1UploadedAt이 적힌다.
+    stateGate.open();
+    await settle(150);
+    assert.equal(w.state.d1UploadedAt, undefined, 'getMigrationState를 기다리는 사이 번호가 무효가 됐는데 옛 업로드(U1)가 d1UploadedAt을 적었다');
+
+    // U2를 넣고 끝낸다: U2가 끝나기 전에는 완료가 아니고, 끝나면 적힌다.
+    w.transitionGate.open();
+    assert.equal((await second).status, 'uploading');
+    await waitFor(() => w.syncCalls.length === 2, { label: 'U2 시작', timeoutMs: 3_000 });
+    await settle(100);
+    assert.equal(w.state.d1UploadedAt, undefined, 'U2가 끝나기 전에는 완료가 아니다');
+    hold2.open();
+    await waitFor(() => typeof w.state.d1UploadedAt === 'number', { label: 'U2 완료', timeoutMs: 3_000 });
+  } finally { w.dispose(); }
+});
+
 // ════════════════════════════════ E. 병합 직후의 병합 전 업로드 사건 ════════════════════════════════
 // 재현 순서: ① Firestore가 실패해 병합 없이 U1이 올라간다(게이트로 멈춤). ② 간격이 지나 다시 읽어 병합한다. 병합이 d1UploadedAt을 지운 뒤
 // U2를 넣기 전(전환기 상태 읽기에서 멈춤)에 ③ U1이 성공한다. 고치기 전에는 ③이 d1UploadedAt을 적어 U2가 끝나기 전에 이전이 완료로 보인다.
@@ -526,6 +609,51 @@ await inProcess('E', '병합 직후 병합 전 업로드(U1)의 성공 사건은
     await waitFor(() => typeof w.state.d1UploadedAt === 'number', { label: 'U2 완료', timeoutMs: 3_000 });
   } finally { w.dispose(); }
 });
+
+// ════════════════════════════════ P39. 병합 뒤 7단계는 forceFullRead다 (변이 표 39행) ════════════════════════════════
+// 시나리오 30(4b)은 장부가 없거나 시계를 6시간 넘게 옮겨 평소 요청도 전체 모드라 forceFullRead를 빼도 통과한다. 여기서는 장부가 1시간 전에
+// 전체 읽기를 마쳤고(6시간 이내), 평소 요청이 증분 모드임을 먼저 확인한 뒤, 병합 직후의 7단계 회차가 전체 당겨 받기(after 0)로 시작하는지 판정한다.
+const isFullPull = (r) => Boolean(r.pull) && r.pull.after[0] === 0 && r.pull.after[1] === '';
+await scenario('P39', '병합 뒤 7단계: 장부가 6시간 안에 전체 읽기를 마친 기기도 병합 직후 7단계는 전체 모드로 돌고 병합한 기록이 D1에 오른다', ['A'], async ({ harness, adapter, fs, A }) => {
+  const K = hexKey('P39');
+  const famLogs = seeds(20, 'fp-');
+  await fs.seed(K, { members: ['legacy-X'], logs: famLogs });
+  await adapter.ensureFamily(K);
+  for (const l of seeds(3, 'd1only-', 1_700_000_000_000)) await adapter.injectLog(K, l);
+  await A.send('bootApp');
+  const id = await clientIdOf(A);
+  await A.send('setTiming', { requestTimeoutMs: 8_000 });
+  await A.send('runnerReset', { timeoutMs: 20_000 });
+  const syncOf = async (from) => (await adapter.requests(from)).filter((r) => r.clientId === id && (r.kind === 'push' || r.kind === 'pull'));
+
+  // 1) Firestore가 막힌 채 병합 전 7단계가 돈다: 전체 읽기를 마쳐 장부에 lastFullReadAt이 적힌다.
+  await fs.offline(true);
+  assert.equal((await A.send('runMigration')).result.status, 'uploading');
+  const s1 = await waitFor(async () => { const s = await stateOf(A, K); return typeof s.state.d1UploadedAt === 'number' ? s : null; }, { label: '병합 전 업로드 완료', timeoutMs: 20_000 });
+  assert.equal(s1.state.mergeSource, undefined, '전제: 아직 병합하지 않았다');
+  assert.ok((await syncOf(0)).some(isFullPull), '전제: 병합 전 7단계가 전체 읽기를 마쳤다');
+
+  // 2) 1시간 뒤(6시간 이내): 평소 요청은 증분 모드다 - 이 전제가 깨지면 forceFullRead 없이도 전체 모드가 되어 판정이 무의미하다.
+  await harness.advanceClocks(HOUR);
+  const markPlain = await adapter.requestCount();
+  await A.send('runnerRequest', { request: { syncKey: K }, timeoutMs: 30_000 }, { timeoutMs: 60_000 });
+  const plain = await syncOf(markPlain);
+  assert.ok(plain.some((r) => r.pull), '전제: 평소 요청이 당겨 받기를 했다');
+  assert.ok(!plain.some(isFullPull), `전제: 장부가 6시간 안이라 평소 요청은 전체 모드가 아니다: ${JSON.stringify(plain.map((r) => r.pull))}`);
+  assert.deepEqual((await stateOf(A, K)).state.mergeSource, undefined, '전제: 평소 요청이 병합을 일으키지 않았다');
+
+  // 3) Firestore가 살아나고 병합한다. 병합 직후의 7단계 회차를 판정한다.
+  await fs.offline(false);
+  const mark = await adapter.requestCount();
+  const run = await A.send('runMigration', {}, { timeoutMs: 60_000 });
+  assert.equal(run.result.status, 'uploading', JSON.stringify(run));
+  const done = await waitMigrationComplete(A, { syncKey: K, timeoutMs: 30_000 });
+  assert.equal(done.state.mergeSource, 'ok');
+  const after = await syncOf(mark);
+  const firstPull = after.find((r) => r.pull);
+  assert.ok(firstPull && isFullPull(firstPull), `병합 뒤 7단계의 첫 당겨 받기가 전체 모드(after 0)가 아니다(forceFullRead 누락): ${JSON.stringify(after.map((r) => r.pull?.after ?? null))}`);
+  assert.deepEqual(await d1Live(adapter, K), sortedIds([...famLogs.map((l) => l.id), ...seeds(3, 'd1only-').map((l) => l.id), ...seeds(3, 'loc-').map((l) => l.id)]), '병합한 기록이 D1에 올랐다(기기 기록, D1 기록 포함)');
+}, { deviceOptions: { A: { initialStorage: make179Storage({ syncKey: hexKey('P39'), logs: seeds(3, 'loc-', 1_700_000_100_000) }) } } });
 
 // ════════════════════════════════ H. 예약이 없어지면 이미 물어본 예약 값을 지운다 ════════════════════════════════
 await scenario('H', '병합 완료 + D1 missing의 다시 읽기에서 예약이 없어졌으면(null) promptedPendingDeletionAt을 지우고 이어받는다', ['A'], async ({ fs, A, adapter }) => {
