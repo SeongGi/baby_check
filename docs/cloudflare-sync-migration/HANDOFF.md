@@ -320,3 +320,21 @@
 6. 그 뒤 18장 순서: 실데이터 점검(읽기 전용, `07` 6장) → Worker 배포 → 푸시·PR·머지 → Play Alpha 업로드 → 원스토어 APK → (출시 뒤) Firestore 운영자 정리. **모두 승인 전**이고, 실행 직전에 그때까지의 검증 결과와 함께 성기님에게 확인한다.
 - 이미 받은 결정: `07` 4판은 검토 없이 구현한다(2026-10-31). 앱은 Firestore 문서를 지우지 않는다. 로컬 커밋은 해도 된다.
 - 하지 말 것: 5장 그대로. 작업자는 커밋하지 않고, 메인 세션이 검사 출력을 직접 확인해 커밋한다. 여러 프로세스를 띄우는 검사는 `ulimit -u` 상한 안에서 돌린다.
+
+## 24. 진행 기록 (2026-10-31, 세션 51506924)
+- 이 세션 ID: `51506924-fdb8-4c27-876f-4c249733ba8f` (`claude --resume`으로 복구할 수 있다)
+- 23장 1번: 맨 위가 `1c6f7e0`이고 작업 트리가 깨끗한 것을 확인했다.
+- 23장 2번: B3를 t1-worker에 맡겼고, 결과를 메인 세션이 다시 검사해 `aaeb915`로 커밋했다.
+  - 새 `src/database/familyMigration.ts`(1353줄), `src/database/migrationDecision.ts`(299줄), `unit.mjs` 단위 검사 60개 추가.
+  - 메인 세션 검사: `tsc` 두 개 0, `test:voice` 0, `verify.sh offline` 종료 코드 0(PASS 271, FAIL 0, 단위 112/112), 금지 grep 결과 없음. "삭제에 따르기"는 이 기기의 `syncKey`만 비우고 기록은 지우지 않는 것을 코드에서 확인했다(`familyMigration.ts:652-657`, `07` 2.4.1 4번과 같음).
+- B3 작업자의 판단(B8 리뷰에서 함께 본다):
+  1. 순수 함수를 계획보다 더 뺐다(`decideFamilyAction`, `decideTransition`, `isPartnerSeen`, `shouldMarkD1Uploaded`, `shouldPromptPendingDeletion`, `shouldGiveUpFirestoreRead`).
+  2. `.delete(` grep 때문에 Map/Set 대신 `Record`에 `undefined`를 적는다.
+  3. 페이지 크기 절반 줄이기(2.3)는 메모리에만 둔다. 앱을 다시 켜면 500건으로 돌아간다.
+  4. `blockedSince`를 가족 문서 없음(absent)에도 적는다(2.5 규칙을 따름, 2.2 필드 설명과 다름).
+  5. `missing` 맥락의 "나중에"는 저장하지 않고 이번 실행에서만 다시 묻지 않는다. `exists`·`transition` 맥락은 "나중에"도 적는다.
+  6. `legacyJoin`의 `baselineChangedAt`은 기존 값이 있으면 더 작은 쪽을 둔다.
+  7. 7단계 업로드가 `failed`로 끝나면 `uploadRequestIds`를 비운다. D1이 `exists`인 키는 관문이 `ensure`를 부르지 않으므로, 앱을 다시 켜기 전에는 7단계를 다시 하지 않을 수 있다. **리뷰에서 결함인지 판정한다.**
+  8. 전환기 읽기 실패는 이전 단계와 같은 실패 간격을 쓰고, 14일 종료는 적용하지 않는다.
+- B5가 알아야 할 점: 가짜 Firestore는 `MigratorFirestore`의 함수 9개를 모두 내야 한다. `loadFirestore`를 주입하지 않은 기본 경로 기기도 하나 둔다(지연 import 판정). 시계와 타이머는 `now`·`setTimer`·`clearTimer`로 주입한다.
+- 23장 3번 진행 중: B4(App·Profile 연결)를 t1-worker에 맡겼다. 작업자는 커밋하지 않는다. 이어받는 세션은 완료 알림을 받지 못하므로, `git status`로 `App.tsx`, `src/screens/Profile.tsx` 변경을 보고 23장의 검사(`tsc` 두 개, `test:voice`, `verify.sh offline` PASS 271 이상, 금지 grep, `07` 5.4)를 직접 돌린 뒤 판단한다.
