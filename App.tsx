@@ -766,6 +766,8 @@ function MainApp() {
         if (result.merged) {
           setLogs(result.logs);
           setProfile(result.profile);
+          // 동기화로 다른 기기의 수유 기록이 들어왔을 수 있으므로 다른 기록 경로처럼 알림을 다시 맞춥니다.
+          void refreshFeedingReminder(result.logs, result.profile);
         }
       }).catch(error => console.warn(failureLabel, error));
     }
@@ -786,6 +788,15 @@ function MainApp() {
     const success = await deleteDiaryGroup({ diaryDate: date, role });
     if (!success) return false;
     await afterDiaryWrite('Background diary delete sync failed');
+    return true;
+  };
+
+  // 일기 화면의 댓글 삭제 전용입니다. handleDeleteLog는 다른 화면도 쓰고 실패를 알리지 않으므로,
+  // deleteLog의 결과(참/거짓)를 화면에 돌려줘 실패하면 화면이 안내하게 합니다. 동기화 조건은 handleDeleteLog와 같습니다.
+  const handleDeleteDiaryComment = async (id: string): Promise<boolean> => {
+    const success = await deleteLog(id);
+    if (!success) return false;
+    await afterDiaryWrite('Background diary comment delete sync failed');
     return true;
   };
 
@@ -942,7 +953,7 @@ function MainApp() {
             onSaveDiaryLine={handleSaveDiaryLine}
             onDeleteDiaryGroup={handleDeleteDiaryGroup}
             onAddLog={handleAddLog}
-            onDeleteLog={handleDeleteLog}
+            onDeleteComment={handleDeleteDiaryComment}
             onNavigate={setActiveScreen}
           />
         );

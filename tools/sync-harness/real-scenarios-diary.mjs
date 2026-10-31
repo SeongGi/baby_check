@@ -19,6 +19,7 @@ import { startRealHarness, loaderArgs } from './real-harness.mjs';
 
 const SRC = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../../src');
 const diary = await import(`${SRC}/utils/diary.ts`);
+const { stableValue } = await import(`${SRC}/database/storage.ts`);
 
 const ONLY = process.env.HARNESS_ONLY ? process.env.HARNESS_ONLY.split(',').map((s) => s.trim()) : null;
 const results = [];
@@ -28,6 +29,8 @@ const scenario = async (id, title, deviceNames, fn) => {
   if (ONLY && !ONLY.includes(id)) return;
   const started = Date.now();
   let harness = null;
+  // 파일을 읽을 때 한 번이 아니라 시나리오가 시작될 때 오늘 날짜를 정해, 자정을 넘겨 도는 실행에서도 한 시나리오 안에서는 같은 날짜를 씁니다.
+  TODAY = diary.toDiaryDate(Date.now());
   try {
     harness = await startRealHarness({ devices: deviceNames });
     const { server, devices } = harness;
@@ -57,7 +60,8 @@ async function sync(device) {
 }
 
 const logsOf = async (device) => (await device.send('getLogs')).logs;
-const TODAY = diary.toDiaryDate(Date.now());
+// 시나리오마다 시작할 때 정해지며(scenario 함수), 그 시나리오 안에서는 바뀌지 않습니다.
+let TODAY = diary.toDiaryDate(Date.now());
 
 // 기기의 저장 파일에 대고 saveDiaryLine 또는 deleteDiaryGroup을 실행하는 별도 프로세스입니다(위 머리말 참고).
 const DIARY_OP_SCRIPT = `
@@ -187,10 +191,12 @@ await scenario('DY1', '엄마 기기의 줄과 아빠 기기의 댓글이 작성
   assert.ok((await adapter.logs(key)).deleted.includes(line.id), '서버에 삭제 표식이 없다');
 
   // 일기 아닌 기존 기록은 두 기기 모두 그대로다.
+  // 기록 전체(모든 칸)를 stableValue로 대조합니다. 서버를 오가며 정당하게 바뀌는 칸은 없어, 제외하는 칸이 없습니다
+  // (updatedAt도 서버가 기록을 그대로 보관하므로 그대로여야 합니다).
   const sameStable = async (device) => {
     const base = (await logsOf(device)).filter((l) => l.type !== 'diary' && l.type !== 'diaryComment');
-    return JSON.stringify(base.map((l) => [l.id, l.timestamp, l.amount, l.updatedAt]).sort())
-      === JSON.stringify(baseBefore.map((l) => [l.id, l.timestamp, l.amount, l.updatedAt]).sort());
+    const canon = (logs) => logs.map((l) => stableValue(l)).sort();
+    return JSON.stringify(canon(base)) === JSON.stringify(canon(baseBefore));
   };
   assert.ok(await sameStable(A), 'A의 기존 기록이 달라졌다');
   assert.ok(await sameStable(B), 'B의 기존 기록이 달라졌다');

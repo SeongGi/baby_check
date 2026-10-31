@@ -9,6 +9,7 @@ import {
   isDiaryLog,
   isValidDiaryDate,
   makeDiaryId,
+  toDiaryDate,
 } from '../utils/diary';
 import { isCompleteSharedProfile, SyncLimits } from './syncDecision';
 
@@ -339,11 +340,13 @@ export const saveDiaryLine = async (input: {
       const text = input.text.trim();
       const length = countCodePoints(text);
       if (length < 1 || length > DIARY_MAX_LENGTH) return null;
+      const now = input.now ?? Date.now();
+      // 'YYYY-MM-DD'는 문자열 비교가 날짜 순서입니다. 저장 시각 기준 오늘보다 뒤 날짜인지 봅니다.
+      const isFutureDate = input.diaryDate > toDiaryDate(now);
 
       // 읽기가 실패(손상 포함)하면 예외로 빠져 아무것도 쓰지 않습니다.
       const logs = await readLogsUnsafe();
       const profile = await readProfileUnsafe();
-      const now = input.now ?? Date.now();
 
       const target = input.targetId ? logs.find(log => log.id === input.targetId) : undefined;
       if (target && isDiaryLog(target)
@@ -355,6 +358,10 @@ export const saveDiaryLine = async (input: {
         );
         return updated;
       }
+
+      // 미래 날짜에는 새 줄을 만들지 않습니다. 시계가 앞서 있던 기기에서 이미 쓴 미래 날짜 줄은
+      // 바로 위의 고치기 경로로 고칠 수 있게 둡니다(그렇지 않으면 그 날짜가 올 때까지 고칠 길이 없습니다).
+      if (isFutureDate) return null;
 
       // 처음 쓰거나, 고르던 줄이 사라졌거나, 날짜·역할이 달라졌으면 새 줄을 만듭니다.
       const usedIds = new Set<string>([...logs.map(log => log.id), ...(profile.deletedLogIds || [])]);

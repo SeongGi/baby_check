@@ -113,6 +113,28 @@ check('makeDiaryId: 매번 다르다', new Set(Array.from({ length: 200 }, () =>
   check('숨은 줄 수에는 본문이 빈 줄을 넣지 않는다', hiddenWithEmpty.hidden.length === 0);
 }
 
+// ═════════ updatedAt이 숫자가 아닌 줄 ═════════
+{
+  // 형식 검사는 updatedAt의 형을 보지 않으므로 문자열 updatedAt인 줄도 통과해 남습니다(지우지 않음). 시각 비교에서는 timestamp를 씁니다.
+  const strA = { ...diaryLine('a', DAY, 'mom', '문자열 시각 줄', 0), timestamp: 300, updatedAt: 'zzz' };
+  const numB = diaryLine('b', DAY, 'mom', '숫자 시각 줄', 250);
+  const nanC = { ...diaryLine('c', DAY, 'mom', '무한 시각 줄', 0), timestamp: 100, updatedAt: Infinity };
+  check('문자열·무한대 updatedAt인 줄도 형식 검사를 통과해 남는다(검사를 좁히지 않음)',
+    diary.isDiaryLog(strA) && diary.isDiaryLog(nanC) && diary.diaryGroupLines([strA, numB, nanC], DAY, 'mom').length === 3);
+  const orders = [[strA, numB, nanC], [nanC, numB, strA], [numB, strA, nanC], [numB, nanC, strA], [strA, nanC, numB], [nanC, strA, numB]];
+  check('pickDiaryLine: 문자열 updatedAt은 timestamp로 비교하고, 입력 순서를 바꿔도 같은 줄(a)을 고른다',
+    orders.every((order) => diary.pickDiaryLine(order, DAY, 'mom')?.id === 'a'),
+    orders.map((order) => diary.pickDiaryLine(order, DAY, 'mom')?.id).join());
+  check('diaryGroupLines·groupDiaryByDate: 순서를 바꿔도 같은 순서·같은 보이는 줄',
+    orders.every((order) => diary.diaryGroupLines(order, DAY, 'mom').map((l) => l.id).join() === 'a,b,c'
+      && diary.groupDiaryByDate(order)[0].entries[0].line.id === 'a'));
+  // 같은 timestamp의 숫자 updatedAt이 더 큰 줄과 문자열 updatedAt인 줄: 문자열은 timestamp(100)로 계산되어 져야 한다
+  const strLow = { ...diaryLine('x', DAY, 'dad', '낮은 문자열', 0), timestamp: 100, updatedAt: '999999999999999' };
+  const numHigh = diaryLine('y', DAY, 'dad', '높은 숫자', 200);
+  check('숫자처럼 보이는 문자열 updatedAt도 숫자로 치지 않는다(timestamp 100 < 200)',
+    diary.pickDiaryLine([strLow, numHigh], DAY, 'dad')?.id === 'y' && diary.pickDiaryLine([numHigh, strLow], DAY, 'dad')?.id === 'y');
+}
+
 // ═════════ 형식 검사 ═════════
 {
   const broken = [
@@ -226,23 +248,63 @@ check('makeDiaryId: 매번 다르다', new Set(Array.from({ length: 200 }, () =>
     logs.length === 2 && logs.some((l) => l.id === 'urine-1') && logs.some((l) => l.id === 'cm-same'));
 }
 
+// types.ts의 일기 아닌 기록 종류를 돌려 가며 만든 기록(필드 모양이 종류마다 다름). 일기 댓글도 일기가 아니므로 포함합니다.
+const mixedBase = (count) => Array.from({ length: count }, (_, i) => {
+  const timestamp = 1_700_000_000_000 + i * 1000;
+  const common = { id: `mx${i}`, timestamp, updatedAt: timestamp + 7, notes: `메모${i}` };
+  switch (i % 11) {
+    case 0: return { ...common, type: 'formula', feedingType: 'mixed', amount: 120, formulaAmount: 80, breastAmount: 40, temperature: 'warm' };
+    case 1: return { ...common, type: 'urine', wetness: 'medium', color: 'clear' };
+    case 2: return { ...common, type: 'stool', color: 'green', consistency: 'soft', amount: 'large' };
+    case 3: return { ...common, type: 'bath', bathType: 'quick', durationMinutes: 12 };
+    case 4: return { ...common, type: 'weight', weightKg: 4.25 };
+    case 5: return { ...common, type: 'temperature', temperatureC: 36.8 };
+    case 6: return { ...common, type: 'sleep', endedAt: timestamp + 3_600_000 };
+    case 7: return { ...common, type: 'sleep' }; // 진행 중인 수면
+    case 8: return { ...common, type: 'tummyTime', endedAt: timestamp + 600_000 };
+    case 9: return { ...common, type: 'play' };
+    default: return { ...common, type: 'diaryComment', parentId: 'seed-diary', diaryDate: '2026-10-20', authorRole: i % 2 ? 'dad' : 'mom' };
+  }
+});
+
 {
-  // 일기 아닌 기록 2,439건을 넣고 쓰기·삭제를 반복
-  const base = Array.from({ length: 2439 }, (_, i) => formula(i));
-  await reset(base);
-  const baseProfile = await readProfileRaw();
+  // 일기 아닌 기록 2,439건(여러 종류)과 가족 연결·알림이 설정된 프로필을 넣고 쓰기·삭제를 반복
+  const base = mixedBase(2439);
+  const seedDiary = diaryLine('seed-diary', '2026-10-20', 'dad', '미리 있던 아빠 줄', 1_700_000_000_000);
+  const startProfile = {
+    name: '아기', birthDate: '2026-01-01', birthWeight: '3.2', targetFormula: 750,
+    syncKey: 'FAMILY-KEY-0123456789', updatedAt: 1_700_000_500_000, sharedUpdatedAt: 1_700_000_400_000,
+    deletedLogIds: ['old-gone-1', 'old-gone-2', 'old-gone-3'],
+    feedingReminderEnabled: true, feedingIntervalMinutes: 240,
+    nextFeedingAt: 1_700_000_900_000, nextFeedingForLogId: 'mx0', diaryRole: 'mom',
+  };
+  await reset([...base, seedDiary], startProfile);
+  const profileBefore = await readProfileRaw();
+  const returns = [];
   for (let round = 0; round < 6; round += 1) {
     const day = diary.shiftDiaryDate(DAY, -round);
-    await save(`${round}번째 줄`, { date: day, role: 'mom', now: NOW + round });
-    await save(`${round}번째 수정`, { date: day, role: 'mom', now: NOW + round + 1 });
-    await save(`${round}번째 아빠`, { date: day, role: 'dad', now: NOW + round });
-    if (round % 2 === 0) await storage.deleteDiaryGroup({ diaryDate: day, role: 'mom' });
+    returns.push(await save(`${round}번째 줄`, { date: day, role: 'mom', now: NOW + round }));
+    returns.push(await save(`${round}번째 수정`, { date: day, role: 'mom', now: NOW + round + 1 }));
+    returns.push(await save(`${round}번째 아빠`, { date: day, role: 'dad', now: NOW + round }));
+    if (round % 2 === 0) returns.push(await storage.deleteDiaryGroup({ diaryDate: day, role: 'mom' }));
   }
   const logs = await readLogsRaw();
+  const profileAfter = await readProfileRaw();
   const nonDiary = logs.filter((l) => l.type !== 'diary');
-  check('일기 아닌 기록 2,439건이 쓰기·삭제를 반복한 뒤에도 id별 내용이 같다', nonDiary.length === 2439 && sameById(base, nonDiary), `non-diary=${nonDiary.length}`);
-  check('반복 뒤 일기 줄 수가 맞다(아빠 6 + 엄마 3)', logs.filter((l) => l.type === 'diary').length === 9);
-  void baseProfile;
+  check('모든 일기 저장·고치기·묶음 삭제의 반환값이 성공이다(저장은 줄 객체, 삭제는 true)',
+    returns.length === 21 && returns.every((r) => r === true || (r && r.type === 'diary')), JSON.stringify(returns.map((r) => !!r)));
+  check('여러 종류의 일기 아닌 기록 2,439건(댓글 포함)이 쓰기·삭제를 반복한 뒤에도 id별 내용까지 그대로다',
+    nonDiary.length === 2439 && sameById(base, nonDiary), `non-diary=${nonDiary.length}`);
+  check('반복 뒤 일기 줄 수가 맞다(아빠 6 + 엄마 3 + 미리 있던 줄 1)', logs.filter((l) => l.type === 'diary').length === 10);
+  check('미리 있던 일기 줄(다른 날짜)은 그대로다', sameById([seedDiary], logs.filter((l) => l.id === 'seed-diary')));
+  // 묶음 삭제가 프로필을 쓰며 실제로 바꾸는 칸은 deletedLogIds와 updatedAt뿐이다(saveDiaryLine은 프로필을 쓰지 않는다).
+  const withoutChanging = (p) => { const { deletedLogIds, updatedAt, ...rest } = p; return rest; };
+  check('프로필: deletedLogIds와 updatedAt을 뺀 나머지 칸(syncKey·알림 설정·공유 시각·역할 등)이 전부 그대로다',
+    storage.stableValue(withoutChanging(profileAfter)) === storage.stableValue(withoutChanging(profileBefore)),
+    `${storage.stableValue(withoutChanging(profileBefore))} -> ${storage.stableValue(withoutChanging(profileAfter))}`);
+  check('프로필: 기존 deletedLogIds가 모두 남고 삭제한 일기 줄 id가 더해졌다',
+    startProfile.deletedLogIds.every((id) => profileAfter.deletedLogIds.includes(id)) && profileAfter.deletedLogIds.length > startProfile.deletedLogIds.length);
+  check('프로필: updatedAt은 묶음 삭제로 앞으로만 간다', profileAfter.updatedAt > profileBefore.updatedAt);
 }
 
 {
@@ -261,6 +323,34 @@ check('makeDiaryId: 매번 다르다', new Set(Array.from({ length: 200 }, () =>
     const refused = await save('나'.repeat(230), { date: '2026-10-01' });
     return refused === null && (await readLogsRaw())[0].notes === '가'.repeat(230);
   })());
+  // 저장 함수가 쓰는 현재 시각(now) 기준으로 오늘보다 뒤 날짜는 아무것도 쓰지 않고 null
+  const futureProfile = { name: '아기', birthDate: '2026-01-01', birthWeight: '3.2', targetFormula: 800, deletedLogIds: ['t1'] };
+  await reset([formula(1), diaryLine('keep', DAY, 'mom', '그대로', 10)], futureProfile);
+  const rawLogsBefore = await rawStorage.getItem(LOGS_KEY);
+  const rawProfileBefore = await rawStorage.getItem(PROFILE_KEY);
+  const futureTomorrow = await save('내일 일기', { date: '2026-11-02' });
+  const futureFar = await save('먼 미래 일기', { date: '2099-01-01', role: 'dad', targetId: null });
+  check('미래 날짜(내일, 먼 미래)는 거부(null)하고 저장소 내용이 한 글자도 바뀌지 않는다',
+    futureTomorrow === null && futureFar === null
+    && (await rawStorage.getItem(LOGS_KEY)) === rawLogsBefore && (await rawStorage.getItem(PROFILE_KEY)) === rawProfileBefore);
+  // 시계가 앞서 있던 기기에서 넘어온 미래 날짜 줄: 새 줄은 못 만들지만 그 줄 고치기는 된다
+  const futureLine = diaryLine('future-mom', '2026-11-03', 'mom', '시계가 앞선 기기의 줄', 10);
+  await reset([formula(1), futureLine], futureProfile);
+  const futureEdit = await save('고친 미래 줄', { date: '2026-11-03', targetId: 'future-mom' });
+  const futureLogs = await readLogsRaw();
+  check('이미 있는 미래 날짜 줄은 targetId로 고칠 수 있고 줄 수가 늘지 않는다',
+    futureEdit && futureEdit.id === 'future-mom' && futureEdit.notes === '고친 미래 줄'
+    && futureLogs.length === 2 && futureLogs.find((l) => l.id === 'future-mom').notes === '고친 미래 줄');
+  const futureOther = await save('남의 미래 줄 덮기', { date: '2026-11-03', role: 'dad', targetId: 'future-mom' });
+  check('미래 날짜에서 날짜·역할이 맞지 않는 targetId는 새 줄도 만들지 않고 거부한다',
+    futureOther === null && (await readLogsRaw()).length === 2);
+  await reset([formula(1), diaryLine('keep', DAY, 'mom', '그대로', 10)], futureProfile);
+  const todaySaved = await save('오늘 일기', { date: DAY, role: 'dad' });
+  check('오늘 날짜(저장 시각 기준)는 그대로 저장된다', todaySaved && todaySaved.diaryDate === DAY);
+  const lateNight = new Date(2026, 10, 1, 23, 59).getTime();
+  check('날짜 경계: 23:59에는 오늘까지, 내일은 거부', (await save('밤 일기', { date: DAY, role: 'mom', now: lateNight })) !== null
+    && await save('자정 넘긴 일기', { date: '2026-11-02', role: 'mom', now: lateNight }) === null
+    && (await save('자정 뒤 일기', { date: '2026-11-02', role: 'mom', now: new Date(2026, 10, 2, 0, 1).getTime() })) !== null);
   check('잘못된 날짜·역할은 거부', await storage.saveDiaryLine({ diaryDate: '2026-1-1', role: 'mom', text: 'a', targetId: null }) === null
     && await storage.saveDiaryLine({ diaryDate: DAY, role: 'uncle', text: 'a', targetId: null }) === null);
 }
@@ -369,7 +459,7 @@ check('makeDiaryId: 매번 다르다', new Set(Array.from({ length: 200 }, () =>
   // 묶음 삭제는 기록과 프로필을 한 번에 저장한다(중간 실패 시 둘 다 그대로)
   const x = diaryLine('dg-1', DAY, 'mom', '줄 1', 10);
   const y = diaryLine('dg-2', DAY, 'mom', '줄 2', 20);
-  await reset([x, y, formula(1)], { name: '아기', birthDate: '2026-01-01', birthWeight: '3.2', targetFormula: 800, deletedLogIds: ['prev'] });
+  await reset([x, y, formula(1)], { name: '아기', birthDate: '2026-01-01', birthWeight: '3.2', targetFormula: 800, updatedAt: 1_700_000_500_000, sharedUpdatedAt: 1_700_000_400_000, deletedLogIds: ['prev'] });
   const beforeLogs = await rawStorage.getItem(LOGS_KEY);
   const beforeProfile = await rawStorage.getItem(PROFILE_KEY);
   storageFaults.arm({ mode: 'reject', nth: 1, keys: [LOGS_KEY, PROFILE_KEY] });
@@ -384,7 +474,8 @@ check('makeDiaryId: 매번 다르다', new Set(Array.from({ length: 200 }, () =>
   const okDel = await storage.deleteDiaryGroup({ diaryDate: DAY, role: 'mom' });
   const profile = await readProfileRaw();
   check('묶음 삭제: 성공하면 기존 삭제 표식을 유지하고 새 표식을 더한다', okDel && ['prev', 'dg-1', 'dg-2'].every((id) => profile.deletedLogIds.includes(id)));
-  check('묶음 삭제는 공유 항목 시각을 올리지 않는다', (profile.sharedUpdatedAt ?? 0) === (JSON.parse(beforeProfile).sharedUpdatedAt ?? 0));
+  check('묶음 삭제는 공유 항목 시각을 올리지 않는다(0이 아닌 값에서 출발)',
+    JSON.parse(beforeProfile).sharedUpdatedAt === 1_700_000_400_000 && profile.sharedUpdatedAt === 1_700_000_400_000, `shared=${profile.sharedUpdatedAt}`);
 }
 
 // ═════════ 프로필 역할 ═════════
@@ -476,6 +567,28 @@ check('가족 연결 없이 저장 함수만 돌리는 동안 fetch 호출 0회'
 
 // ═════════ 소스 검사 ═════════
 {
+  // App.tsx: 일기 쓰기·지우기 뒤 동기화는 가족 연결(syncKey)이 있을 때만 부른다(혼자 쓰는 기기는 네트워크 0회).
+  const appSource = readFileSync(`${SRC}/../App.tsx`, 'utf8');
+  const afterWrite = appSource.match(/const afterDiaryWrite = async \([^)]*\) => \{([\s\S]*?)\n  \};/);
+  const afterBody = afterWrite ? afterWrite[1] : '';
+  check('App.tsx afterDiaryWrite: syncLatestData는 if (profile?.syncKey) 블록 안에서만 호출된다',
+    afterWrite !== null
+    && (afterBody.match(/syncLatestData\(/g) ?? []).length === 1
+    && /if \(profile\?\.syncKey\) \{\s*void syncLatestData\(profile\.syncKey, false\)/.test(afterBody));
+  const handlerOf = (name) => (appSource.match(new RegExp(`const ${name} = async [^]*?\\n  \\};`)) ?? [''])[0];
+  check('App.tsx: 일기 저장·묶음 삭제·댓글 삭제가 모두 afterDiaryWrite로 동기화하고, 따로 syncLatestData를 부르지 않는다',
+    ['handleSaveDiaryLine', 'handleDeleteDiaryGroup', 'handleDeleteDiaryComment'].every((name) => {
+      const body = handlerOf(name);
+      return body.includes('await afterDiaryWrite(') && !/syncLatestData\(/.test(body);
+    }));
+  const commentHandler = handlerOf('handleDeleteDiaryComment');
+  check('App.tsx handleDeleteDiaryComment: deleteLog의 결과로 실패(false)를 화면에 돌려준다(기존 handleDeleteLog는 그대로)',
+    /const success = await deleteLog\(id\);\s*if \(!success\) return false;/.test(commentHandler) && /return true;/.test(commentHandler)
+    && /const handleDeleteLog = async \(id: string\) => \{\s*const success = await deleteLog\(id\);\s*if \(success\) \{/.test(appSource));
+  const diaryScreen = readFileSync(`${SRC}/screens/Diary.tsx`, 'utf8');
+  check('Diary.tsx: 댓글 삭제 실패(false 또는 예외)면 안내를 띄운다',
+    /ok = await onDeleteComment\(comment\.id\)/.test(diaryScreen) && /if \(!ok\) Alert\.alert\('삭제 실패', '댓글을/.test(diaryScreen));
+
   const diarySource = readFileSync(`${SRC}/utils/diary.ts`, 'utf8');
   check('diary.ts는 저장소·네트워크·React를 부르지 않는다(순수 함수만)',
     !/AsyncStorage|fetch\(|from\s+['"](react|react-native|expo-[^'"]*)['"]/.test(diarySource));

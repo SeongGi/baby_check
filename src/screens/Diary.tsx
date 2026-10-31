@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useState } from 'react';
+import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { Alert, ScrollView, StyleSheet, Text, TouchableOpacity, View } from 'react-native';
 import { COLORS } from '../theme/colors';
 import { BabyLogEntry, BabyProfile, DiaryCommentLog, DiaryRole } from '../types';
@@ -29,8 +29,8 @@ interface DiaryProps {
   onDeleteDiaryGroup: (date: string) => Promise<boolean>;
   /** 댓글 추가: 기존 기록 추가 함수를 넘겨받음 */
   onAddLog: (log: Omit<BabyLogEntry, 'id'>) => Promise<unknown>;
-  /** 댓글 삭제: 기존 기록 삭제 함수를 넘겨받음 */
-  onDeleteLog: (id: string) => Promise<void>;
+  /** 댓글 삭제: 성공하면 true, 실패하면 false(화면이 실패 안내를 띄움) */
+  onDeleteComment: (id: string) => Promise<boolean>;
   onNavigate: (screen: 'dashboard' | 'profile') => void;
 }
 
@@ -44,7 +44,7 @@ export const Diary: React.FC<DiaryProps> = ({
   onSaveDiaryLine,
   onDeleteDiaryGroup,
   onAddLog,
-  onDeleteLog,
+  onDeleteComment,
   onNavigate,
 }) => {
   const [now, setNow] = useState(Date.now());
@@ -59,6 +59,10 @@ export const Diary: React.FC<DiaryProps> = ({
   const [visibleDays, setVisibleDays] = useState(DAYS_PER_PAGE);
   const [pickedDate, setPickedDate] = useState(today);
   const [editor, setEditor] = useState<EditorState | null>(null);
+  // 입력 창이 닫히는 fade 동안에도 마지막으로 연 입력 창의 제목·안내문·한도로 그려 값이 바뀌어 보이지 않게 합니다.
+  const lastEditorRef = useRef<EditorState | null>(null);
+  if (editor) lastEditorRef.current = editor;
+  const shownEditor = editor ?? lastEditorRef.current;
   const [expandedHidden, setExpandedHidden] = useState<Record<string, boolean>>({});
 
   const bounds = useMemo(() => diaryDateBounds(profile.birthDate, now), [profile.birthDate, now]);
@@ -143,11 +147,13 @@ export const Diary: React.FC<DiaryProps> = ({
         text: '지우기',
         style: 'destructive',
         onPress: async () => {
+          let ok = false;
           try {
-            await onDeleteLog(comment.id);
+            ok = await onDeleteComment(comment.id);
           } catch {
-            Alert.alert('삭제 실패', '댓글을 지우지 못했어요. 잠시 뒤 다시 시도해 주세요.');
+            ok = false;
           }
+          if (!ok) Alert.alert('삭제 실패', '댓글을 지우지 못했어요. 잠시 뒤 다시 시도해 주세요.');
         },
       },
     ]);
@@ -190,6 +196,7 @@ export const Diary: React.FC<DiaryProps> = ({
             <TouchableOpacity
               onPress={() => setExpandedHidden(current => ({ ...current, [`${date}|${entry.role}`]: !hiddenOpen }))}
               accessibilityRole="button"
+              accessibilityState={{ expanded: hiddenOpen }}
             >
               <Text style={styles.hiddenNote}>
                 같은 역할로 쓴 다른 줄 {entry.hidden.length}개가 더 있어요 {hiddenOpen ? '▲' : '▼'}
@@ -255,14 +262,16 @@ export const Diary: React.FC<DiaryProps> = ({
     );
   };
 
-  const pickedLine = myRole ? pickDiaryLine(logs, pickedDate, myRole) : null;
-  const canGoBack = bounds.min === null || shiftDiaryDate(pickedDate, -1) >= bounds.min;
-  const canGoForward = shiftDiaryDate(pickedDate, 1) <= bounds.max;
-  // 날짜 선택기가 오늘보다 뒤나 생일보다 앞을 가리키지 않게 범위 안으로 맞춥니다.
-  const safePickedDate = pickedDate > bounds.max ? bounds.max : pickedDate;
+  // 날짜 선택기가 오늘보다 뒤나 생일보다 앞을 가리키지 않게 범위 안으로 맞춥니다(생일 한계가 없으면 아래쪽은 그대로).
+  // 아래 모든 계산(고른 줄, 이동 버튼 활성, 쓰기 대상)이 이 값을 씁니다.
+  const cappedPickedDate = pickedDate > bounds.max ? bounds.max : pickedDate;
+  const safePickedDate = bounds.min !== null && cappedPickedDate < bounds.min ? bounds.min : cappedPickedDate;
+  const pickedLine = myRole ? pickDiaryLine(logs, safePickedDate, myRole) : null;
+  const canGoBack = bounds.min === null || shiftDiaryDate(safePickedDate, -1) >= bounds.min;
+  const canGoForward = shiftDiaryDate(safePickedDate, 1) <= bounds.max;
 
   const roleOfEditor: DiaryRole | undefined = myRole;
-  const editorIsDiary = editor?.kind === 'diary';
+  const editorIsDiary = shownEditor?.kind === 'diary';
 
   return (
     <View style={styles.container}>
@@ -331,11 +340,11 @@ export const Diary: React.FC<DiaryProps> = ({
       <DiaryEditor
         visible={editor !== null}
         title={editorIsDiary
-          ? `${roleOfEditor ? DIARY_ROLE_EMOJI[roleOfEditor] : ''} ${editor ? formatDiaryDateLabel(editor.date) : ''} 한 줄`
+          ? `${roleOfEditor ? DIARY_ROLE_EMOJI[roleOfEditor] : ''} ${shownEditor ? formatDiaryDateLabel(shownEditor.date) : ''} 한 줄`
           : '💬 댓글 달기'}
         description={editorIsDiary ? '하루에 한 줄, 내 줄은 다시 쓰면 고쳐져요.' : undefined}
         placeholder={editorIsDiary ? '오늘 어땠나요?' : '댓글을 남겨 보세요'}
-        initialText={editor?.kind === 'diary' ? editor.initialText : ''}
+        initialText={shownEditor?.kind === 'diary' ? shownEditor.initialText : ''}
         maxLength={editorIsDiary ? DIARY_MAX_LENGTH : DIARY_COMMENT_MAX_LENGTH}
         multiline={editorIsDiary}
         saveLabel={editorIsDiary ? '저장' : '댓글 남기기'}

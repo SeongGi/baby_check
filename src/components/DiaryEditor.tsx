@@ -55,9 +55,17 @@ export const DiaryEditor: React.FC<DiaryEditorProps> = ({
   const overLimit = count > maxLength;
 
   const handleChange = (value: string) => {
-    // 입력 중에는 최대 글자 수에서 더 입력되지 않게 자릅니다. 다만 이미 한도를 넘는 원문
-    // (1.8.0에서 고친 줄)은 자르지 않고, 지우는 쪽으로는 자유롭게 줄일 수 있게 둡니다.
-    setText(clampCodePoints(value, Math.max(maxLength, countCodePoints(text))));
+    const nextCount = countCodePoints(value);
+    // 한도를 넘으면서 이전보다 길어지는 입력은 거부하고 이전 값을 그대로 둡니다. 뒤를 잘라 받으면
+    // 글 중간에 입력할 때 끝 글자가 말없이 사라지기 때문입니다. 이미 한도를 넘는 원문(1.8.0에서 고친 줄)도
+    // 길이가 늘지 않는 입력(지우기, 같은 길이로 바꾸기)은 그대로 받아 줄일 수 있습니다.
+    if (nextCount > maxLength && nextCount > count) {
+      // 빈 상태에서 긴 글을 붙여 넣은 경우만 한도까지 잘라 받습니다. 거부하면 아무 반응이 없어 보이고,
+      // 지킬 이전 글도 없어 잘라 받아도 사라지는 글자가 없습니다(카운터가 한도에 닿아 알 수 있습니다).
+      if (count === 0) setText(clampCodePoints(value, maxLength));
+      return;
+    }
+    setText(value);
   };
 
   const handleSave = async () => {

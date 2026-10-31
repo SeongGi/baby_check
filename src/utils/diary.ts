@@ -124,8 +124,13 @@ const isEmptyText = (log: { notes?: unknown }): boolean => diaryText(log).trim()
 
 // ────────────── 한 줄 고르기 ──────────────
 
-const stampOf = (log: { updatedAt?: number; timestamp: number }): number =>
-  log.updatedAt || log.timestamp || 0;
+// 형식 검사는 updatedAt의 형을 보지 않으므로(검사를 좁히면 기존 줄이 사라집니다), 여기서 유한한 숫자가 아니면
+// timestamp를 씁니다. 문자열 같은 값이 섞이면 비교가 NaN이 되어 기기마다 고르는 줄이 달라질 수 있습니다.
+const finiteOrZero = (value: unknown): number =>
+  typeof value === 'number' && Number.isFinite(value) ? value : 0;
+
+const stampOf = (log: { updatedAt?: unknown; timestamp: number }): number =>
+  finiteOrZero(log.updatedAt) || finiteOrZero(log.timestamp);
 
 /** 최근에 고친 줄이 앞에 오도록 비교합니다. 같으면 id를 코드 포인트 순서로 비교해 큰 쪽이 앞입니다. */
 const compareLinesBestFirst = (a: DiaryLog, b: DiaryLog): number => {
