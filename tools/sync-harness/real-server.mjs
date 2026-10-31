@@ -3,7 +3,7 @@
 //
 // 제어 엔드포인트(모두 POST, JSON 본문, JSON 응답). 경로가 /__harness/ 로 시작하면 Worker에 넘기기 전에 가로챕니다.
 //   clock    {set: ms} 고정 시각으로 맞춤 | {advance: ms} 진행 | {real: true} 실제 시각으로 복귀 | {} 조회
-//   hold     {op:'add', match, at?, delayMs?, skip?, times?} 조건에 맞는 요청이나 배치를 멈춤 -> {ruleId}
+//   hold     {op:'add', match, at?, delayMs?, skip?, times?} 조건에 맞는 요청, 배치, 문장을 멈춤 -> {ruleId}
 //            {op:'list'} -> {rules, held} | {op:'remove', ruleId} | {op:'clear'}
 //   release  {id} | {ruleId} | {all: true} 멈춘 것을 풀어 줌 -> {released: [id...]}
 //   fail     {op:'add', mode, match, at?, status?, skip?, times?} 실패 주입 -> {ruleId}
@@ -16,7 +16,12 @@
 //   fs       {op, ...} 가짜 Firestore 제어(상태 시드, 시계, 집계, 오류 주입, 걸쇠, 1.7.9 흉내). 사용법은 stubs/fake-firestore-state.mjs 머리말
 //            기기의 가짜 Firebase SDK는 POST /__fs/rpc 로 같은 상태에 질의합니다(07 설계 5.1).
 // match 필드: kind(push|pull|connect|token|other|sync, 배열 가능), clientId, hasPushItems, batch(write|read).
-// at: start(Worker 호출 전, 기본) | response(Worker 처리 뒤 응답 전) | batch(match.batch가 있으면 기본).
+// 문장 걸쇠(at: statement, match.sql이나 match.statement가 있으면 기본): Worker 호출 안의 D1 문장 하나의 앞이나 뒤에서 멈춤.
+//   match.sql        문장 SQL에 맞는 정규식 소스(대소문자 무시). 예) 'INSERT[\\s\\S]*deleted_families'
+//   match.statement  그 호출 안에서 1부터 세는 문장 번호(batch는 문장마다 하나)
+//   match.when       before(문장 실행 전) | after(실행 뒤, 기본). 요청 종류 match(kind, clientId)와 함께 쓸 수 있음
+//   실행 뒤에 멈추면 그 문장의 효과는 이미 확정된 채로 다른 요청이 끼어든다. 실행 전에 멈추면 아직 아무것도 안 한 채로 끼어든다.
+// at: start(Worker 호출 전, 기본) | response(Worker 처리 뒤 응답 전) | batch(match.batch가 있으면 기본) | statement.
 // skip: 앞의 N번은 건너뜀(기본 0). times: 적용 횟수(기본 1, 'always'는 무제한).
 import http from 'node:http';
 import { createHash } from 'node:crypto';
@@ -81,6 +86,11 @@ function matches(match, info, stage) {
   if (match.clientId && sanitizeClientId(match.clientId) !== info.clientId) return false;
   if (match.hasPushItems !== undefined && Boolean(match.hasPushItems) !== Boolean(info.hasPushItems)) return false;
   if (stage === 'batch' && match.batch && match.batch !== 'any' && match.batch !== info.batchKind) return false;
+  if (stage === 'statement') {
+    if ((match.when || 'after') !== info.phase) return false;
+    if (match.sql !== undefined && !new RegExp(match.sql, 'i').test(info.sql)) return false;
+    if (match.statement !== undefined && Number(match.statement) !== info.statementIndex) return false;
+  }
   return true;
 }
 
@@ -99,9 +109,13 @@ function takeRule(rules, stage, info) {
 
 function buildRule(body, kindLabel) {
   const match = body.match || {};
-  const at = body.at || (match.batch ? 'batch' : 'start');
-  if (!['start', 'response', 'batch'].includes(at)) throw new Error(`알 수 없는 at: ${at}`);
+  const statementMatch = match.sql !== undefined || match.statement !== undefined || match.when !== undefined;
+  const at = body.at || (match.batch ? 'batch' : (statementMatch ? 'statement' : 'start'));
+  if (!['start', 'response', 'batch', 'statement'].includes(at)) throw new Error(`알 수 없는 at: ${at}`);
   if (match.batch && at !== 'batch') throw new Error('match.batch는 at이 batch일 때만 쓸 수 있습니다');
+  if (statementMatch && at !== 'statement') throw new Error('match.sql, statement, when은 at이 statement일 때만 쓸 수 있습니다');
+  if (match.when !== undefined && !['before', 'after'].includes(match.when)) throw new Error(`알 수 없는 match.when: ${match.when}`);
+  if (match.sql !== undefined) new RegExp(match.sql, 'i');
   const rule = {
     id: `${kindLabel}-${nextId++}`,
     match,
@@ -166,6 +180,15 @@ const d1 = createD1Mock({
     if (fault.mode === 'beforeCommit') return { failBeforeCommit: true };
     if (fault.mode === 'afterCommit') return { failAfterCommit: true };
     return {};
+  },
+  // 문장 걸쇠: 걸리는 규칙이 없으면 undefined를 돌려줘 D1 흉내가 기다리지 않는다.
+  onStatement(ctx, point) {
+    if (!holdRules.some((r) => r.at === 'statement')) return undefined;
+    const info = { ...ctx.info, phase: point.phase, sql: point.sql, statementIndex: point.index };
+    const rule = takeRule(holdRules, 'statement', info);
+    if (!rule) return undefined;
+    const started = performance.now();
+    return holdPoint(rule, 'statement', info, ctx.record).then(() => { ctx.heldMs += performance.now() - started; });
   },
 });
 env.DB = d1.db;

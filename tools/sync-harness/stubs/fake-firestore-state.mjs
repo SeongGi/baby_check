@@ -128,8 +128,11 @@ export function createFakeFirestore() {
     return entry;
   };
 
-  const noteWrite = (entry, w, allowed) => writeLog.push({
+  // existed: 쓰기 직전에 그 문서가 있었는가. op는 create(없던 문서를 만듦) | update(있던 문서에 씀, merge든 덮어쓰기든) | delete.
+  // 불변 조건 2가 "회원 문서 생성"과 "있는 회원 문서를 다시 쓰는 일"을 구분하는 근거입니다.
+  const noteWrite = (entry, w, allowed, existed) => writeLog.push({
     seq: entry.seq, device: entry.device, uid: entry.uid, actor: entry.actor, path: w.path, kind: w.kind,
+    op: w.kind === 'delete' ? 'delete' : (existed ? 'update' : 'create'), existed,
     merge: !!w.merge, fields: w.data ? Object.keys(w.data) : [], data: w.data ?? null, allowed,
   });
 
@@ -150,10 +153,10 @@ export function createFakeFirestore() {
         allowed = !!info.doc && authorize(uid, existing ? 'update' : 'create', info, existing ?? {}, next, rr);
       }
       entry.ruleReads += rr.n;
-      plans.push({ w, allowed, next });
+      plans.push({ w, allowed, next, existed: existing !== undefined });
     }
     const denied = plans.find((p) => !p.allowed);
-    plans.forEach((p) => noteWrite(entry, p.w, !denied));
+    plans.forEach((p) => noteWrite(entry, p.w, !denied, p.existed));
     if (denied) { entry.allowed = false; entry.code = 'permission-denied'; entry.docReads += 1; return fail('permission-denied', 'Missing or insufficient permissions.'); }
     for (const p of plans) {
       if (p.w.kind === 'delete') docs.delete(p.w.path);
@@ -422,11 +425,15 @@ export function createFakeFirestore() {
     return total;
   };
 
-  /** 불변 조건 2: 앱(actor app)의 쓰기는 회원 문서 생성과 pendingDeletionAt: null뿐이어야 합니다. 거부된 시도도 셉니다. */
+  /**
+   * 불변 조건 2: 앱(actor app)의 쓰기는 회원 문서 "생성"과 pendingDeletionAt: null뿐이어야 합니다. 거부된 시도도 셉니다.
+   * 회원 문서를 이미 있는데 다시 쓰는 것(update)은 허용하지 않습니다("이미 회원이면 반환"이 빠진 변이를 잡습니다).
+   * 1.7.9 흉내(actor legacy179)와 시드는 writeLog의 app 감사 대상이 아닙니다.
+   */
   const appWriteAllowed = (w) => {
     const info = parse(w.path);
     if (w.kind === 'delete') return false;
-    if (info.kind === 'members' && info.id === w.uid && sameSet(w.fields, ['inviteHash', 'joinedAt'])) return true;
+    if (info.kind === 'members' && info.id === w.uid && w.op === 'create' && sameSet(w.fields, ['inviteHash', 'joinedAt'])) return true;
     return info.kind === 'family' && sameSet(w.fields, ['pendingDeletionAt']) && w.data.pendingDeletionAt === null;
   };
 

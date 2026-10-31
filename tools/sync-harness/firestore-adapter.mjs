@@ -5,6 +5,8 @@
 //   상태:   reset() | seed(key, spec) | snapshot(key) | getDoc(path) | putDoc(path, data, {merge}) | removeFamily(key) | removeDoc(path)
 //   집계:   stats(from?) -> {docReads, ruleReads, reads, writes, ops, denied, signIns, terminates, maxInflight, byDevice}
 //           opCount() | ops(from?) | writes({from, actor}) | audit(from?) -> {appWrites, forbidden, deletes} | instances()
+//           쓰기 기록의 항목: {seq, device, uid, actor, path, kind: set|delete, op: create|update|delete, existed, merge, fields, data, allowed}
+//           op는 쓰기 직전에 그 문서가 있었는지로 정해집니다. 불변 조건 2는 회원 문서를 create만 허용하고 update(다시 쓰기)는 forbidden에 넣습니다.
 //   시계:   clock({set|advance|real})
 //   주입:   fail({match, code, skip, times}) 오류 | hang(match, opts) 끝나지 않는 호출 | exhaust(match?) resource-exhausted 계속
 //           delay(match, delayMs, opts) | offline(on) | clearFaults()

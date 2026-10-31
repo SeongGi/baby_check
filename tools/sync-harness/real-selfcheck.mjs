@@ -461,20 +461,28 @@ try {
     const from = await fs.opCount();
     const app = { actor: 'app' };
     fsOk(await joinRpc(FK, 'uid-joiner').then(() => setDocRpc('uid-member', famPath(FK), { pendingDeletionAt: null }, true, app)), '취소 쓰기');
-    fsOk(await setDocRpc('uid-joiner', `${famPath(FK)}/members/uid-joiner`, { inviteHash: fs.inviteHash(FK), joinedAt: { __serverTs: true } }, true, app), '회원 생성 모양');
+    // uid-new는 아직 회원 문서가 없으므로 이 쓰기는 생성(create)이다. uid-joiner는 위 join이 이미 만들었다.
+    const newShape = { inviteHash: fs.inviteHash(FK), joinedAt: { __serverTs: true } };
+    fsOk(await setDocRpc('uid-new', `${famPath(FK)}/members/uid-new`, newShape, true, app), '회원 생성 모양');
     let audit = await fs.audit(from);
     assert.equal(audit.appWrites.length, 2);
+    assert.deepEqual(audit.appWrites.map((w) => w.op), ['update', 'create'], '쓰기 직전에 문서가 있었는지로 create와 update를 가른다(가족 문서는 있었으므로 update)');
     assert.deepEqual(audit.forbidden, []);
+    // 같은 모양을 이미 있는 회원 문서에 다시 쓰면(예: "이미 회원이면 반환"이 빠진 앱) 필드가 같아도 update라 forbidden이다.
+    await setDocRpc('uid-new', `${famPath(FK)}/members/uid-new`, newShape, true, app);
+    audit = await fs.audit(from);
+    assert.deepEqual(audit.forbidden.map((w) => [w.path.split('/').at(-1), w.op]), [['uid-new', 'update']], '있는 회원 문서를 다시 쓴 것만 forbidden');
     // 허용 목록 밖: 회원 문서 갱신(다른 필드), 기록 쓰기, 삭제
     await setDocRpc('uid-joiner', `${famPath(FK)}/members/uid-joiner`, { joinedAt: { __serverTs: true }, extra: 1 }, true, app);
     await setDocRpc('uid-member', `${famPath(FK)}/logs/log-z`, { payload: { id: 'log-z' }, deleted: false }, false, app);
     await rpc({ op: 'delete', uid: 'uid-member', path: `${famPath(FK)}/logs/log-a`, ...app });
     audit = await fs.audit(from);
-    assert.equal(audit.forbidden.length, 3, JSON.stringify(audit.forbidden.map((w) => [w.path, w.fields])));
+    assert.equal(audit.forbidden.length, 4, JSON.stringify(audit.forbidden.map((w) => [w.path, w.fields])));
     assert.equal(audit.deletes.length, 1);
     // 1.7.9 흉내의 쓰기는 앱 쓰기에 섞이지 않는다.
     await fs.legacy179Write(FK, { uid: 'uid-member', logs: [{ id: 'log-w', type: 'formula', timestamp: 5 }] });
     assert.equal((await fs.audit(from)).appWrites.length, audit.appWrites.length);
+    // 시드와 1.7.9 흉내처럼 앱이 아닌 쓰기는 create여도 감사 대상이 아니다(위에서 appWrites가 늘지 않음).
   });
 
   await check('가짜 Firestore 읽기 수 집계: 문서 읽기 수와 규칙 평가 읽기 수(요청마다 회원 확인 1회)를 따로 센다', async () => {

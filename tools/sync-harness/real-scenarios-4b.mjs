@@ -430,7 +430,7 @@ await scenario('23', '오프라인 시작 뒤 재개: 관문 paused에서 평소
 // ════════════════════════════════ 24. 삭제에 따르기의 경쟁과 오래된 선택 ════════════════════════════════
 const K24a = keyOf('s24a');
 const K24b = keyOf('s24b');
-await scenario('24', '삭제에 따르기의 경쟁: (a) 상대가 취소하면 서버에 보내지 않고 2.4로, (b) 다른 기기가 이어받아 409면 연결을 해제하지 않고 같은 화면이 반복되지 않는다, 서버는 한 문장으로 판정', ['s4bA', 's4bB', 's4bC'], {
+await scenario('24', '삭제에 따르기의 경쟁: (a) 상대가 취소하면 서버에 보내지 않고 2.4로, (b) 다른 기기가 이어받아 409면 연결을 해제하지 않고 같은 화면이 반복되지 않는다, 서버는 한 문장으로 판정해 문장 사이에 가족이 생겨도 살아 있는 가족에 삭제 기록이 붙지 않는다', ['s4bA', 's4bB', 's4bC'], {
   s4bA: has179({ syncKey: K24a, logs: logsOf(2, 'a-own', 5_000_000) }),
   s4bB: has179({ syncKey: K24b, logs: logsOf(2, 'b-own', 6_000_000) }),
 }, async ({ server, adapter, fs, devices: [A, B, C] }) => {
@@ -516,7 +516,34 @@ await scenario('24', '삭제에 따르기의 경쟁: (a) 상대가 취소하면 
   assert.equal(await connecting, 410);
   const fam3 = await adapter.family(S3);
   assert.deepEqual([fam3.exists, fam3.deleted], [false, true]);
-  // 코드 검사(약함): 문장 사이에 끼어들 수단이 하네스에 없으므로, legacyDeletion 분기가 가족을 미리 읽지 않고 한 문장(WHERE NOT EXISTS)으로 쓰는지 소스로 확인한다.
+  // 실제 끼어들기(판정의 중심): 삭제 기록을 쓰는 문장(INTO deleted_families)이 실행되기 직전에 Worker를 멈춰 두고, 그 사이 진짜 가족 생성(connect)이 확정되게 한다.
+  // 가족을 따로 읽은 뒤 기록하는 두 문장 구현이라면 읽은 시점의 "가족 없음"이 낡은 채로 기록이 붙어, 살아 있는 가족과 삭제 기록이 함께 생긴다.
+  // 한 문장(WHERE NOT EXISTS) 구현이라면 멈춘 문장이 풀릴 때 가족을 보고 기록을 건너뛰어 409가 된다.
+  const S5 = keyOf('s24c5');
+  const gate5 = await adapter.holdNext({ kind: 'other', sql: 'INTO\\s+deleted_families\\b', when: 'before' });
+  const held5 = track(fetchDelete(server, S5));
+  await gate5.held; // 걸쇠가 실제로 걸리지 않으면(SQL이 바뀌어 맞는 문장이 없으면) 여기서 시간 초과로 실패한다
+  assert.deepEqual([(await adapter.family(S5)).exists, (await adapter.family(S5)).deleted], [false, false], '멈춘 시점에는 가족도 삭제 기록도 아직 없다');
+  const creating5 = await fetch(`${server.url}/api/family/connect`, {
+    method: 'POST', headers: { Authorization: `Bearer ${S5}`, 'X-Client-Id': 's4b-direct', 'Content-Type': 'application/json' }, body: JSON.stringify({ allowCreate: true }),
+  });
+  assert.equal(creating5.status, 200, '멈춘 사이 가족 생성이 확정된다');
+  assert.equal((await adapter.family(S5)).exists, true);
+  await gate5.release();
+  const res5 = await held5;
+  const fam5 = await adapter.family(S5);
+  assert.deepEqual([fam5.exists, fam5.deleted], [true, false], '살아 있는 가족에 deleted_families 기록이 붙었다(읽기와 기록이 두 문장)');
+  assert.equal(res5.status, 409, '가족이 생긴 뒤에는 삭제에 따르지 않고 409');
+  // 걸쇠를 문장 번호로도 건다(match.statement): 요청 안의 첫 문장 실행 전에 멈추면 그때까지 아무것도 기록되지 않았고, 풀면 평소대로 끝난다.
+  const S6 = keyOf('s24c6');
+  const gate6 = await adapter.holdNext({ kind: 'other', statement: 1, when: 'before' });
+  const held6 = track(fetchDelete(server, S6));
+  await gate6.held;
+  assert.equal((await adapter.family(S6)).deleted, false, '첫 문장 실행 전에는 아무것도 기록되지 않았다');
+  await gate6.release();
+  assert.equal((await held6).status, 200);
+  assert.deepEqual([(await adapter.family(S6)).exists, (await adapter.family(S6)).deleted], [false, true]);
+  // 코드 검사(보조): legacyDeletion 분기가 가족을 미리 읽지 않고 한 문장(WHERE NOT EXISTS)으로 쓰는지 소스로도 본다. 위 실제 끼어들기가 중심 판정이다.
   const src = readFileSync(path.join(HARNESS_DIR, '../../server/src/index.ts'), 'utf8');
   const blockStart = src.indexOf('body.legacyDeletion === true');
   const block = src.slice(blockStart, src.indexOf('SELECT deletion_ready_at FROM families', blockStart));
@@ -726,6 +753,8 @@ await scenario('29', '회원 문서만 남은 가족: absent 안내만 보이고
   assert.equal((await adapter.family(K29b)).exists, false);
   await fs.putDoc(familyPath, savedFamily);
   await fs.fail({ match: { op: 'get', kind: 'family' }, code: 'permission-denied', times: 1 });
+  // absent가 가벼운 실패 간격(30분)을 적었으므로, 간격이 지난 뒤 다시 읽는다(B8 리뷰 1 A).
+  await harness.advanceClocks(31 * MIN);
   const r4 = await B.send('runMigration');
   assert.equal(r4.result.status, 'firestore_denied', `거부는 2.5로 간다 ${JSON.stringify(r4)}`);
   assert.equal((await adapter.family(K29b)).exists, false, '거부를 이어받기로 보면 안 된다');
@@ -733,6 +762,9 @@ await scenario('29', '회원 문서만 남은 가족: absent 안내만 보이고
   assert.equal(typeof s4.state.blockedSince, 'number');
   assert.equal((await B.send('getProfile')).profile.syncKey, K29b, '연결이 유지된다');
   await fs.clearFaults();
+  // 두 번째 가벼운 실패라 간격이 60분으로 늘었다. 간격 안에서는 다시 읽지 않고, 지난 뒤 이어받는다(B8 리뷰 1 A).
+  assert.equal((await B.send('runMigration')).result.status, 'waiting', '실패 간격 안에서는 다시 읽지 않는다');
+  await harness.advanceClocks(61 * MIN);
   assert.equal((await B.send('runMigration')).result.status, 'uploading');
   await waitMigrationComplete(B, { timeoutMs: 30_000 });
   assert.equal((await adapter.family(K29b)).exists, true, '가족 문서가 돌아오면 이어받는다');
@@ -979,24 +1011,27 @@ await scenario('34', '백업 표지: 관문이 여러 번 멈춰도 백업 값�
 
 // ════════════════════════════════ 25. 불변 조건 2의 쓰기 목록 ════════════════════════════════
 // 시나리오마다 서버가 따로 뜨므로 각 시나리오가 끝나기 전에 auditFirestoreWrites를 거쳤고(위 뼈대),
-// 여기서는 그 앱 쓰기 전부를 모아 서버의 분류와 별개로 다시 판정한다: 회원 문서 생성과 pendingDeletionAt: null뿐, 지운 문서 0건.
+// 여기서는 그 앱 쓰기 전부를 모아 서버의 분류와 별개로 다시 판정한다: 회원 문서 "생성"(op create, 이미 있던 문서를 다시 쓰는 update는 아님)과 pendingDeletionAt: null뿐, 지운 문서 0건.
 if (!ONLY || ONLY.includes('25')) {
   const started = Date.now();
   try {
     assert.ok(ran.length > 0, '모아 판정할 시나리오가 없다');
     const violations = appWriteLog.filter((w) => {
-      if (w.kind === 'delete') return true;
+      if (w.kind === 'delete' || w.op === 'delete') return true;
       const fields = [...w.fields].sort().join(',');
       const member = /^families\/[0-9a-f]{64}\/members\/([^/]+)$/.exec(w.path);
-      if (member) return !(member[1] === w.uid && fields === 'inviteHash,joinedAt');
+      if (member) return !(member[1] === w.uid && fields === 'inviteHash,joinedAt' && w.op === 'create' && w.existed === false);
       if (/^families\/[0-9a-f]{64}$/.test(w.path)) return !(fields === 'pendingDeletionAt' && w.data?.pendingDeletionAt === null);
       return true;
     });
-    assert.deepEqual(violations.map((w) => [w.scenario, w.kind, w.path, w.fields]), [], '허용 목록 밖의 앱 쓰기');
-    assert.ok(appWriteLog.some((w) => /\/members\//.test(w.path)), '전제: 회원 문서 생성 쓰기가 모였다');
+    assert.deepEqual(violations.map((w) => [w.scenario, w.kind, w.op, w.path, w.fields]), [], '허용 목록 밖의 앱 쓰기(회원 문서를 이미 있는데 다시 쓴 경우 포함)');
+    const memberWrites = appWriteLog.filter((w) => /\/members\//.test(w.path));
+    assert.ok(memberWrites.length > 0, '전제: 회원 문서 생성 쓰기가 모였다');
+    assert.ok(appWriteLog.every((w) => w.op === 'create' || w.op === 'update'), '전제: 모든 앱 쓰기에 create/update 구분이 기록돼 있다');
+    assert.ok(memberWrites.every((w) => w.op === 'create'), '회원 문서 쓰기가 모두 생성이다');
     if (ran.includes('33')) assert.ok(appWriteLog.some((w) => w.fields.join() === 'pendingDeletionAt'), '전제: 삭제 예약 취소 쓰기가 모였다(33)');
     results.push(true);
-    console.log(`PASS [25] 불변 조건 2의 쓰기 목록: 시나리오 ${ran.join(',')}의 앱 쓰기 ${appWriteLog.length}건이 회원 문서 생성과 pendingDeletionAt: null뿐이고 삭제 0건 (${((Date.now() - started) / 1000).toFixed(1)}s)`);
+    console.log(`PASS [25] 불변 조건 2의 쓰기 목록: 시나리오 ${ran.join(',')}의 앱 쓰기 ${appWriteLog.length}건(회원 문서 생성 ${memberWrites.length}건)이 회원 문서 생성과 pendingDeletionAt: null뿐이고 다시 쓰기·삭제 0건 (${((Date.now() - started) / 1000).toFixed(1)}s)`);
   } catch (error) {
     results.push(false);
     console.log(`FAIL [25] 불변 조건 2의 쓰기 목록\n     ${error?.stack || error}`);

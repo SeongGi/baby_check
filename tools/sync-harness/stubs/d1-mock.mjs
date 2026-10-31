@@ -1,6 +1,10 @@
 // Cloudflare D1 흉내입니다(06 설계 2.10). Node 24의 node:sqlite 위에서 서버 코드가 쓰는
 // prepare, bind, first, all, run, raw, batch, exec를 만들고, 실제 D1의 한도와 과금 모형을 따릅니다.
 //  - batch()는 BEGIN~COMMIT을 await 없이 동기로 실행합니다. 실패하면 ROLLBACK합니다.
+//  - 문장 걸쇠: onStatement(ctx, {sql, index, phase})가 있으면 Worker 호출 안의 문장 하나가 실행되기 전(before)과
+//    실행된 뒤(after)에 부릅니다. index는 호출 안에서 1부터 세는 문장 번호(batch는 문장마다 하나씩)입니다.
+//    훅이 Promise를 돌려줄 때만 기다리므로, 걸리는 규칙이 없으면 실행 순서가 예전과 똑같습니다.
+//    batch는 BEGIN 앞에서 before를, COMMIT 뒤에서 after를 문장마다 부릅니다(batch 안은 await 없이 동기로 도니까요).
 //  - 문장 하나의 바인딩 값이 100개를 넘으면 오류가 납니다.
 //  - Worker 호출 하나(runInvocation)의 쿼리가 50회를 넘어도 오류가 납니다. batch() 한 번은 1회로 셉니다.
 //  - 읽은 행 수는 결과 행 수로, 쓴 행 수는 아래 모형으로 근사합니다(추측: 실제 D1 과금이 이 모형과
@@ -70,9 +74,9 @@ function parseAssignments(text) {
 const d1Error = (message) => new Error(`D1_ERROR: ${message}`);
 
 /**
- * @param {{ schemaSql: string, onBatch?: (ctx: any, batchKind: 'read'|'write', statementCount: number) => Promise<any> }} options
+ * @param {{ schemaSql: string, onBatch?: (ctx: any, batchKind: 'read'|'write', statementCount: number) => Promise<any>, onStatement?: (ctx: any, point: { sql: string, index: number, phase: 'before'|'after' }) => Promise<void>|void }} options
  */
-export function createD1Mock({ schemaSql, onBatch }) {
+export function createD1Mock({ schemaSql, onBatch, onStatement }) {
   const raw = new DatabaseSync(':memory:');
   raw.exec(schemaSql);
 
@@ -116,6 +120,7 @@ export function createD1Mock({ schemaSql, onBatch }) {
     writtenByTable: {},
     changedByTable: {},
     heldMs: 0,
+    statements: 0,
     info: {},
     ...extra,
   });
@@ -128,6 +133,9 @@ export function createD1Mock({ schemaSql, onBatch }) {
       throw d1Error('Too many API requests by single worker invocation.');
     }
   };
+
+  // 문장 걸쇠: 훅이 Promise를 돌려줄 때만 기다립니다. 요청과 이어지지 않은 컨텍스트(제어용 조회)에는 걸지 않습니다.
+  const statementPoint = (ctx, sql, index, phase) => (!onStatement || ctx.unbound ? undefined : onStatement(ctx, { sql, index, phase }));
 
   const checkValues = (values) => {
     if (values.length > D1_MAX_BIND_PARAMS) {
@@ -194,7 +202,14 @@ export function createD1Mock({ schemaSql, onBatch }) {
     async run() {
       const ctx = currentContext();
       countQuery(ctx);
-      return executeOne(this.sql, checkValues(this.values), ctx);
+      const values = checkValues(this.values);
+      const index = (ctx.statements += 1);
+      const before = statementPoint(ctx, this.sql, index, 'before');
+      if (before) await before;
+      const result = executeOne(this.sql, values, ctx);
+      const after = statementPoint(ctx, this.sql, index, 'after');
+      if (after) await after;
+      return result;
     }
     async all() { return this.run(); }
     async first(column) {
@@ -222,11 +237,22 @@ export function createD1Mock({ schemaSql, onBatch }) {
       const ctx = currentContext();
       countQuery(ctx);
       const specs = statements.map((s) => ({ sql: s.sql, values: checkValues(s.values) }));
+      const firstIndex = ctx.statements + 1;
+      ctx.statements += specs.length;
+      for (const [i, spec] of specs.entries()) {
+        const before = statementPoint(ctx, spec.sql, firstIndex + i, 'before');
+        if (before) await before;
+      }
       const batchKind = specs.some((s) => !isReadSql(s.sql)) ? 'write' : 'read';
       // 실제 D1은 BEGIN 전에 요청이 얼마든지 늦어질 수 있습니다. 훅은 여기서만 await합니다.
       const decision = (await onBatch?.(ctx, batchKind, specs.length)) || {};
       // 여기서부터 COMMIT까지는 await가 없으므로 다른 요청이 확정 전 행을 볼 수 없습니다.
-      if (batchKind === 'read') return specs.map((s) => executeRead(s.sql, s.values, ctx));
+      // 걸리는 규칙이 없으면 기다리지 않고 값을 그대로 돌려줍니다(실행 순서 보존).
+      const afterAll = (value) => {
+        const waits = specs.map((spec, i) => statementPoint(ctx, spec.sql, firstIndex + i, 'after')).filter(Boolean);
+        return waits.length ? Promise.all(waits).then(() => value) : value;
+      };
+      if (batchKind === 'read') return afterAll(specs.map((s) => executeRead(s.sql, s.values, ctx)));
       const saved = snapshotCounters(ctx);
       raw.exec('BEGIN');
       let results;
@@ -244,7 +270,7 @@ export function createD1Mock({ schemaSql, onBatch }) {
         throw error;
       }
       if (decision.failAfterCommit) throw d1Error('harness: injected failure after COMMIT');
-      return results;
+      return afterAll(results);
     },
   };
 
