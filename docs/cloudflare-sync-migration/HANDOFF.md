@@ -449,6 +449,9 @@
 - 전체 검사(`ulimit -u` 상한 안, 버전 변경 전 코드 기준이며 버전 숫자는 검사에 영향을 주지 않는다): `tsc` 두 개 0, `test:voice` 0(52/8/6), `verify.sh offline` 0(PASS 351, FAIL 0, 4c 15/15), `verify.sh rules` 0(8/8).
 - 현재 `src/database/cloudConfig.ts`의 `DEFAULT_WORKER_URL`은 하위 도메인이 빠진 임시 값 `https://baby-check-sync.workers.dev`이다. 실제 주소는 `https://baby-check-sync.<하위 도메인>.workers.dev`가 된다. **배포 전에는 Play·원스토어 빌드를 만들지 않는다.**
 
+- 성기님이 인증을 마쳤다. `bash server/deploy.sh` 재실행이 1~5단계 모두 성공했다. Worker 주소는 `https://baby-check-sync.baby-check-sync-server.workers.dev`다(workers.dev 이름 `baby-check-sync-server`). 응답 확인은 `04-검증.md` 13장에 있고, 확인 뒤 운영 D1은 표 4개 모두 0행이다. `f5cfd73`에 주소 변경과 검증 기록을 커밋했다.
+- 주소 반영 뒤 전체 검사: `tsc` 두 개 0, `test:voice` 0, `verify.sh rules` 8/8. `verify.sh offline`은 첫 실행에서 `[7-1/상한뒤]`가 시간 전제(러너 상한 900ms, 실측 2,617ms)로 한 번 실패했다. 그 파일만 따로 두 번 돌리면 22/22였고, 전체를 다시 돌리면 종료 코드 0(PASS 351, FAIL 0)이었다. 컴퓨터가 바쁠 때 생기는 시간 판정 실패로 본다.
+
 ### 다음 할 일
-1. 성기님이 인증 메일과 workers.dev 이름 정하기를 마치면 `bash server/deploy.sh`를 다시 돌린다(승인 받음). 그 뒤 28장 3·4번(응답 확인, `cloudConfig.ts` 커밋, 전체 검사)을 한다.
+1. (완료) 성기님이 인증 메일과 workers.dev 이름 정하기를 마치면 `bash server/deploy.sh`를 다시 돌린다(승인 받음). 그 뒤 28장 3·4번(응답 확인, `cloudConfig.ts` 커밋, 전체 검사)을 한다.
 2. 그 뒤 푸시·PR·머지 → Play Alpha AAB(1.8.0 코드 28) → 원스토어 APK. **모두 승인 전**이다.
