@@ -296,3 +296,27 @@
 - B6을 커밋했다. 메인 세션이 `verify.sh rules`를 다시 돌린 결과는 8/8 PASS, 종료 코드 0이었고, 끝난 뒤 남은 에뮬레이터 프로세스는 0개였다. 버전은 `@firebase/rules-unit-testing` 5.0.0(6.x는 firebase 13 요구)과 `firebase-tools` 14.27.0(15.x는 Java 21 요구)이다.
 - **작업자 1(B1·B2)은 이 기록 시점에 아직 돌고 있다.** 작업 트리의 `server/src/index.ts`, `src/database/{cloudClient,firebase,sync,syncRunner,storage,firestoreImport}.ts`, `tools/sync-harness/stubs/fake-worker.mjs` 변경은 그 작업자의 미완성 결과다. 이 파일들은 커밋하지 않았다.
 - 이어받는 세션은 이 작업자의 완료 알림을 받지 못한다. 그래서 먼저 `git status`와 `git diff`로 B1·B2 변경이 끝났는지 보고, 22장의 명세(`03-계획.md` 5장 B1·B2 행, `07` 2.1~2.3.1·2.7·2.10)와 대조한 뒤 검사(`tsc` 두 개, `test:voice`, `verify.sh offline` PASS 217 이상, `grep -nE "deleteDoc|writeBatch|\.delete\(" src/database/firestoreImport.ts src/database/firebase.ts` 결과 없음)를 직접 돌린다. 모자란 부분은 새 t1-worker에 맡긴다.
+
+## 23. 진행 기록과 다음 세션이 할 일 (2026-10-31, 세션 13e78a18 마무리)
+- 22-1의 "작업자 1 실행 중"은 끝났다. 작업자 1의 결과를 메인 세션이 다시 검사해 커밋했다.
+  - B1 `3cda390`: 서버 `legacyDeletion` 한 문장 판정(200/410/409)과 `token?members=1`의 `otherMembers`. 가짜 Worker도 같다.
+  - B2 `af67c02`: `firebase.ts` 지연 생성(`getFirebaseApp`, `getFirebaseAuth`, `getFirestoreDb`, `resetFirestoreDb`), 새 `firestoreImport.ts`, `storage.ts`의 근거 표식·이전 상태·전환기 상태·직전 백업과 표지·`restorePreMigrationBackup`·`mergeLegacyFirestoreData`, `cloudClient.ts`의 `deleteFamilyData({ legacyDeletion })`와 `getSyncToken({ members })`, 러너의 `syncKey`·`requestId` 사건, `subscribe`, `onAccepted`, `migrationGate`, `migrationPending`. 하네스 `device.mjs`의 옛 `{ auth, db }` import는 메인 세션이 새 함수로 고쳤다(`compat`·`full` 모드용).
+  - 메인 세션 검사: `tsc` 두 개 0, `test:voice` 0, `verify.sh offline` 종료 코드 0(PASS 217, FAIL 0), `grep -nE "deleteDoc|writeBatch|\.delete\(" src/database/firestoreImport.ts src/database/firebase.ts` 결과 없음.
+- 작업자 1이 남긴 판단(B3가 알아야 함):
+  - `cancelLegacyDeletion`은 회원 확인을 하지 않는다. B3가 먼저 `ensureFirestoreMembership`을 부른다. 각 함수는 잠금과 상한을 스스로 걸지 않으므로, 호출자가 `withFirestoreLock`, `withFirestoreTimeout`으로 감싼다.
+  - 관문이 예외를 던지면 러너는 `'proceed'`로 진행한다.
+  - `mergeLegacyFirestoreData`는 키가 다르면 `false`를 돌려주고, 저장소 오류는 던진다.
+  - 합쳐진 평소 요청은 처음 요청의 번호를 쓴다(`onAccepted`가 [1, 2, 2]처럼 나온다).
+  - 1.7.9 `profile/shared`의 `birthWeight`가 문자열이 아니면 프로필 병합에서 빠진다. 6장 실데이터 점검에서 실제 값을 본다.
+  - `terminate`가 3초 안에 끝나지 않는 경우의 재생성은 실기기에서 확인하지 못했다.
+  - `firestoreImport.ts`의 Firestore 호출은 `tsc`로만 확인했다. 런타임 검증은 B5 가짜 Firestore 시나리오가 맡는다.
+
+### 다음 세션이 할 일 (이 순서대로)
+1. `git log --oneline -6`으로 맨 위가 이 문서 커밋이고 그 아래에 `af67c02`(B2), `3cda390`(B1), `77b338d`, `f04ebe3`(B6)이 있는지, 작업 트리가 깨끗한지 확인한다.
+2. B3(이전 모듈)를 t1-worker에 맡긴다. 파일은 새 `src/database/familyMigration.ts`와 `src/database/migrationDecision.ts`, 그리고 `tools/sync-harness/unit.mjs`(순수 함수 단위 검사)다. 명세는 `07` 4판 2.2~2.9 전체, `03-계획.md` 5장 B3 행, 위의 작업자 1 판단이다. `createFamilyMigrator(deps)`는 `ensure`, `joinFamily`, `legacyJoin`, `transitionTick`, 관문 함수, 화면 콜백(`askBackupFailure`, `askLegacyDeletionChoice`, `notify`)을 갖는다. App은 고치지 않는다.
+3. B3를 검사하고 커밋한 뒤 B4(App, Profile 연결, `03` 5장 B4 행, `07` 5.4 코드 검사 항목)를 맡긴다.
+4. B5(가짜 Firestore와 시나리오 1~34)와 B7(정리 전 점검 스크립트)을 맡긴다. 같은 파일을 두 작업자가 고치지 않게 나눈다.
+5. B8: 독립 리뷰 2개 → 집계(최대 3회) → `07` 5.3 변이 표 전체(저장소에서 하나씩, 원복 확인) → `04-검증.md` 기록과 커밋.
+6. 그 뒤 18장 순서: 실데이터 점검(읽기 전용, `07` 6장) → Worker 배포 → 푸시·PR·머지 → Play Alpha 업로드 → 원스토어 APK → (출시 뒤) Firestore 운영자 정리. **모두 승인 전**이고, 실행 직전에 그때까지의 검증 결과와 함께 성기님에게 확인한다.
+- 이미 받은 결정: `07` 4판은 검토 없이 구현한다(2026-10-31). 앱은 Firestore 문서를 지우지 않는다. 로컬 커밋은 해도 된다.
+- 하지 말 것: 5장 그대로. 작업자는 커밋하지 않고, 메인 세션이 검사 출력을 직접 확인해 커밋한다. 여러 프로세스를 띄우는 검사는 `ulimit -u` 상한 안에서 돌린다.
