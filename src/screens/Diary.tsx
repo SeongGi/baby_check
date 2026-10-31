@@ -247,7 +247,11 @@ export const Diary: React.FC<DiaryProps> = ({
           <Text style={styles.emptyDay}>아직 쓴 일기가 없어요.</Text>
         )}
         {group.entries.map(entry => renderEntry(group.date, entry))}
-        {!hasMine && (
+        {/* 시계가 앞서 있던 기기에서 넘어온 미래 날짜 카드에는 새 줄을 쓸 수 없습니다(저장 함수가 거부합니다). 버튼 대신 이유를 보여 줍니다. */}
+        {!hasMine && group.date > today && (
+          <Text style={styles.emptyDay}>아직 오지 않은 날이라 새로 쓸 수 없어요.</Text>
+        )}
+        {!hasMine && group.date <= today && (
           <TouchableOpacity
             style={styles.writeButton}
             onPress={() => openDiaryEditor(group.date)}
