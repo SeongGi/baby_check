@@ -16,6 +16,8 @@ export const state = {
   logs: new Map(),
   // 영구 삭제한 가족 key (deleted_families)
   deleted: new Set(),
+  // 회원(members): key -> Set(clientId). 실제 서버처럼 연결 요청(connect)이 성공할 때만 더합니다.
+  members: new Map(),
   // 쓰기가 있었던 요청마다 한 건: { logs, tombstones, profile }
   commits: [],
   // 요청 목록: { kind, clientId, pushLogs, pushDeleted, pull, status, writes }
@@ -99,7 +101,13 @@ state.liveLogs = (key) =>
   [...familyLogs(key).entries()].filter(([, row]) => row.deletedAt === null).map(([id, row]) => [id, row.rawJson]);
 state.deletedIds = (key) =>
   [...familyLogs(key).entries()].filter(([, row]) => row.deletedAt !== null).map(([id]) => id);
+state.addMember = (key, clientId) => {
+  let set = state.members.get(key);
+  if (!set) { set = new Set(); state.members.set(key, set); }
+  set.add(clientId);
+};
 state.reset = () => {
+  state.members.clear();
   state.families.clear();
   state.logs.clear();
   state.deleted.clear();
@@ -302,10 +310,14 @@ globalThis.fetch = async function fakeFetch(url, options = {}) {
   if (pathname === '/api/family/connect' && method === 'POST') {
     state.requests.push({ kind: 'connect', clientId, status: 200 });
     const body = options.body ? JSON.parse(options.body) : {};
-    if (state.families.has(syncKey)) return makeJsonResponse({ ok: true, isNewFamily: false });
+    if (state.families.has(syncKey)) {
+      state.addMember(syncKey, clientId);
+      return makeJsonResponse({ ok: true, isNewFamily: false });
+    }
     // 영구 삭제한 가족은 allowCreate와 상관없이 410이고 다시 생기지 않습니다.
     if (state.deleted.has(syncKey) || !body.allowCreate) return missingResponse(syncKey);
     createFamily(syncKey);
+    state.addMember(syncKey, clientId);
     return makeJsonResponse({ ok: true, isNewFamily: true });
   }
 
@@ -314,12 +326,18 @@ globalThis.fetch = async function fakeFetch(url, options = {}) {
     if (state.beforeRead) await state.beforeRead();
     const fam = state.families.get(syncKey);
     if (!fam) return missingResponse(syncKey);
-    return makeJsonResponse({
+    const tokenResponse = {
       ok: true,
       changeToken: `${fam.updatedAt}:${fam.lastClientId || ''}`,
       profileUpdatedAt: fam.profileUpdatedAt || 0,
       deletionReadyAt: fam.pendingDeletionAt || null,
-    });
+    };
+    // members=1이면 요청한 클라이언트가 아닌 회원 수를 싣습니다(07 2.7-2). 값이 없으면 응답은 그대로입니다.
+    if (parsedUrl.searchParams.get('members') === '1') {
+      const others = [...(state.members.get(syncKey) ?? [])].filter((id) => id !== clientId);
+      tokenResponse.otherMembers = others.length;
+    }
+    return makeJsonResponse(tokenResponse);
   }
 
   // 3. POST /api/family/sync
@@ -346,6 +364,14 @@ globalThis.fetch = async function fakeFetch(url, options = {}) {
 
   // 6. POST /api/family/delete (냉각 기간 검증 강제)
   if (pathname === '/api/family/delete' && method === 'POST') {
+    // 1.7.9 삭제 따르기(07 2.7-1): 가족이 없을 때만 삭제 기록을 남깁니다. 가족이 있으면 409, 이미 삭제됐으면 410.
+    const legacyBody = options.body ? JSON.parse(options.body) : {};
+    if (legacyBody.legacyDeletion === true) {
+      if (state.families.has(syncKey)) return makeJsonResponse({ ok: false, error: 'family_exists' }, 409);
+      if (state.deleted.has(syncKey)) return makeJsonResponse({ ok: false, error: 'family_deleted' }, 410);
+      state.deleted.add(syncKey);
+      return makeJsonResponse({ ok: true });
+    }
     const fam = state.families.get(syncKey);
     if (!fam) return missingResponse(syncKey);
     if (!fam.pendingDeletionAt || fam.pendingDeletionAt > now()) {
@@ -353,6 +379,7 @@ globalThis.fetch = async function fakeFetch(url, options = {}) {
     }
     state.families.delete(syncKey);
     state.logs.delete(syncKey);
+    state.members.delete(syncKey);
     state.deleted.add(syncKey);
     return makeJsonResponse({ ok: true });
   }

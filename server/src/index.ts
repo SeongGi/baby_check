@@ -227,12 +227,22 @@ export default {
         }
 
         const changeToken = `${family.updated_at}:${family.last_client_id || ''}`;
-        return jsonResponse({
+        const tokenResponse: Record<string, unknown> = {
           ok: true,
           changeToken,
           profileUpdatedAt: family.profile_updated_at || 0,
           deletionReadyAt: family.deletion_ready_at,
-        });
+        };
+        // 전환기(07 2.6)가 있는 기기만 members=1로 요청한다. 값이 없으면 쿼리를 더하지 않고 응답도 그대로다.
+        if (url.searchParams.get('members') === '1') {
+          const others = await env.DB.prepare(
+            'SELECT COUNT(*) AS n FROM members WHERE family_id = ?1 AND client_id != ?2',
+          )
+            .bind(familyId, clientId)
+            .first<{ n: number }>();
+          tokenResponse.otherMembers = Number(others?.n ?? 0);
+        }
+        return jsonResponse(tokenResponse);
       }
 
       // 3. GET /api/family/deletion-status
@@ -296,6 +306,29 @@ export default {
 
       // 6. POST /api/family/delete (영구 삭제: 냉각 기간 검증 강제)
       if (request.method === 'POST' && path === '/api/family/delete') {
+        // 1.7.9에서 삭제를 예약한 가족의 "삭제에 따르기"(07 2.7-1). 가족 행을 미리 읽지 않고 한 문장으로 판정한다.
+        // 가족이 없을 때만 삭제 기록을 남기므로, 그 사이 이어받기가 만든 살아 있는 가족에는 기록이 붙지 않는다.
+        if (body.legacyDeletion === true) {
+          const t = now(env);
+          const inserted = await env.DB.prepare(
+            `INSERT OR IGNORE INTO deleted_families (id, deleted_at)
+             SELECT ?1, ?2
+             WHERE NOT EXISTS (SELECT 1 FROM families WHERE id = ?1)`,
+          )
+            .bind(familyId, t)
+            .run();
+          if (changesOf(inserted) === 1) {
+            return jsonResponse({ ok: true });
+          }
+          const deleted = await env.DB.prepare('SELECT 1 AS found FROM deleted_families WHERE id = ?1')
+            .bind(familyId)
+            .first<{ found: number }>();
+          if (deleted) {
+            return errorResponse('family_deleted', 410);
+          }
+          return errorResponse('family_exists', 409);
+        }
+
         const family = await env.DB.prepare('SELECT deletion_ready_at FROM families WHERE id = ?1')
           .bind(familyId)
           .first<FamilyRow>();
