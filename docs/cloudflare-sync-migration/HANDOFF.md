@@ -422,3 +422,19 @@
 1. 실데이터 점검(읽기 전용, `07` 6장). `sources.mjs` 필드 변환은 1.7.9와 맞는 것을 확인했다(문서 id = 기록 id, `payload.updatedAt`·`timestamp`는 밀리초 숫자, 삭제는 `deleted === true`). 실행 전에 성기님 승인과 서비스 계정 JSON 위치가 필요하다.
 2. Worker 배포(`server/deploy.sh`) → 푸시·PR·머지 → Play Alpha 업로드(1.8.0 코드 28, 파일 선택은 성기님) → 원스토어 APK → (출시 뒤) Firestore 운영자 정리.
 - 실데이터 점검(성기님 승인, 2026-10-31): `07` 6.1. 실사용 가족 하나(기록 2,426건), 삭제 예약 0, 규칙 일치, 하루 읽기 약 2.5만. 이전을 막는 값은 없다. 서비스 계정 키는 `~/.config/babycheck/admin-key.json`(저장소 밖)에 있고, 출시 뒤 정리 전 점검에 다시 쓸 수 있다.
+
+## 28. 진행 기록과 다음 세션이 할 일 (2026-10-31, 세션 cd1a5388 마무리)
+- **성기님 승인(2026-10-31): "웅 키고 진행해"로 Worker 배포를 승인했다.** 이 승인은 배포(`server/deploy.sh`)와 배포 뒤 응답 확인까지다. 푸시·PR·머지, Play·원스토어는 여전히 **승인 전**이다.
+- `server/deploy.sh` 1~3단계는 성공했다. D1 `baby-check-db`(id `fc0734e1-5958-4762-811f-9c36948f160d`, 지역 APAC/ICN)를 만들었고 `schema.sql`을 적용했다(표 4개). `wrangler.toml`의 `database_id`를 커밋했다.
+- **4단계(Worker 배포)가 실패했다.** Cloudflare 오류 `code: 10034`의 내용은 "You need to verify your email address to use Workers"이다. 경고로 "workers.dev 하위 도메인을 먼저 등록해야 한다"도 나왔다. 그래서 5단계(`cloudConfig.ts`에 URL 반영)는 실행되지 않았다.
+- 성기님이 할 일: ① sgchoi1547@gmail.com 메일함에서 Cloudflare 인증 메일의 링크를 누른다(없으면 대시보드 상단 배너에서 다시 보내기). ② Cloudflare 대시보드 → Workers & Pages에서 workers.dev 하위 도메인을 정한다(이름은 성기님이 고른다).
+- 서비스 계정 키: `~/.config/babycheck/admin-key.json`(저장소 밖, 권한 600). 출시 뒤 정리 전 점검에 쓰고, 그 뒤 콘솔에서 지우기를 권한다.
+
+### 다음 세션이 할 일 (이 순서대로)
+1. `git log --oneline -3`과 `git status --short`로 작업 트리가 깨끗한지 확인한다.
+2. 성기님께 위 ①②를 마쳤는지 묻는다(쉬운 말로 안내한다). 마쳤으면 `bash server/deploy.sh`를 다시 돌린다. D1이 이미 있으므로 스크립트는 기존 id를 쓰고, 스키마는 `CREATE TABLE IF NOT EXISTS`인지 먼저 `server/schema.sql`에서 확인한 뒤 돌린다(아니면 3단계를 건너뛰고 `npx wrangler deploy`만 돌린 뒤 URL을 `src/database/cloudConfig.ts`의 `DEFAULT_WORKER_URL`에 직접 적는다).
+3. 배포 뒤 응답 확인: 시험용 가족을 만들지 말고, 잘못된 키나 빈 본문 요청이 4xx로 거절되는지, `config` 엔드포인트가 응답하는지만 본다(`04-검증.md` 6장의 `wrangler dev --local` 확인과 같은 항목). 결과를 `04-검증.md`에 적는다.
+4. `cloudConfig.ts` 변경을 커밋하고, 전체 검사(`tsc` 두 개, `test:voice`, `verify.sh offline`, `verify.sh rules`)를 `ulimit -u` 상한 안에서 다시 돌린다.
+5. 18장 다음 순서: 푸시·PR·머지 → Play Alpha 업로드(1.8.0 코드 28, 파일 선택은 성기님) → 원스토어 APK. **모두 승인 전**이고, 실행 직전에 검증 결과와 함께 성기님께 확인한다.
+- 보고 방식: 성기님 요청으로 쉬운 말로 먼저 요약하고(좋음/문제), 용어는 풀어서 쓴다.
+- 하지 말 것: 5장 그대로. Firestore에 쓰거나 지우지 않는다. 서비스 계정 키를 저장소에 넣거나 화면에 출력하지 않는다.

@@ -10,4 +10,4 @@ MAX_PAGE_ROWS = "500"
 [[d1_databases]]
 binding = "DB"
 database_name = "baby-check-db"
-database_id = "baby-check-db-placeholder"
+database_id = "fc0734e1-5958-4762-811f-9c36948f160d"
