@@ -19,8 +19,10 @@ import { DISTRIBUTION_STORE, getInstalledAppVersion, openGooglePlayListing } fro
 import { BabyProfile, BabyLogEntry } from '../types';
 import { COLORS } from '../theme/colors';
 import { KeyboardAwareScrollView } from '../components/KeyboardAwareScrollView';
-import { getLogs, getLocalBackup, restoreFromLocalBackup } from '../database/storage';
+import { getLogs, getProfile, getLocalBackup, restoreFromLocalBackup, getPreMigrationBackupInfo, restorePreMigrationBackup, getMigrationState, clearLegacyKeyMarker } from '../database/storage';
 import { createFamilyInviteLink, createFamilySyncId, parseFamilySyncId, FamilyDeletionStatus } from '../database/sync';
+import { shouldCheckDeletionStatus } from '../database/migrationDecision';
+import type { MigrationGate } from '../database/migrationDecision';
 
 const PRIVACY_POLICY_URL = 'https://seonggi.github.io/baby_check/privacy-policy.html';
 
@@ -33,8 +35,21 @@ interface ProfileProps {
     syncKey: string,
     createBackup?: boolean,
     allowFamilyCreation?: boolean,
-    connecting?: boolean,
-  ) => Promise<{ success: boolean; merged: boolean; error?: string }>;
+  ) => Promise<{ success: boolean; merged: boolean; error?: string; migrationPending?: boolean }>;
+  // 합류와 가족 만들기는 이전 모듈의 joinFamily만 부릅니다(07 2.9). outcome이 'joined'가 아니면 error가 안내 문구입니다.
+  onJoinFamily: (
+    syncKey: string,
+    options?: { allowFamilyCreation?: boolean },
+  ) => Promise<{
+    success: boolean;
+    merged: boolean;
+    error?: string;
+    outcome?: 'joined' | 'not_found' | 'deleted' | 'pending_deletion_choice' | 'cancelled' | 'failed';
+  }>;
+  /** 1.7.9 가족 합류 중 "이전 서버에서 가족 정보를 확인하는 중" 안내 */
+  joinProgress?: string | null;
+  /** 이전 관문 판정(저장소와 메모리만 읽음). 'paused'이면 D1 삭제 상태 확인을 하지 않습니다(07 2.3 설정 화면). */
+  onGetMigrationGate: (syncKey: string) => Promise<MigrationGate>;
   onDeleteFamilyData: (syncKey: string) => Promise<{ success: boolean; error?: string; partiallyDeleted?: boolean }>;
   onScheduleFamilyDeletion: (syncKey: string) => Promise<{ success: boolean; readyAt?: number; error?: string }>;
   onCancelFamilyDeletion: (syncKey: string) => Promise<{ success: boolean; error?: string }>;
@@ -47,6 +62,9 @@ export const Profile: React.FC<ProfileProps> = ({
   onImportData,
   onRestoreData,
   onSync,
+  onJoinFamily,
+  joinProgress,
+  onGetMigrationGate,
   onDeleteFamilyData,
   onScheduleFamilyDeletion,
   onCancelFamilyDeletion,
@@ -113,6 +131,11 @@ export const Profile: React.FC<ProfileProps> = ({
   const deletionInFlightRef = useRef(false);
   const completedDeletionKeyRef = useRef<string | null>(null);
   const deletionActionVersionRef = useRef(0);
+  // 이전 준비 중인 키는 D1 삭제 상태를 확인하지 않고 삭제 영역에 "이전 준비 중"을 보입니다(07 2.3).
+  const [deletionPaused, setDeletionPaused] = useState(false);
+  // 이 기기에 `mergeSource: 'ok'` 이전 상태가 있을 때만 삭제 확인 화면에 Firebase 사본 안내 한 줄을 보입니다(07 2.8).
+  const [hasFirebaseCopy, setHasFirebaseCopy] = useState(false);
+  const [preMigrationBackup, setPreMigrationBackup] = useState<{ savedAt: number; logCount: number } | null>(null);
   const DELETE_FAMILY_CONFIRM_PHRASE = '삭제합니다';
 
   // 예약 기한과 앱 복귀 시 서버 상태를 다시 확인합니다. 앱이 종료된 동안에는
@@ -121,6 +144,7 @@ export const Profile: React.FC<ProfileProps> = ({
     if (!profile.syncKey) {
       completedDeletionKeyRef.current = null;
       setDeletionStatus(null);
+      setDeletionPaused(false);
       return;
     }
     if (completedDeletionKeyRef.current === profile.syncKey) return;
@@ -129,6 +153,21 @@ export const Profile: React.FC<ProfileProps> = ({
     const key = profile.syncKey;
     const check = async () => {
       if (deletionInFlightRef.current) return;
+      // 관문이 'paused'이면 D1을 직접 부르는 이 확인을 하지 않습니다. 이전이 끝나면 다시 확인합니다.
+      let gate: MigrationGate = 'proceed';
+      try {
+        gate = await onGetMigrationGate(key);
+      } catch {
+        // 관문을 읽지 못해도 기록은 줄지 않으므로 평소처럼 진행합니다(러너와 같은 규칙).
+      }
+      if (cancelled) return;
+      if (!shouldCheckDeletionStatus(gate)) {
+        setDeletionPaused(true);
+        if (timer) clearTimeout(timer);
+        timer = setTimeout(() => { void check(); }, 10_000);
+        return;
+      }
+      setDeletionPaused(false);
       const actionVersion = deletionActionVersionRef.current;
       let status: FamilyDeletionStatus;
       try {
@@ -198,6 +237,85 @@ export const Profile: React.FC<ProfileProps> = ({
     };
     loadBackupInfo();
   }, []);
+
+  // 1.8.0 업데이트 직전 백업(07 2.10). 백업이 없으면(저장 실패 후 건너뜀 포함) 목록에 보이지 않습니다.
+  useEffect(() => {
+    let cancelled = false;
+    getPreMigrationBackupInfo()
+      .then(info => { if (!cancelled) setPreMigrationBackup(info); })
+      .catch(() => undefined);
+    return () => { cancelled = true; };
+  }, []);
+
+  // 삭제 확인 화면을 열 때와 키가 바뀔 때 이전 상태를 읽습니다(저장소 읽기만 합니다).
+  useEffect(() => {
+    if (!profile.syncKey) {
+      setHasFirebaseCopy(false);
+      return;
+    }
+    let cancelled = false;
+    getMigrationState(profile.syncKey)
+      .then(state => { if (!cancelled) setHasFirebaseCopy(state.mergeSource === 'ok'); })
+      .catch(() => { if (!cancelled) setHasFirebaseCopy(false); });
+    return () => { cancelled = true; };
+  }, [profile.syncKey, showDeleteFamilyConfirm]);
+
+  const formatBackupTime = (timestamp: number): string => {
+    const d = new Date(timestamp);
+    return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')} ${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`;
+  };
+
+  // 기존 복원(통째로 바꿈)과 가져오기(새 id, 프로필 덮어쓰기)는 쓰지 않습니다. 백업에만 있는 기록을 추가만 합니다.
+  const handleRestorePreMigrationBackup = () => {
+    if (!preMigrationBackup) return;
+    Alert.alert(
+      '1.8.0 업데이트 직전 기록 복원',
+      '업데이트 직전 백업에는 있고 지금 이 기기에는 없는 기록만 추가합니다. 지금 있는 기록과 프로필은 바뀌지 않고, 지워지는 기록도 없습니다. (이미 삭제한 기록은 되살리지 않습니다.)\n\n계속하시겠습니까?',
+      [
+        { text: '취소', style: 'cancel' },
+        {
+          text: '기록 추가',
+          onPress: async () => {
+            try {
+              const result = await restorePreMigrationBackup();
+              if (!result.success || !result.logs) {
+                Alert.alert('복원 실패', '업데이트 직전 백업을 읽지 못했습니다.');
+                return;
+              }
+              if (result.added === 0) {
+                Alert.alert('추가할 기록 없음', '백업의 모든 기록이 이미 이 기기에 있거나 삭제 처리된 기록입니다.');
+                return;
+              }
+              // 프로필은 저장소의 최신 값을 그대로 넘겨 화면에 반영만 합니다(기록 추가 외에는 바꾸지 않습니다).
+              await onRestoreData(await getProfile(), result.logs);
+              Alert.alert('복원 완료', `업데이트 직전 백업에서 기록 ${result.added}건을 추가했습니다. 다음 동기화에서 가족에게도 올라갑니다.`);
+            } catch (e) {
+              console.error(e);
+              Alert.alert('복원 실패', '업데이트 직전 기록을 추가하지 못했습니다.');
+            }
+          },
+        },
+      ],
+    );
+  };
+
+  // 개발 메뉴(__DEV__): 시험 빌드를 쓴 기기의 1.7.9 연결 근거 표식을 비웁니다. 키를 지우지 않고 빈 표식으로 덮어씁니다(07 2.1).
+  const handleClearLegacyMarker = () => {
+    Alert.alert(
+      '연결 근거 표식 비우기',
+      '1.7.9 연결 근거 표식을 빈 값으로 덮어씁니다. 기록과 프로필은 바뀌지 않습니다.',
+      [
+        { text: '취소', style: 'cancel' },
+        {
+          text: '비우기',
+          onPress: async () => {
+            const ok = await clearLegacyKeyMarker();
+            Alert.alert(ok ? '완료' : '실패', ok ? '표식을 비웠습니다.' : '표식을 비우지 못했습니다.');
+          },
+        },
+      ],
+    );
+  };
 
   const handleRestoreBackup = async () => {
     Alert.alert(
@@ -313,7 +431,7 @@ export const Profile: React.FC<ProfileProps> = ({
       
       if (saved) {
         dirtyFieldsRef.current.clear();
-        const result = await onSync(newSyncId, true, allowFamilyCreation, true);
+        const result = await onJoinFamily(newSyncId, { allowFamilyCreation });
         if (result.success) {
           setSyncKey(newSyncId);
           if (showSuccess) {
@@ -323,10 +441,15 @@ export const Profile: React.FC<ProfileProps> = ({
             );
           }
           return true;
+        } else if (result.outcome === 'cancelled') {
+          Alert.alert('가족 합류 취소', result.error || '가족 합류를 취소했습니다.');
+          return false;
         } else {
           Alert.alert(
             '가족 연결 실패',
-            `서버에 연결하지 못했습니다.\n\n[상세 오류]: ${result.error || '알 수 없는 오류'}`,
+            result.outcome && result.outcome !== 'failed'
+              ? (result.error || '알 수 없는 오류')
+              : `서버에 연결하지 못했습니다.\n\n[상세 오류]: ${result.error || '알 수 없는 오류'}`,
           );
           return false;
         }
@@ -365,6 +488,9 @@ export const Profile: React.FC<ProfileProps> = ({
             ? '상대방 기기의 변경사항을 받아와 합쳤습니다.'
             : '서버와 확인을 마쳤습니다. 새로운 변경사항은 없습니다.',
         );
+      } else if (result.migrationPending) {
+        // 이전 준비 중은 실패가 아닙니다(07 2.3).
+        Alert.alert('이전 준비 중', '이전 서버의 기록을 새 서버로 옮기는 중입니다. 기록은 이 기기에 그대로 있고, 준비되면 자동으로 동기화됩니다.');
       } else {
         Alert.alert(
           '동기화 실패',
@@ -740,6 +866,7 @@ export const Profile: React.FC<ProfileProps> = ({
               >
                 <Text style={styles.syncButtonText}>받은 초대로 연결하기</Text>
               </TouchableOpacity>
+              {isSyncing && !!joinProgress && <Text style={styles.reminderHint}>{joinProgress}</Text>}
             </>
           )}
         </View>
@@ -777,6 +904,18 @@ export const Profile: React.FC<ProfileProps> = ({
               <Text style={styles.restoreButtonText}>로컬 백업에서 복원 ⏮️</Text>
             </TouchableOpacity>
           </View>
+
+          {/* 1.8.0 업데이트 직전 기록: 백업에만 있는 기록을 추가만 합니다(07 2.10). */}
+          {!!preMigrationBackup && (
+            <View style={styles.restoreSection}>
+              <Text style={styles.restoreLabel}>
+                {`📅 1.8.0 업데이트 직전 기록: ${formatBackupTime(preMigrationBackup.savedAt)} (${preMigrationBackup.logCount}건)`}
+              </Text>
+              <TouchableOpacity style={styles.restoreButton} onPress={handleRestorePreMigrationBackup}>
+                <Text style={styles.restoreButtonText}>업데이트 직전 기록 추가 복원 ⏮️</Text>
+              </TouchableOpacity>
+            </View>
+          )}
         </View>
 
         {/* Google Play가 이 테스터에게 제공되는 최신 빌드를 판단합니다. */}
@@ -842,7 +981,9 @@ export const Profile: React.FC<ProfileProps> = ({
 
           {!!profile.syncKey && (
             <View style={styles.dangerZone}>
-              {deletionStatus?.error ? (
+              {deletionPaused ? (
+                <Text style={styles.dangerWarningText}>이전 준비 중입니다. 이전이 끝나면 가족 서버 데이터 삭제 상태를 확인할 수 있습니다.</Text>
+              ) : deletionStatus?.error ? (
                 <>
                   <Text style={styles.dangerWarningText}>⚠️ 삭제 예약 상태를 확인하지 못했습니다: {deletionStatus.error}</Text>
                   <TouchableOpacity
@@ -898,6 +1039,7 @@ export const Profile: React.FC<ProfileProps> = ({
                     지워지지 않습니다. 진행 전 "데이터 내보내기"로 백업하는 것을 권장합니다.
                     {'\n\n'}예약을 누르면 즉시 지워지지 않습니다. 1시간 뒤부터 이 기기에서
                     설정 화면을 열고 인터넷에 연결하면 삭제됩니다. 그 전까지는 취소할 수 있습니다.
+                    {hasFirebaseCopy ? '\n\n이전 서버(Firebase)에 남은 예전 사본은 운영자가 따로 삭제합니다.' : ''}
                   </Text>
                   <TextInput
                     style={styles.input}
@@ -939,6 +1081,17 @@ export const Profile: React.FC<ProfileProps> = ({
             </View>
           )}
         </View>
+
+        {/* 개발 메뉴: 개발 빌드(__DEV__)에서만 보입니다. */}
+        {__DEV__ && (
+          <View style={styles.backupCard}>
+            <Text style={styles.backupTitle}>🛠 개발 메뉴</Text>
+            <Text style={styles.backupDesc}>시험 빌드를 쓴 기기용입니다. 1.7.9 연결 근거 표식을 빈 값으로 덮어씁니다(키는 지우지 않습니다).</Text>
+            <TouchableOpacity style={styles.restoreButton} onPress={handleClearLegacyMarker}>
+              <Text style={styles.restoreButtonText}>이전 표식 비우기</Text>
+            </TouchableOpacity>
+          </View>
+        )}
 
         {/* Info Box */}
         <View style={styles.infoCard}>

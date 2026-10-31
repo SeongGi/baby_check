@@ -18,9 +18,17 @@ import AsyncStorage from '@react-native-async-storage/async-storage';
 import { SafeAreaProvider, useSafeAreaInsets } from 'react-native-safe-area-context';
 import { COLORS } from './src/theme/colors';
 import { BabyLogEntry, BabyProfile } from './src/types';
-import { getLogs, getProfile, addLog, deleteLog, updateLog, saveProfile, migrateStoredData, importDataWithoutLoss, backupLocalData } from './src/database/storage';
-import { cancelFamilyDeletion, deleteFamilyCloudData, getFamilyDeletionStatus, parseFamilySyncId, readFamilyChangeToken, refreshCloudConnection, scheduleFamilyDeletion, subscribeToCloudChanges, syncWithCloud } from './src/database/sync';
-import { withSyncDeadline } from './src/database/syncDeadline';
+import { getLogs, getProfile, addLog, deleteLog, updateLog, saveProfile, migrateStoredData, importDataWithoutLoss, backupLocalData, readProfileAfterPendingWrites } from './src/database/storage';
+import * as storage from './src/database/storage';
+import * as cloudClient from './src/database/cloudClient';
+import { cancelFamilyDeletion, deleteFamilyCloudData, getFamilyDeletionStatus, getSyncClientId, parseFamilySyncId, readFamilyChangeToken, scheduleFamilyDeletion, subscribeToCloudChanges, syncWithCloud } from './src/database/sync';
+import { createSyncRunner } from './src/database/syncRunner';
+import { decideAfterTokenError } from './src/database/syncDecision';
+// 이전 모듈은 firestoreImport.ts와 firebase.ts를 동적 import()로만 불러옵니다(07 2.3.1, 2.11). 혼자 쓰는 기기와
+// 1.8.0 신규 가족은 두 모듈을 불러오지 않으므로 App은 이 둘을 정적으로 import하지 않습니다.
+import { createFamilyMigrator, MIGRATION_MESSAGES } from './src/database/familyMigration';
+import type { FamilyMigrator, LegacyDeletionChoice, LegacyDeletionPrompt, MigratorNotice } from './src/database/familyMigration';
+import { shouldAlertOnRefresh, shouldStartPolling } from './src/database/migrationDecision';
 import { refreshFeedingReminder } from './src/utils/feedingReminder';
 import { canDispatchAutoVoiceLaunch, getAutoVoiceLaunchAction } from './src/utils/autoVoiceLaunch';
 import { Dashboard } from './src/screens/Dashboard';
@@ -38,7 +46,41 @@ const SYNC_TIMEOUT_MS = 20_000;
 const SYNC_POLL_INTERVAL_MS = 90_000;
 const AUTO_VOICE_ON_OPEN_KEY = '@babycheck/autoVoiceOnOpen';
 
-type SyncState = 'idle' | 'syncing' | 'error';
+// 'pending'은 이전 준비 중입니다(07 2.3 관문). 오류가 아니라서 재시도 배너를 띄우지 않습니다.
+type SyncState = 'idle' | 'syncing' | 'error' | 'pending';
+
+type JoinOutcome = 'joined' | 'not_found' | 'deleted' | 'pending_deletion_choice' | 'cancelled' | 'failed';
+// 이전 모듈이 문구(message)를 주지 않은 경우의 안내입니다.
+const JOIN_FALLBACK_MESSAGES: Record<JoinOutcome, string> = {
+  joined: '',
+  not_found: '가족 정보를 찾지 못했습니다. 초대 링크를 다시 받아 주세요.',
+  deleted: MIGRATION_MESSAGES.joinDeleted,
+  pending_deletion_choice: '이전 서버의 삭제 요청이 정리되지 않아 합류하지 않았습니다. 다시 시도해 주세요.',
+  cancelled: MIGRATION_MESSAGES.joinCancelled,
+  failed: '서버에 연결하지 못했습니다.',
+};
+
+// 1.7.9 삭제 예약 선택 화면(07 2.4.1, 2.4-6, 2.6.3)의 선택지 이름표입니다.
+const legacyChoiceLabel = (choice: LegacyDeletionChoice, context: LegacyDeletionPrompt['context']): string => {
+  switch (choice) {
+    case 'cancelRequest': return context === 'joining' ? '요청 취소하고 합류' : '요청 취소하고 계속 쓰기';
+    case 'followDeletion': return '삭제에 따르기';
+    case 'cancelJoin': return '합류 취소';
+    case 'later': return '나중에';
+  }
+};
+
+const legacyDeletionMessage = (prompt: LegacyDeletionPrompt): string => {
+  const when = new Date(prompt.pendingDeletionAt).toLocaleString('ko-KR');
+  if (prompt.context === 'joining') {
+    return `이 가족에는 이전 버전에서 서버 데이터 삭제를 요청한 기록이 있습니다. (예약 ${when})\n\n요청을 취소하고 합류하거나, 합류를 취소할 수 있습니다.`;
+  }
+  const head = prompt.context === 'transition'
+    ? '상대 기기(이전 버전)에서 가족 서버 데이터 삭제를 요청했습니다.'
+    : '이전 버전에서 가족 서버 데이터 삭제를 요청한 기록이 있습니다.';
+  return `${head} (예약 ${when})\n\n"삭제에 따르기"를 골라도 이 기기의 기록은 지우지 않습니다. 이전 서버(Firebase)에 남은 예전 사본은 운영자가 따로 삭제합니다.`;
+};
+
 
 function MainApp() {
   const [logs, setLogs] = useState<BabyLogEntry[]>([]);
@@ -58,15 +100,17 @@ function MainApp() {
   const [refreshing, setRefreshing] = useState(false);
   const [syncState, setSyncState] = useState<SyncState>('idle');
   const [lastSyncedAt, setLastSyncedAt] = useState<number | null>(null);
-  const syncQueueRef = useRef<Promise<void>>(Promise.resolve());
   const processedInviteRef = useRef<string | null>(null);
   const processedNotificationRef = useRef<string | null>(null);
   // 마지막으로 반영한 가족 변경 지점입니다. 주기 확인에서 이 값이 그대로면
   // 기록 전체를 다시 읽지 않고 넘어갑니다.
   const lastChangeTokenRef = useRef<string | null>(null);
   const lastSyncFailedRef = useRef(false);
-  const activeSyncAbortRef = useRef<{ aborted: boolean } | null>(null);
   const [syncError, setSyncError] = useState<string | null>(null);
+  // 1.7.9 가족 합류 중 "이전 서버에서 가족 정보를 확인하는 중" 안내(07 2.9). 설정 화면이 보여 줍니다.
+  const [joinProgress, setJoinProgress] = useState<string | null>(null);
+  // 이전 모듈이 마지막으로 알린 오류 문구. 이전 준비 중에는 이 문구를 동기화 오류로 계속 보여 줍니다.
+  const migrationErrorRef = useRef<string | null>(null);
 
   const insets = useSafeAreaInsets();
 
@@ -134,167 +178,195 @@ function MainApp() {
     }
   };
 
-  // 자동 동기화, 당겨서 새로고침, 저장 직후 업로드가 겹치지 않도록 한 줄로 실행합니다.
-  const isSyncRunningRef = useRef(false);
-  // 대기 중인 동기화는 반드시 가족 키별로 따로 보관합니다. 하나로 합치면 가족을
-  // 바꾼 직후의 요청이 이전 가족의 결과를 돌려받아, 새 가족의 업로드가 조용히
-  // 건너뛰어지고 화면에는 엉뚱한 성공/실패가 표시됩니다.
-  const pendingSyncByKeyRef = useRef<Map<string, Promise<any>>>(new Map());
+  // 이전 모듈(07 2.3)과 러너는 서로를 참조합니다. 러너의 관문이 이전 모듈을 부르고, 이전 모듈이 러너에
+  // 요청을 넣습니다. 그래서 이전 모듈은 러너를 함수(`getRunner`)로 받습니다. 둘 다 한 번만 만듭니다.
+  const syncRunnerRef = useRef<ReturnType<typeof createSyncRunner> | null>(null);
+  const migratorRef = useRef<FamilyMigrator | null>(null);
+  if (!migratorRef.current) {
+    migratorRef.current = createFamilyMigrator({
+      storage,
+      cloud: {
+        connectFamily: cloudClient.connectFamily,
+        deleteFamilyData: cloudClient.deleteFamilyData,
+        getSyncToken: cloudClient.getSyncToken,
+        scheduleFamilyDeletion: cloudClient.scheduleFamilyDeletion,
+      },
+      getClientId: getSyncClientId,
+      getRunner: () => syncRunnerRef.current!,
+      // 백업 저장 실패(07 2.4-1): "백업 없이 계속"은 한 번만 묻습니다. 화면을 닫으면 이전을 멈춘 채 둡니다.
+      askBackupFailure: () => new Promise<'continue' | 'later'>(resolve => {
+        Alert.alert(
+          '업데이트 전 백업 실패',
+          `${MIGRATION_MESSAGES.backupFailed}\n\n백업 없이 계속해도 이전은 기록을 합치기만 하므로 기록이 줄지 않습니다.`,
+          [
+            { text: '나중에', style: 'cancel', onPress: () => resolve('later') },
+            { text: '백업 없이 계속', onPress: () => resolve('continue') },
+          ],
+          { cancelable: false, onDismiss: () => resolve('later') },
+        );
+      }),
+      // 선택지는 `prompt.options`에 들어 있는 것만 보여 줍니다. 합류 중(`joining`)에는 둘뿐입니다(07 2.4.1 끝).
+      askLegacyDeletionChoice: prompt => new Promise<LegacyDeletionChoice>(resolve => {
+        const dismissChoice: LegacyDeletionChoice = prompt.context === 'joining' ? 'cancelJoin' : 'later';
+        Alert.alert(
+          prompt.context === 'joining' ? '삭제 요청이 있는 가족' : '가족 서버 데이터 삭제 요청',
+          legacyDeletionMessage(prompt),
+          prompt.options.map(choice => ({
+            text: legacyChoiceLabel(choice, prompt.context),
+            style: choice === 'later' || choice === 'cancelJoin' ? 'cancel' as const
+              : choice === 'followDeletion' ? 'destructive' as const : 'default' as const,
+            onPress: () => resolve(choice),
+          })),
+          { cancelable: false, onDismiss: () => resolve(dismissChoice) },
+        );
+      }),
+      notify: (notice: MigratorNotice) => {
+        if (notice.code === 'legacyJoinChecking') {
+          // 합류 도중의 진행 안내는 경고창이 아니라 설정 화면의 한 줄로 보입니다.
+          setJoinProgress(notice.message);
+          return;
+        }
+        const isStateError = notice.level === 'error'
+          && (notice.code.startsWith('firestore_') || notice.code === 'keyFormat' || notice.code === 'serverAnomaly');
+        if (isStateError) {
+          // 이전 단계 자체의 오류는 동기화 오류 배너로 보입니다(경고창을 반복해서 띄우지 않습니다).
+          migrationErrorRef.current = notice.message;
+          setSyncState('error');
+          setSyncError(notice.message);
+          return;
+        }
+        Alert.alert(notice.level === 'error' ? '이전 처리 안내' : '안내', notice.message);
+      },
+    });
+  }
 
-  const syncLatestData = async (
+  // 대기열, 합치기, 상한, 상한 뒤 판정, 이어 가기는 syncRunner가 맡고, App은 러너가
+  // 알려 주는 사건을 화면 상태에 반영하는 일만 합니다.
+  if (!syncRunnerRef.current) {
+    syncRunnerRef.current = createSyncRunner({
+      syncWithCloud,
+      getLogs,
+      getProfile,
+      saveProfile,
+      readProfileAfterPendingWrites,
+      timeoutMs: SYNC_TIMEOUT_MS,
+      // 이전 준비 중인 가족은 D1에 요청하지 않습니다. 연결 회차는 관문을 거치지 않습니다(07 2.3).
+      migrationGate: key => migratorRef.current!.migrationGate(key),
+      onEvent: event => {
+        switch (event.type) {
+          case 'started':
+            setSyncState('syncing');
+            break;
+          case 'migrationPending':
+            // 오류가 아니라 "이전 준비 중"입니다. 이전 모듈이 알린 오류가 있으면 그 문구를 계속 보입니다.
+            if (migrationErrorRef.current) {
+              setSyncState('error');
+              setSyncError(migrationErrorRef.current);
+            } else {
+              setSyncState('pending');
+              setSyncError(null);
+            }
+            break;
+          case 'succeeded':
+            setLastSyncedAt(Date.now());
+            lastSyncFailedRef.current = false;
+            if (event.notice) {
+              // 일부 기록이 너무 커서 공유하지 못했습니다. 나머지는 모두 동기화됐습니다.
+              setSyncState('error');
+              setSyncError(event.notice);
+            } else {
+              setSyncState('idle');
+              setSyncError(null);
+            }
+            // 이어 가기 회차는 호출한 화면이 없으므로 새로 받은 기록을 여기서 반영합니다.
+            if (event.continuation && event.result.merged) {
+              setLogs(event.result.logs);
+              setProfile(event.result.profile);
+              void refreshFeedingReminder(event.result.logs, event.result.profile);
+            }
+            break;
+          case 'failed':
+            setSyncState('error');
+            setSyncError(event.error || '서버에 연결하지 못했습니다.');
+            lastSyncFailedRef.current = true;
+            // 실패한 회차라도 앞서 받은 페이지는 저장소에 저장됐으므로 화면에도 반영합니다.
+            if (event.result?.merged) {
+              setLogs(event.result.logs);
+              setProfile(event.result.profile);
+              void refreshFeedingReminder(event.result.logs, event.result.profile);
+            }
+            break;
+          case 'disconnected':
+            setProfile(event.profile);
+            setSyncState('idle');
+            setSyncError(null);
+            lastSyncFailedRef.current = false;
+            Alert.alert(
+              '가족 연결 해제됨',
+              '다른 기기에서 가족 서버 데이터를 영구 삭제해 이 기기의 연결도 해제되었습니다. 이 기기에 저장된 기록은 그대로 남아 있습니다.',
+            );
+            break;
+          case 'detached':
+            setSyncState('idle');
+            setSyncError(null);
+            lastSyncFailedRef.current = false;
+            break;
+        }
+      },
+    });
+  }
+
+  const syncLatestData = (
     syncKey: string,
     createBackup = false,
     // 이미 연결돼 있던 가족이 다른 기기에서 영구 삭제된 경우, 평소 동기화가
     // 조용히 가족을 되살리고 로컬 기록을 재업로드하면 삭제가 무의미해집니다.
     // 그래서 기본값을 false로 두고, "새 가족 만들기"에서만 명시적으로 true를 줍니다.
     allowFamilyCreation = false,
-    connecting = false,
     forceFullRead = false,
-  ) => {
-    type SyncResult = Awaited<ReturnType<typeof syncWithCloud>>;
-    const normalizedKey = syncKey.trim();
+  ) => syncRunnerRef.current!.request({ syncKey, createBackup, allowFamilyCreation, forceFullRead });
 
-    // 특별한 설정(가족 가입, 백업 생성 등)이 없는 일반 동기화 요청이 연달아 들어오면
-    // 큐를 무한정 늘리는 대신 대기 중인 다음 회차에 합쳐 네트워크와 쓰기 한도를 아낍니다.
-    // 합치는 범위는 같은 가족 키로 한정합니다.
-    const isStandardSync = !createBackup && allowFamilyCreation && !connecting && !forceFullRead;
-    if (isStandardSync && isSyncRunningRef.current) {
-      const alreadyPending = pendingSyncByKeyRef.current.get(normalizedKey);
-      if (alreadyPending) return alreadyPending as Promise<SyncResult>;
-    }
-
-    let resolveVisible!: (result: SyncResult) => void;
-    let rejectVisible!: (error: unknown) => void;
-    const visibleResult = new Promise<SyncResult>((resolve, reject) => {
-      resolveVisible = resolve;
-      rejectVisible = reject;
+  // 평소 동기화가 끝난 뒤 전환기 읽기를 부릅니다(07 2.6.2). 5분(14일 뒤와 상대를 본 뒤에는 30분)보다
+  // 자주는 모듈이 건너뛰고, 이전이 끝나지 않은 키와 전환기가 없는 기기는 아무것도 하지 않습니다.
+  const runTransitionTick = (syncKey: string, force = false) => {
+    void migratorRef.current!.transitionTick(syncKey, { force }).catch(error => {
+      console.warn('Transition read failed', error);
     });
-
-    if (isStandardSync && isSyncRunningRef.current) {
-      pendingSyncByKeyRef.current.set(normalizedKey, visibleResult);
-    }
-
-    const run = async (): Promise<void> => {
-      isSyncRunningRef.current = true;
-      if (pendingSyncByKeyRef.current.get(normalizedKey) === visibleResult) {
-        pendingSyncByKeyRef.current.delete(normalizedKey);
-      }
-
-      const currentLogs = await getLogs();
-      const currentProfile = await getProfile();
-      if ((!connecting && currentProfile.syncKey !== normalizedKey)
-        || (connecting && currentProfile.syncKey && currentProfile.syncKey !== normalizedKey)) {
-        resolveVisible({
-          logs: currentLogs,
-          profile: currentProfile,
-          success: false,
-          merged: false,
-          error: 'Sync is not connected',
-        });
-        isSyncRunningRef.current = false;
-        return;
-      }
-      setSyncState('syncing');
-      const abortToken = { aborted: false };
-      activeSyncAbortRef.current = abortToken;
-      // Firestore 쓰기는 서버 응답 전까지 계속 대기합니다. 상한이 없으면 새로고침
-      // 표시가 영영 돌고, 뒤에 줄 서 있는 다음 동기화까지 모두 막힙니다.
-      const operation = syncWithCloud(
-        normalizedKey,
-        currentLogs,
-        currentProfile,
-        createBackup,
-        abortToken,
-        allowFamilyCreation,
-        forceFullRead,
-      );
-      try {
-        const result = await withSyncDeadline(operation, abortToken, () => ({
-          logs: currentLogs,
-          profile: currentProfile,
-          success: false,
-          merged: false,
-          error: '서버 응답을 기다리고 있어요. 연결 상태를 확인한 뒤 다시 시도해 주세요.',
-        }), SYNC_TIMEOUT_MS);
-        // 서버를 기다리는 동안 추가한 기록을 화면에서도 보존합니다.
-        const latestProfile = await getProfile();
-        const latestLogs = await getLogs();
-        result.logs = latestLogs;
-        result.profile = latestProfile;
-
-        // 사용자가 그 사이에 가족 연결을 해제했거나 다른 가족으로 바꾼 경우,
-        // 이전 가족의 늦은 실패 결과가 에러 배너를 다시 띄우지 않도록 정리합니다.
-        const isCurrentFamily = connecting
-          ? (latestProfile.syncKey === normalizedKey || !latestProfile.syncKey)
-          : (latestProfile.syncKey === normalizedKey);
-        if (!isCurrentFamily) {
-          if (!latestProfile.syncKey) {
-            setSyncState('idle');
-            setSyncError(null);
-            lastSyncFailedRef.current = false;
-          }
-          resolveVisible({ ...result, success: false, merged: false, error: '가족 연결이 해제되었거나 변경되었습니다.' });
-          return;
-        }
-
-        if (abortToken.aborted && !latestProfile.syncKey) {
-          setSyncState('idle');
-          setSyncError(null);
-          lastSyncFailedRef.current = false;
-          resolveVisible({ ...result, success: false, merged: false, error: '가족 연결이 해제되었습니다.' });
-          return;
-        }
-
-        // 이 기기가 이미 이 가족 키로 연결돼 있었는데(latestProfile.syncKey === normalizedKey,
-        // isCurrentFamily로 위에서 확인됨) 서버가 "가족을 찾을 수 없다"고 답했다면, 다른
-        // 기기가 그 사이 가족 서버 데이터를 영구 삭제한 것입니다. 여기서 계속
-        // 재시도하면 allowFamilyCreation 여부와 무관하게 다음 "새 가족 만들기"
-        // 시도에서 조용히 되살아날 위험이 있으므로, 이 기기도 로컬 연결을 끊어
-        // 둡니다. 이 기기에 저장된 기록 자체는 지우지 않습니다.
-        if (!result.success && result.familyUnavailable && !connecting) {
-          await saveProfile({ ...latestProfile, syncKey: undefined });
-          const disconnectedProfile = await getProfile();
-          setProfile(disconnectedProfile);
-          setSyncState('idle');
-          setSyncError(null);
-          lastSyncFailedRef.current = false;
-          resolveVisible({ ...result, logs: latestLogs, profile: disconnectedProfile, success: false, merged: false, error: '가족 데이터가 삭제되어 연결이 해제되었습니다.' });
-          Alert.alert(
-            '가족 연결 해제됨',
-            '다른 기기에서 가족 서버 데이터를 영구 삭제해 이 기기의 연결도 해제되었습니다. 이 기기에 저장된 기록은 그대로 남아 있습니다.',
-          );
-          return;
-        }
-
-        setSyncState(result.success ? 'idle' : 'error');
-        setSyncError(result.success ? null : result.error || '서버에 연결하지 못했습니다.');
-        lastSyncFailedRef.current = !result.success;
-        if (result.success) setLastSyncedAt(Date.now());
-        resolveVisible(result);
-        // 취소 토큰을 저장 큐와 transaction에서 검사하므로 늦은 응답을 버리고
-        // 다음 시도를 허용합니다. 응답 없는 네트워크가 대기열을 잠그지 않습니다.
-        void operation.catch(() => undefined);
-      } catch (error) {
-        const latest = await getProfile().catch(() => null);
-        if (abortToken.aborted && (!latest?.syncKey || latest.syncKey !== normalizedKey)) {
-          setSyncState('idle');
-          setSyncError(null);
-          lastSyncFailedRef.current = false;
-        } else {
-          setSyncState('error');
-          setSyncError(error instanceof Error ? error.message : '서버에 연결하지 못했습니다.');
-          lastSyncFailedRef.current = true;
-        }
-        rejectVisible(error);
-      } finally {
-        isSyncRunningRef.current = false;
-        if (activeSyncAbortRef.current === abortToken) activeSyncAbortRef.current = null;
-      }
-    };
-    const queued = syncQueueRef.current.catch(() => undefined).then(run);
-    syncQueueRef.current = queued.then(() => undefined, () => undefined);
-    return visibleResult;
   };
+
+  // 이전 모듈이 기기에 합친 결과를 저장하면 저장소에서 기록과 프로필을 다시 읽어 화면에 반영합니다(07 2.3 "화면 반영").
+  const reloadFromStorage = async () => {
+    const storedLogs = await getLogs();
+    const storedProfile = await getProfile();
+    setLogs(storedLogs);
+    setProfile(storedProfile);
+    void refreshFeedingReminder(storedLogs, storedProfile);
+  };
+
+  // 이전 모듈의 사건 구독: 합친 결과 반영, 연결 해제 반영, 이전 완료 뒤 오류 문구 정리. 언마운트에서 정리합니다.
+  useEffect(() => {
+    const migrator = migratorRef.current!;
+    const unsubscribe = migrator.subscribe(event => {
+      if (event.type === 'merged') {
+        void reloadFromStorage().catch(error => console.warn('Reload after migration merge failed', error));
+      } else if (event.type === 'disconnected') {
+        // "삭제에 따르기"로 이 기기의 연결이 해제됐습니다. 기록은 남아 있고 프로필만 다시 읽습니다.
+        void getProfile().then(storedProfile => {
+          setProfile(storedProfile);
+          setSyncState('idle');
+          setSyncError(null);
+          migrationErrorRef.current = null;
+          lastSyncFailedRef.current = false;
+        }).catch(error => console.warn('Reload after migration disconnect failed', error));
+      } else if (event.type === 'completed') {
+        migrationErrorRef.current = null;
+      }
+    });
+    return () => {
+      unsubscribe();
+      migrator.dispose();
+    };
+  }, []);
 
   // Load initial data and run background sync if syncKey is set
   useEffect(() => {
@@ -309,7 +381,13 @@ function MainApp() {
 
         // 네트워크 작업은 첫 화면을 막지 않고 백그라운드에서 처리합니다.
         if (loadedProfile.syncKey) {
+          // 이전 모듈을 첫 동기화보다 먼저 시작합니다(07 2.3 "앱 시작 순서"). 기다리지 않습니다. 백업 실패
+          // 선택 화면이 열려 있으면 사용자 답까지 pending이고, 관문이 근거 있는 키를 막아 404 오류를 보이지 않습니다.
+          void migratorRef.current!.ensure(loadedProfile.syncKey).catch(error => {
+            console.warn('Migration start failed', error);
+          });
           const result = await syncLatestData(loadedProfile.syncKey, true);
+          if (result.success) runTransitionTick(loadedProfile.syncKey);
           if (result.success || result.merged) {
             setLogs(result.logs);
             setProfile(result.profile);
@@ -352,6 +430,7 @@ function MainApp() {
           setProfile(result.profile);
           await refreshFeedingReminder(result.logs, result.profile);
         }
+        if (result.success) runTransitionTick(currentProfile.syncKey);
         return result.success;
       } catch (error) {
         console.warn('Automatic sync failed', error);
@@ -365,7 +444,11 @@ function MainApp() {
       if (!mounted) return;
       const token = await readFamilyChangeToken(syncKey);
       // 직전 동기화가 실패했다면 올리지 못한 기록이 남아 있을 수 있어 그대로 진행합니다.
-      if (token !== null && token === lastChangeTokenRef.current && !lastSyncFailedRef.current) return;
+      if (token !== null && token === lastChangeTokenRef.current && !lastSyncFailedRef.current) {
+        // 1.7.9 상대는 D1이 아니라 Firestore에 쓰므로 D1 토큰이 그대로여도 전환기 읽기는 주기마다 부릅니다(5분 간격은 모듈이 지킴).
+        runTransitionTick(syncKey);
+        return;
+      }
       const succeeded = await pullRemoteChanges();
       if (succeeded && token !== null) lastChangeTokenRef.current = token;
     };
@@ -387,7 +470,10 @@ function MainApp() {
       try {
         const stop = await subscribeToCloudChanges(syncKey, checkForRemoteChanges, error => {
           console.warn('Realtime sync listener failed', error);
-          scheduleReconnect();
+          // 410이면 가족이 영구 삭제된 것이므로 재연결하지 않고 평소 동기화를 한 번 요청합니다.
+          // 그 동기화가 410을 받아 연결을 끊습니다.
+          if (decideAfterTokenError(error).action === 'syncNow') void pullRemoteChanges();
+          else scheduleReconnect();
         });
         if (!mounted) {
           stop();
@@ -401,29 +487,37 @@ function MainApp() {
       }
     };
 
-    connect();
+    // 폴링은 관문이 'proceed'일 때만 시작합니다(07 2.3). 이전 모듈이 d1Status를 exists로 바꾸거나 이전을 마치면
+    // 사건으로 다시 판정해 시작합니다. 시작 전에는 D1 토큰 요청이 나가지 않습니다.
+    let pollingStarted = false;
+    const startPollingIfAllowed = async () => {
+      if (!mounted || pollingStarted) return;
+      try {
+        const gate = await migratorRef.current!.peekGate(syncKey);
+        if (!mounted || pollingStarted || !shouldStartPolling(gate)) return;
+        pollingStarted = true;
+        void connect();
+      } catch (error) {
+        console.warn('Polling gate check failed', error);
+      }
+    };
+    const stopWatchingGate = migratorRef.current!.subscribe(event => {
+      if (event.syncKey !== syncKey) return;
+      if (event.type === 'gateChanged' || event.type === 'completed') void startPollingIfAllowed();
+    });
+    void startPollingIfAllowed();
 
-    // 실시간 알림이 조용히 끊긴 경우에도 상대방 기록이 결국 들어오게 하는 안전망.
-    const pollTimer = setInterval(checkForRemoteChanges, SYNC_POLL_INTERVAL_MS);
-
-    const appStateSubscription = AppState.addEventListener('change', async state => {
+    const appStateSubscription = AppState.addEventListener('change', state => {
       if (state !== 'active') return;
-      // 진행 중인 동기화 도중에 연결을 끊으면 캐시에서 읽은 낡은 값으로
-      // 병합될 수 있어, 대기열이 빈 뒤에 처리합니다.
-      syncQueueRef.current = syncQueueRef.current
-        .catch(() => undefined)
-        .then(() => refreshCloudConnection())
-        .catch(() => undefined);
-      await syncQueueRef.current;
       // 화면에 돌아왔을 때는 못 올린 기록이 있을 수 있으므로 전체 동기화합니다.
       void pullRemoteChanges();
     });
 
     return () => {
       mounted = false;
+      stopWatchingGate();
       unsubscribe?.();
       if (reconnectTimer) clearTimeout(reconnectTimer);
-      clearInterval(pollTimer);
       appStateSubscription.remove();
     };
   }, [profile?.syncKey]);
@@ -447,9 +541,14 @@ function MainApp() {
         );
         return;
       }
-      const result = await handleSync(syncId, true, false, true);
+      // 합류 전체 흐름(연결 회차, 1.7.9 가족 합류, 이전 시작)은 이전 모듈의 joinFamily가 맡습니다(07 2.9).
+      const result = await handleJoinFamily(syncId, { allowFamilyCreation: false });
       // 실패한 초대는 다시 눌러 재시도할 수 있어야 합니다.
       if (result.success) processedInviteRef.current = syncId;
+      if (result.outcome === 'cancelled') {
+        Alert.alert('가족 합류 취소', result.error || MIGRATION_MESSAGES.joinCancelled);
+        return;
+      }
       Alert.alert(
         result.success ? '가족 연결 완료' : '가족 연결 실패',
         result.success
@@ -528,10 +627,9 @@ function MainApp() {
   const handleSync = async (
     targetSyncKey: string,
     createBackup = true,
-    // syncLatestData와 같은 이유로 기본값은 false. "새 가족 만들기"만
-    // connectFamily를 통해 명시적으로 true를 넘깁니다.
+    // syncLatestData와 같은 이유로 기본값은 false. 가족 만들기와 합류는 이전 모듈의
+    // joinFamily(handleJoinFamily)를 거치며, 여기서는 연결 회차를 직접 넣지 않습니다.
     allowFamilyCreation = false,
-    connecting = false,
     forceFullRead = false,
   ) => {
     if (!targetSyncKey || !targetSyncKey.trim()) return { success: false, merged: false, error: 'Empty key' };
@@ -540,7 +638,6 @@ function MainApp() {
         targetSyncKey.trim(),
         createBackup,
         allowFamilyCreation,
-        connecting,
         forceFullRead,
       );
       if (result.success || result.merged) {
@@ -548,10 +645,46 @@ function MainApp() {
         setProfile(result.profile);
         await refreshFeedingReminder(result.logs, result.profile);
       }
-      return { success: result.success, merged: result.merged, error: result.error };
+      return { success: result.success, merged: result.merged, error: result.error, migrationPending: result.migrationPending };
     } catch (e) {
       console.error(e);
       return { success: false, merged: false, error: e instanceof Error ? e.message : String(e) };
+    }
+  };
+
+  // 합류(초대 링크, 키 입력)와 가족 만들기의 두 진입점은 모두 이 함수만 부릅니다(07 2.9 "합류 진입점").
+  // 러너에 넣는 연결 회차는 이전 모듈의 joinFamily가 맡습니다.
+  const handleJoinFamily = async (
+    targetSyncKey: string,
+    options: { allowFamilyCreation?: boolean } = {},
+  ): Promise<{ success: boolean; merged: boolean; error?: string; outcome?: JoinOutcome }> => {
+    if (!targetSyncKey || !targetSyncKey.trim()) return { success: false, merged: false, error: 'Empty key' };
+    setJoinProgress(null);
+    try {
+      const result = await migratorRef.current!.joinFamily(targetSyncKey.trim(), {
+        allowFamilyCreation: options.allowFamilyCreation === true,
+      });
+      const syncResult = result.syncResult;
+      // joined이고 연결 회차가 성공하면 기록과 프로필을 화면에 반영합니다. 실패한 회차라도 앞서 합쳐 저장한
+      // 결과(merged)는 저장소에 있으므로 handleSync와 같이 화면에 반영합니다.
+      if (syncResult && (syncResult.success || syncResult.merged)) {
+        setLogs(syncResult.logs);
+        setProfile(syncResult.profile);
+        await refreshFeedingReminder(syncResult.logs, syncResult.profile);
+      }
+      const success = result.outcome === 'joined' && syncResult?.success === true;
+      return {
+        success,
+        merged: syncResult?.merged === true,
+        // not_found, deleted, pending_deletion_choice, cancelled, failed는 이전 모듈의 문구를 그대로 보입니다.
+        error: success ? undefined : (result.message ?? syncResult?.error ?? JOIN_FALLBACK_MESSAGES[result.outcome]),
+        outcome: result.outcome,
+      };
+    } catch (e) {
+      console.error(e);
+      return { success: false, merged: false, error: e instanceof Error ? e.message : String(e), outcome: 'failed' };
+    } finally {
+      setJoinProgress(null);
     }
   };
 
@@ -563,8 +696,10 @@ function MainApp() {
       // 이때만은 증분을 건너뛰고 서버 기록 전체를 대조합니다. 이미 연결된
       // 가족이 대상이므로 allowFamilyCreation은 false로 둡니다 — true였다면
       // 다른 기기가 영구 삭제한 가족을 새로고침이 조용히 되살릴 수 있습니다.
-      const result = await handleSync(profile.syncKey, true, false, false, true);
-      if (!result.success) {
+      const result = await handleSync(profile.syncKey, true, false, true);
+      // 이전 준비 중(migrationPending)은 실패가 아니므로 경고창을 띄우지 않습니다(07 2.3).
+      if (result.success) runTransitionTick(profile.syncKey, true);
+      if (shouldAlertOnRefresh(result)) {
         Alert.alert(
           '동기화하지 못했습니다',
           `기록은 이 휴대폰에 안전하게 저장되어 있고, 연결되면 자동으로 다시 올라갑니다.\n${result.error || ''}`,
@@ -651,8 +786,8 @@ function MainApp() {
   };
 
   const handleSaveProfile = async (profilePatch: Partial<BabyProfile>, syncInBackground = true) => {
-    if ('syncKey' in profilePatch && activeSyncAbortRef.current) {
-      activeSyncAbortRef.current.aborted = true;
+    if ('syncKey' in profilePatch) {
+      syncRunnerRef.current?.abortActive();
     }
     // 화면이 들고 있는 프로필은 백그라운드 동기화보다 오래된 값일 수 있습니다.
     // 그 위에 얹으면 상대방이 방금 바꾼 이름을 되돌려 버립니다.
@@ -771,6 +906,9 @@ function MainApp() {
             onImportData={handleImportData}
             onRestoreData={handleRestoredData}
             onSync={handleSync}
+            onJoinFamily={handleJoinFamily}
+            joinProgress={joinProgress}
+            onGetMigrationGate={key => migratorRef.current!.peekGate(key)}
             onDeleteFamilyData={handleDeleteFamilyData}
             onScheduleFamilyDeletion={scheduleFamilyDeletion}
             onCancelFamilyDeletion={cancelFamilyDeletion}
@@ -784,6 +922,7 @@ function MainApp() {
   // 아무 표시가 없어서 사용자가 "동기화가 안 된다"는 것만 알 수 있었습니다.
   const syncIndicator = (() => {
     if (syncState === 'syncing') return { color: COLORS.textMuted, label: '동기화 중' };
+    if (syncState === 'pending') return { color: COLORS.textMuted, label: '이전 준비 중' };
     if (syncState === 'error') return { color: '#A33D29', label: '전송 대기 · 재시도' };
     if (!lastSyncedAt) return { color: COLORS.textMuted, label: '대기 중' };
     const minutes = Math.floor((Date.now() - lastSyncedAt) / 60_000);

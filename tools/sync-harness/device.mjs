@@ -1,6 +1,10 @@
 // 한 대의 휴대폰을 흉내 냅니다. stdin 으로 명령(JSON 한 줄)을 받아 실행하고
 // 결과를 stdout 에 JSON 한 줄로 돌려줍니다. 프로세스가 살아 있는 동안
 // 익명 로그인 UID 가 유지되므로 실제 앱 세션과 같은 조건이 됩니다.
+//
+// HARNESS_REAL_WORKER=1 이면 실제 서버 모드입니다(06 설계 2.10). firebase 를 불러오지 않고
+// HARNESS_WORKER_URL 의 서버(real-server.mjs)로 실제 클라이언트 코드가 요청합니다.
+// 이 모드의 명령은 device-real.mjs 에 있고, 명령을 동시에 처리합니다.
 import readline from 'node:readline';
 
 import path from 'node:path';
@@ -12,11 +16,21 @@ const NAME = process.env.HARNESS_DEVICE_NAME || 'device';
 const say = (obj) => process.stdout.write(JSON.stringify(obj) + '\n');
 const err = (msg) => process.stderr.write(`[${NAME}] ${msg}\n`);
 
-const firestore = await import('firebase/firestore');
-const cryptoStub = await import('./stubs/expo-crypto.mjs');
+const REAL = process.env.HARNESS_REAL_WORKER === '1';
+
+let firestore;
+let cryptoStub;
+let auth;
+let db;
+if (!REAL) {
+  firestore = await import('firebase/firestore');
+  cryptoStub = await import('./stubs/expo-crypto.mjs');
+  const firebase = await import(`${SRC}/database/firebase.ts`);
+  auth = firebase.getFirebaseAuth();
+  db = firebase.getFirestoreDb();
+}
 const storage = await import(`${SRC}/database/storage.ts`);
 const sync = await import(`${SRC}/database/sync.ts`);
-const { auth, db } = await import(`${SRC}/database/firebase.ts`);
 
 let unsubscribe;
 let notifications = 0;
@@ -142,6 +156,30 @@ const commands = {
 };
 
 const rl = readline.createInterface({ input: process.stdin });
+
+if (REAL) {
+  const { createRealCommands } = await import('./device-real.mjs');
+  const realCommands = await createRealCommands({ name: NAME });
+  // 명령을 기다리지 않고 바로 처리합니다. 동기화가 서버 응답을 기다리는 동안에도
+  // 중단 토큰, 쓰기 풀기, 시계 진행 같은 명령이 들어와야 합니다.
+  rl.on('line', (line) => {
+    if (!line.trim()) return;
+    const request = JSON.parse(line);
+    Promise.resolve()
+      .then(() => {
+        const handler = realCommands[request.cmd];
+        if (!handler) throw new Error(`unknown command ${request.cmd}`);
+        return handler(request.payload || {});
+      })
+      .then((result) => say({ id: request.id, ok: true, result }))
+      .catch((error) => say({ id: request.id, ok: false, error: error?.message || String(error), code: error?.code }));
+  });
+  // 부모가 끝나면 stdin 이 닫히므로 기기도 함께 끝냅니다.
+  rl.on('close', () => process.exit(0));
+  say({ harness: 'device', ready: true, name: NAME });
+  await new Promise(() => {});
+}
+
 for await (const line of rl) {
   if (!line.trim()) continue;
   const request = JSON.parse(line);

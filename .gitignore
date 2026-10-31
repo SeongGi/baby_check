@@ -37,6 +37,10 @@ credentials.json
 # typescript
 *.tsbuildinfo
 
+# Cloudflare Wrangler
+.wrangler/
+server/.wrangler/
+
 # generated native folders
 /ios
 /android

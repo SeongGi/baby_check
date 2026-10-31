@@ -10,7 +10,7 @@
 |---|---|---|
 | 원스토어 앱 서명 | 원스토어가 키를 만들어 보관합니다. | Play 설치본과 서명이 달라집니다. |
 | 직접 만든 키 등록 | PEPK 도구로 내 키를 원스토어에 넘깁니다. | Play 앱 서명 키를 내려받을 수 있을 때만 서명을 맞출 수 있습니다. |
-| 앱 서명 사용 안 함 | 직접 서명한 APK를 올립니다(APK만 가능). | **추천합니다.** 우리 릴리스 키(`baby-check-release.jks`)로 서명한 APK를 그대로 올립니다. |
+| 앱 서명 사용 안 함 | 직접 서명한 APK를 올립니다(APK만 가능). | **추천합니다.** Play 업로드에 쓰는 EAS 키(`credentials/android/keystore.jks`)로 서명한 APK를 그대로 올립니다. |
 | 같은 계정의 다른 앱 키 재사용 | 해당 없음 | 해당 없음 |
 
 **주의:** Play Console에서 Play 앱 서명이 켜져 있으면, Play 설치본은 Google 키로 서명됩니다. 이 경우 원스토어 설치본(우리 업로드 키로 서명)과 서명이 달라서, 한 기기에서 스토어를 바꿔 업데이트할 수 없습니다.
@@ -19,10 +19,10 @@
 - 스토어를 꼭 바꿔야 하면, 가족 연결 동기화가 끝난 것을 확인하고 설정 화면에서 백업을 내보낸 뒤 앱을 지우고 설치합니다. 앱을 지우면 기기에 저장된 기록도 함께 지워집니다.
 - Play Console → 앱 무결성 → 앱 서명에서 실제 서명 방식을 확인해 주세요.
 
-업로드 인증서 정보(`baby-check-upload-certificate.pem`)는 다음과 같습니다.
+서명 키는 Play 업로드에 실제로 쓰는 EAS 키입니다(2026-10-30 결정). 키 정보는 원래 저장소의 `credentials.json`에 있습니다. 예전에 이 문서에 적었던 `baby-check-release.jks`(SHA-256 `60:1E…`)는 다른 키이며, 비밀번호가 없어 쓰지 않습니다.
 
-- 주체: `C=KR, ST=Seoul, L=Seoul, O=BabyCheck, OU=Release, CN=SeongGi`
-- SHA-256: `60:1E:71:8F:9F:A6:D0:CE:53:E8:08:1D:2F:10:71:EE:44:03:7D:11:E4:1D:D2:07:0B:BE:AC:F2:99:CD:AA:8B`
+- 주체: 비어 있음(`CN=, OU=, O=, L=, ST=, C=`, EAS가 만든 키)
+- SHA-256: `6A:92:D3:E2:85:E2:4B:F9:F2:86:E7:8E:93:5D:04:34:F7:5C:62:C3:32:6B:F1:28:3A:21:5C:F4:48:09:ED:73`
 
 원스토어는 패키지명과 서명 인증서 SHA-256으로 Google의 Android 개발자 인증 여부를 확인합니다. Google Play Console의 개발자 인증에 위 지문이 패키지 `com.seonggi.babycheck`로 등록되어 있어야 합니다.
 
@@ -34,7 +34,7 @@
 cd android
 export JAVA_HOME=/opt/homebrew/opt/openjdk@17
 EXPO_PUBLIC_DISTRIBUTION_STORE=onestore ./gradlew app:assembleRelease \
-  -PBABY_CHECK_RELEASE_STORE_FILE=<릴리스 키스토어 경로> \
+  -PBABY_CHECK_RELEASE_STORE_FILE=<EAS 키스토어 경로> \
   -PBABY_CHECK_RELEASE_STORE_PASSWORD=<비밀번호> \
   -PBABY_CHECK_RELEASE_KEY_ALIAS=<별칭> \
   -PBABY_CHECK_RELEASE_KEY_PASSWORD=<비밀번호>

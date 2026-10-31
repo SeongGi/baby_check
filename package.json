@@ -1,6 +1,6 @@
 {
   "name": "baby_check",
-  "version": "1.7.9",
+  "version": "1.8.0",
   "main": "index.ts",
   "dependencies": {
     "@expo/ui": "~56.0.26",
@@ -34,7 +34,12 @@
     "start": "expo start",
     "android": "expo run:android",
     "ios": "expo run:ios",
-    "web": "expo start --web"
+    "web": "expo start --web",
+    "server:dev": "cd server && npx wrangler dev",
+    "server:init-local": "cd server && npx wrangler d1 execute baby-check-db --file=./schema.sql --local --yes",
+    "server:deploy": "bash server/deploy.sh",
+    "test:offline": "bash tools/sync-harness/verify.sh offline",
+    "test:voice": "node tests/autoVoiceLaunch.mjs && node tests/voiceCommand.mjs && node tests/voiceFeedback.mjs"
   },
   "private": true
 }

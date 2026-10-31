@@ -1,0 +1,14 @@
+{
+  "name": "baby-check-firestore-cleanup-check",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Firestore 운영자 정리 전 읽기 전용 점검(07 2.8). 앱 package.json과 별개입니다. 실행은 성기님 승인 후에만 합니다.",
+  "type": "module",
+  "scripts": {
+    "test": "node check.test.mjs",
+    "check": "node run.mjs"
+  },
+  "dependencies": {
+    "firebase-admin": "14.5.0"
+  }
+}
