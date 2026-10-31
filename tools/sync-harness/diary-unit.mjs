@@ -431,6 +431,46 @@ check('makeDiaryId: 매번 다르다', new Set(Array.from({ length: 200 }, () =>
     restored.success && restored.backup.profile.diaryRole === 'mom' && (await storage.getProfile()).diaryRole === 'mom');
 }
 
+// ═════════ 기존 화면에서 일기 거르기 ═════════
+{
+  const mixed = [
+    formula(1), diaryLine('d1', DAY, 'mom', '줄', 10),
+    { id: 'c1', type: 'diaryComment', timestamp: 11, parentId: 'd1', diaryDate: DAY, authorRole: 'dad', notes: '댓글' },
+    { id: 'u1', type: 'urine', timestamp: 12, wetness: 'light', color: 'normal' },
+    { id: 'bad', type: 'diary', timestamp: 13 }, // 깨진 일기도 종류가 diary라서 활동에서는 빠진다
+  ];
+  const before = JSON.stringify(mixed);
+  const out = diary.withoutDiaryLogs(mixed);
+  check('withoutDiaryLogs: 일기와 댓글을 빼고 활동 기록만 남기며 원본은 바꾸지 않는다',
+    out.map((l) => l.id).join() === 'f1,u1' && JSON.stringify(mixed) === before);
+
+  // 위젯 상태 문구: 마지막 기록이 일기나 댓글이어도 직전 활동 기록으로 정한다
+  const reminder = await import(`${SRC}/utils/feedingReminder.ts`);
+  const profile = { name: '아기', birthDate: '2026-01-01', birthWeight: '3.2', targetFormula: 800, feedingReminderEnabled: false, feedingIntervalMinutes: 180 };
+  const t = Date.now();
+  const urine = { id: 'u', type: 'urine', timestamp: t - 60_000, wetness: 'light', color: 'normal' };
+  const newest = [
+    { id: 'dc', type: 'diaryComment', timestamp: t - 1000, parentId: 'd', diaryDate: DAY, authorRole: 'mom', notes: '댓글' },
+    diaryLine('d', DAY, 'mom', '오늘 한 줄', t - 2000),
+    urine,
+  ];
+  check('위젯 상태 문구: 마지막 기록이 일기·댓글이어도 직전 활동(소변)으로 정한다',
+    reminder.buildWidgetSnapshot(newest, profile, t).props.statusLabel === '쉬 했어요', reminder.buildWidgetSnapshot(newest, profile, t).props.statusLabel);
+  check('위젯 상태 문구: 일기만 있으면 첫 기록을 기다린다',
+    reminder.buildWidgetSnapshot(newest.slice(0, 2), profile, t).props.statusLabel === '첫 기록을 기다려요');
+
+  // Dashboard와 Statistics는 화면 파일이라 소스로 확인합니다: 거르기 도우미를 불러 쓰고, 계산이 거른 목록을 쓴다.
+  const dash = readFileSync(`${SRC}/screens/Dashboard.tsx`, 'utf8');
+  check('Dashboard 타임라인: 자르기·빈 화면 판정·더 보기 건수가 모두 activityLogs로 계산된다',
+    /const activityLogs = useMemo\(\(\) => withoutDiaryLogs\(logs\)/.test(dash)
+    && /activityLogs\.slice\(0, visibleCount\)/.test(dash) && /activityLogs\.length === 0 \?/.test(dash)
+    && /activityLogs\.length > visibleLogs\.length/.test(dash) && /\/ \{activityLogs\.length\}건/.test(dash)
+    && !/\blogs\.slice\(0, visibleCount\)/.test(dash));
+  const stats = readFileSync(`${SRC}/screens/Statistics.tsx`, 'utf8');
+  check('Statistics: 맨 앞에서 일기·댓글을 뺀 목록을 만들어 모든 계산에 쓴다',
+    /logs: allLogs/.test(stats) && /const logs = withoutDiaryLogs\(allLogs\)/.test(stats) && !/\ballLogs\.(filter|map|length)/.test(stats));
+}
+
 // ═════════ 네트워크 0회 ═════════
 check('가족 연결 없이 저장 함수만 돌리는 동안 fetch 호출 0회', fetchCalls === 0, `fetch 호출 ${fetchCalls}회`);
 

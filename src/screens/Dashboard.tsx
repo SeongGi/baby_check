@@ -18,6 +18,7 @@ import { KeyboardAwareScrollView } from '../components/KeyboardAwareScrollView';
 import { getDDay, formatTime, getRelativeDateString, formatDateTime } from '../utils/date';
 import { BottleSlider } from '../components/BottleSlider';
 import { getLatestFeeding, getNextFeedingAt } from '../utils/feedingReminder';
+import { withoutDiaryLogs } from '../utils/diary';
 import { VoiceLogButton } from '../components/VoiceLogButton';
 
 // 시작/종료를 한 번씩 눌러 기록하는 활동(수면·터미타임·놀기시간)은 동작이 동일해서
@@ -538,9 +539,11 @@ export const Dashboard: React.FC<DashboardProps> = ({
   };
 
   // Group all logs by day
+  // 일기와 댓글은 "활동"이 아니라서 타임라인에서 뺍니다. 자르기, 빈 화면 판정, "더 보기" 건수를 모두 이 목록으로 계산합니다.
+  const activityLogs = useMemo(() => withoutDiaryLogs(logs), [logs]);
   // 첫 화면에서 수천 개 기록을 한꺼번에 렌더링하지 않도록 최근 기록만 그립니다.
   const [visibleCount, setVisibleCount] = useState(60);
-  const visibleLogs = useMemo(() => logs.slice(0, visibleCount), [logs, visibleCount]);
+  const visibleLogs = useMemo(() => activityLogs.slice(0, visibleCount), [activityLogs, visibleCount]);
   const groupedLogs = useMemo(() => visibleLogs.reduce<Record<string, BabyLogEntry[]>>((groups, log) => {
     const dayStr = getRelativeDateString(log.timestamp);
     (groups[dayStr] ||= []).push(log);
@@ -726,7 +729,7 @@ export const Dashboard: React.FC<DashboardProps> = ({
 
         {/* Chronological History Timeline */}
         <Text style={styles.sectionHeader}>활동 타임라인</Text>
-        {logs.length === 0 ? (
+        {activityLogs.length === 0 ? (
           <View style={styles.emptyContainer}>
             <Text style={styles.emptyIcon}>🧸</Text>
             <Text style={styles.emptyText}>아직 기록된 활동이 없습니다.</Text>
@@ -777,9 +780,9 @@ export const Dashboard: React.FC<DashboardProps> = ({
                 ))}
               </View>
             ))}
-            {logs.length > visibleLogs.length && (
+            {activityLogs.length > visibleLogs.length && (
               <TouchableOpacity onPress={() => setVisibleCount(count => count + 60)} accessibilityRole="button" style={{ paddingVertical: 16 }}>
-                <Text style={styles.timelineLimitText}>이전 기록 더 보기 · {visibleLogs.length} / {logs.length}건</Text>
+                <Text style={styles.timelineLimitText}>이전 기록 더 보기 · {visibleLogs.length} / {activityLogs.length}건</Text>
               </TouchableOpacity>
             )}
           </View>
