@@ -149,6 +149,17 @@ check('makeDiaryId: 매번 다르다', new Set(Array.from({ length: 200 }, () =>
   check('isDiaryLog/isDiaryComment: 깨진 기록은 모두 통과하지 못한다',
     broken.every((l) => !diary.isDiaryLog(l) && !diary.isDiaryComment(l)));
   check('isDiaryLog: notes가 없는 줄은 통과(빈 본문으로 본다)', diary.isDiaryLog({ id: 'n', type: 'diary', timestamp: 1, diaryDate: DAY, authorRole: 'dad' }));
+  // 필드를 하나씩만 깨뜨립니다. 한꺼번에 깨뜨리면 검사 하나를 빼도 다른 검사가 가려 주기 때문입니다.
+  const okDiary = { id: 'ok', type: 'diary', timestamp: 1, diaryDate: DAY, authorRole: 'mom', notes: '글' };
+  const okComment = { id: 'okc', type: 'diaryComment', timestamp: 1, parentId: 'ok', diaryDate: DAY, authorRole: 'dad', notes: '댓글' };
+  check('isDiaryLog: 멀쩡한 기록은 통과하고, 필드를 하나만 깨도(id·timestamp·type·날짜·역할·notes) 통과하지 못한다',
+    diary.isDiaryLog(okDiary)
+    && [{ id: 5 }, { timestamp: '1' }, { type: 'formula' }, { type: 'diaryComment' }, { diaryDate: 'bad' }, { authorRole: 'uncle' }, { notes: 5 }]
+      .every((patch) => !diary.isDiaryLog({ ...okDiary, ...patch })));
+  check('isDiaryComment: 멀쩡한 댓글은 통과하고, 필드를 하나만 깨도(id·timestamp·type·parentId·날짜·역할·notes) 통과하지 못한다',
+    diary.isDiaryComment(okComment)
+    && [{ id: 5 }, { timestamp: '1' }, { type: 'diary' }, { type: 'formula' }, { parentId: 7 }, { diaryDate: 'bad' }, { authorRole: 'uncle' }, { notes: 5 }]
+      .every((patch) => !diary.isDiaryComment({ ...okComment, ...patch })));
   let threw = false;
   let picked = 'unset'; let groups = [];
   try {
@@ -557,6 +568,9 @@ const mixedBase = (count) => Array.from({ length: count }, (_, i) => {
     && /activityLogs\.slice\(0, visibleCount\)/.test(dash) && /activityLogs\.length === 0 \?/.test(dash)
     && /activityLogs\.length > visibleLogs\.length/.test(dash) && /\/ \{activityLogs\.length\}건/.test(dash)
     && !/\blogs\.slice\(0, visibleCount\)/.test(dash));
+  // 입력 창을 열 때 고치기 대상(targetId)은 빈 줄도 후보로 고릅니다. 빠지면 빈 줄을 두고 새 줄이 하나 더 생깁니다.
+  check('Dashboard 오늘 일기 입력 창: 고치기 대상을 includeEmpty: true로 고른다',
+    /pickDiaryLine\(logs, todayDate, myDiaryRole, \{ includeEmpty: true \}\)/.test(dash));
   const stats = readFileSync(`${SRC}/screens/Statistics.tsx`, 'utf8');
   check('Statistics: 맨 앞에서 일기·댓글을 뺀 목록을 만들어 모든 계산에 쓴다',
     /logs: allLogs/.test(stats) && /const logs = withoutDiaryLogs\(allLogs\)/.test(stats) && !/\ballLogs\.(filter|map|length)/.test(stats));
@@ -586,6 +600,8 @@ check('가족 연결 없이 저장 함수만 돌리는 동안 fetch 호출 0회'
     /const success = await deleteLog\(id\);\s*if \(!success\) return false;/.test(commentHandler) && /return true;/.test(commentHandler)
     && /const handleDeleteLog = async \(id: string\) => \{\s*const success = await deleteLog\(id\);\s*if \(success\) \{/.test(appSource));
   const diaryScreen = readFileSync(`${SRC}/screens/Diary.tsx`, 'utf8');
+  check('Diary.tsx 일기 입력 창: 고치기 대상을 includeEmpty: true로 고른다',
+    /pickDiaryLine\(logs, date, myRole, \{ includeEmpty: true \}\)/.test(diaryScreen));
   check('Diary.tsx: 댓글 삭제 실패(false 또는 예외)면 안내를 띄운다',
     /ok = await onDeleteComment\(comment\.id\)/.test(diaryScreen) && /if \(!ok\) Alert\.alert\('삭제 실패', '댓글을/.test(diaryScreen));
 
