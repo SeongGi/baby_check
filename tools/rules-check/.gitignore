@@ -1,0 +1,3 @@
+# node_modules는 저장소 루트 .gitignore가 이미 걸러 주지만 명시해 둡니다.
+node_modules/
+*-debug.log

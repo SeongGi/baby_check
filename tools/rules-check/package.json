@@ -1,0 +1,15 @@
+{
+  "name": "baby-check-rules-check",
+  "version": "1.0.0",
+  "private": true,
+  "description": "firestore.rules 가정을 로컬 Firebase 에뮬레이터로 확인합니다. 앱 package.json과 별개입니다.",
+  "type": "module",
+  "scripts": {
+    "test": "firebase emulators:exec --only firestore --project demo-babycheck-rules \"node rules.test.mjs\""
+  },
+  "devDependencies": {
+    "@firebase/rules-unit-testing": "5.0.0",
+    "firebase": "12.17.1",
+    "firebase-tools": "14.27.0"
+  }
+}

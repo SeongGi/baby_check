@@ -8,6 +8,9 @@
 #   ./verify.sh compat      예전 형식 데이터 호환성  (실제 Firestore 사용)
 #   ./verify.sh full        두 기기 통합 시나리오    (실제 Firestore 사용)
 #   ./verify.sh reminder    알림 계산
+#   ./verify.sh rules       firestore.rules 가정 여덟 가지를 로컬 Firebase 에뮬레이터로 확인
+#                           (Java 17과 에뮬레이터 내려받기가 필요해 offline, all에는 넣지 않음.
+#                           tools/rules-check 에서 npm install 을 먼저 하세요. 실제 Firebase에는 접속하지 않음)
 #   ./verify.sh offline     unit + regression + real + reminder. 할당량을 쓰지 않는 전부
 #   ./verify.sh all         offline 다음에 compat, full을 순서대로
 # real 모드는 프로세스를 여러 개 띄웁니다. 아래처럼 프로세스 수 상한 안에서 돌리세요.
@@ -55,15 +58,28 @@ run_reminder() {
   HARNESS_STORAGE_FILE="$DIR/storage-reminder.json" node --import "$LOADER_IMPORT" "$DIR/reminder.mjs"
 }
 
+# 설계 07 5.1의 규칙 가정 확인. demo- 프로젝트 id라 실제 Firebase에 접속하지 않습니다.
+run_rules() {
+  local rules_dir="$DIR/../rules-check"
+  [ -d "$rules_dir/node_modules" ] || { echo "먼저 실행하세요: (cd tools/rules-check && npm install)" >&2; exit 2; }
+  (
+    cd "$rules_dir"
+    export JAVA_HOME=/opt/homebrew/opt/openjdk@17
+    export PATH="$JAVA_HOME/bin:$PATH"
+    npx --no-install firebase emulators:exec --only firestore --project demo-babycheck-rules "node rules.test.mjs"
+  )
+}
+
 case "${1:-all}" in
   unit)       run_unit ;;
   regression) run_regression ;;
   real)       run_real ;;
   scenario)   run_scenario "${2:?시나리오 파일 이름이 필요합니다}" ;;
   reminder)   run_reminder ;;
+  rules)      run_rules ;;
   offline)    run_unit && run_regression && run_real && run_reminder ;;
   compat)     node "$DIR/compat.mjs" ;;
   full)       node "$DIR/run.mjs" ;;
   all)        run_unit && run_regression && run_real && run_reminder && node "$DIR/compat.mjs" && node "$DIR/run.mjs" ;;
-  *)          echo "usage: $0 [unit|regression|real|scenario <파일>|reminder|offline|compat|full|all]" >&2; exit 2 ;;
+  *)          echo "usage: $0 [unit|regression|real|scenario <파일>|reminder|rules|offline|compat|full|all]" >&2; exit 2 ;;
 esac
