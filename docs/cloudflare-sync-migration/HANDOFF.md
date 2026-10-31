@@ -291,3 +291,8 @@
 2. B3(이전 모듈)와 B4(App 연결)를 맡기고, 그 뒤 B5(하네스·시나리오 1~34)와 B7(정리 전 점검)을 맡긴다.
 3. B8: 독립 리뷰 2개와 집계, 변이 검증(`07` 5.3 전체), `04-검증.md`.
 4. 그 뒤 18장 순서. 실데이터 점검부터는 모두 **승인 전**이다.
+
+### 22-1. B6 완료, 작업자 1은 아직 실행 중 (컨텍스트 95%에서 기록)
+- B6을 커밋했다. 메인 세션이 `verify.sh rules`를 다시 돌린 결과는 8/8 PASS, 종료 코드 0이었고, 끝난 뒤 남은 에뮬레이터 프로세스는 0개였다. 버전은 `@firebase/rules-unit-testing` 5.0.0(6.x는 firebase 13 요구)과 `firebase-tools` 14.27.0(15.x는 Java 21 요구)이다.
+- **작업자 1(B1·B2)은 이 기록 시점에 아직 돌고 있다.** 작업 트리의 `server/src/index.ts`, `src/database/{cloudClient,firebase,sync,syncRunner,storage,firestoreImport}.ts`, `tools/sync-harness/stubs/fake-worker.mjs` 변경은 그 작업자의 미완성 결과다. 이 파일들은 커밋하지 않았다.
+- 이어받는 세션은 이 작업자의 완료 알림을 받지 못한다. 그래서 먼저 `git status`와 `git diff`로 B1·B2 변경이 끝났는지 보고, 22장의 명세(`03-계획.md` 5장 B1·B2 행, `07` 2.1~2.3.1·2.7·2.10)와 대조한 뒤 검사(`tsc` 두 개, `test:voice`, `verify.sh offline` PASS 217 이상, `grep -nE "deleteDoc|writeBatch|\.delete\(" src/database/firestoreImport.ts src/database/firebase.ts` 결과 없음)를 직접 돌린다. 모자란 부분은 새 t1-worker에 맡긴다.
