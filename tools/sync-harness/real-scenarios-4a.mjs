@@ -1106,7 +1106,18 @@ await scenario('12', 'A→B 전달과 커서: 페이지 읽기 도중 이미 읽
     const idle = await A.send('transitionTick', { force: true });
     assert.equal(idle.status, 'unchanged', JSON.stringify(idle));
     const kinds = new Set((await opsBy(fs, A, mark)).map((o) => `${o.op}:${o.kind}`));
-    assert.deepEqual([...kinds].sort(), ['get:family', 'get:members'], `${i + 1}번째 빈 읽기: 가족 문서와 회원 문서 확인뿐이다`);
+    assert.deepEqual([...kinds].sort(), ['get:family'], `${i + 1}번째 빈 읽기: 회원 확인은 기억해 두므로 가족 문서 읽기뿐이다`);
+  }
+  // 기억해 둔 회원 확인 뒤 가족 문서 읽기가 거부되면, 기억을 지우고 회원 확인부터 다시 해 같은 회차에서 회복한다.
+  {
+    const mark = await fs.opCount();
+    await fs.fail({ match: { op: 'get', kind: 'family', device: A.name }, code: 'permission-denied' });
+    const recovered = await A.send('transitionTick', { force: true });
+    await fs.clearFaults();
+    assert.equal(recovered.status, 'unchanged', JSON.stringify(recovered));
+    const kinds = (await opsBy(fs, A, mark)).map((o) => `${o.op}:${o.kind}`);
+    assert.deepEqual(kinds.filter((k) => k === 'get:members'), ['get:members'], '거부 뒤 회원 문서를 한 번 다시 확인했다');
+    assert.equal(kinds.filter((k) => k === 'get:family').length, 2, '가족 문서는 거부된 읽기와 다시 읽기 두 번');
   }
 
   // 저장이 실패하면 커서가 앞서가지 않는다: 합치지 못한 변경은 다음 읽기에서 다시 받는다.
@@ -1320,7 +1331,8 @@ await scenario('14', '1.7.9 상대의 예약: 선택 화면은 같은 예약으�
 
   // (g) 거부와 가족 문서 없음은 삭제로 판정하지 않는다.
   const promptCount = (await promptsOf(A)).length;
-  await fs.fail({ match: familyGet, code: 'permission-denied' });
+  // 거부가 한 번뿐이면 회원 확인 뒤 다시 읽어 회복하므로, 다시 읽기까지 거부되게 두 번 건다.
+  await fs.fail({ match: familyGet, code: 'permission-denied', times: 2 });
   const denied = await tickA();
   assert.deepEqual([denied.status, denied.reason], ['failed', 'denied'], JSON.stringify(denied));
   await fs.clearFaults();

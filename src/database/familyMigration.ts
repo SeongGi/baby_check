@@ -304,6 +304,8 @@ export function createFamilyMigrator(deps: FamilyMigratorDeps): FamilyMigrator {
   const lastTransitionReadAt = new Map<string, number>();
   const deferredPrompts = new Set<string>();
   const ticksInFlight: Record<string, Promise<TransitionTickResult> | undefined> = {};
+  // 전환기 읽기에서 회원 확인을 마친 키입니다. 프로세스 메모리에만 두므로 앱을 다시 켜면 한 번 더 확인합니다.
+  const transitionMembershipConfirmed: Record<string, true | undefined> = {};
   const legacyJoinsInFlight: Record<string, Promise<JoinResult> | undefined> = {};
   let listeners: Array<(event: MigratorEvent) => void> = [];
   let backupDeclinedThisSession = false;
@@ -1225,14 +1227,29 @@ export function createFamilyMigrator(deps: FamilyMigratorDeps): FamilyMigrator {
         const { fs } = session;
         fsRef = fs;
         try {
-          // 회원 확인이 거부되면 재가입을 한 번 시도하고, 그래도 거부되면 실패로 봅니다.
+          // 회원 확인은 이 프로세스에서 한 번 성공하면 기억해 두고, 전환기 읽기마다 다시 읽지 않습니다(4.1 표의 2회).
+          // 가족 문서 읽기가 거부되면(회원 문서가 사라졌거나 uid가 바뀐 경우) 기억을 지우고 회원 확인부터 다시 합니다.
+          const confirmMembership = async (): Promise<void> => {
+            // 회원 확인이 거부되면 재가입을 한 번 시도하고, 그래도 거부되면 실패로 봅니다.
+            try {
+              await callFs(session, () => fs.ensureFirestoreMembership(key));
+            } catch (error) {
+              if (fs.classifyFirestoreError(error) !== 'denied') throw error;
+              await callFs(session, () => fs.ensureFirestoreMembership(key));
+            }
+            transitionMembershipConfirmed[key] = true;
+          };
+          const fromMemory = transitionMembershipConfirmed[key] === true;
+          if (!fromMemory) await confirmMembership();
+          let family: Awaited<ReturnType<MigratorFirestore['readLegacyFamilyDoc']>>;
           try {
-            await callFs(session, () => fs.ensureFirestoreMembership(key));
+            family = await callFs(session, () => fs.readLegacyFamilyDoc(key));
           } catch (error) {
-            if (fs.classifyFirestoreError(error) !== 'denied') throw error;
-            await callFs(session, () => fs.ensureFirestoreMembership(key));
+            if (!fromMemory || fs.classifyFirestoreError(error) !== 'denied') throw error;
+            transitionMembershipConfirmed[key] = undefined;
+            await confirmMembership();
+            family = await callFs(session, () => fs.readLegacyFamilyDoc(key));
           }
-          const family = await callFs(session, () => fs.readLegacyFamilyDoc(key));
           if (!family.exists) {
             return { status: 'failed', outcome: { state: 'absent', progressed: false, heavy: false, quota: false, pageTimedOut: false, invalidCount: 0 } };
           }
