@@ -347,7 +347,9 @@ export const Diary: React.FC<DiaryProps> = ({
           ? `${roleOfEditor ? DIARY_ROLE_EMOJI[roleOfEditor] : ''} ${shownEditor ? formatDiaryDateLabel(shownEditor.date) : ''} 한 줄`
           : '💬 댓글 달기'}
         description={editorIsDiary ? '하루에 한 줄, 내 줄은 다시 쓰면 고쳐져요.' : undefined}
-        placeholder={editorIsDiary ? '오늘 어땠나요?' : '댓글을 남겨 보세요'}
+        placeholder={editorIsDiary
+          ? (shownEditor?.date === today ? '오늘 어땠나요?' : '이 날은 어땠나요?')
+          : '댓글을 남겨 보세요'}
         initialText={shownEditor?.kind === 'diary' ? shownEditor.initialText : ''}
         maxLength={editorIsDiary ? DIARY_MAX_LENGTH : DIARY_COMMENT_MAX_LENGTH}
         multiline={editorIsDiary}
