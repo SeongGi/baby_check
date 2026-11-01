@@ -1,4 +1,4 @@
-export type LogType = 'formula' | 'urine' | 'stool' | 'bath' | 'weight' | 'temperature' | 'sleep' | 'tummyTime' | 'play';
+export type LogType = 'formula' | 'urine' | 'stool' | 'bath' | 'weight' | 'temperature' | 'sleep' | 'tummyTime' | 'play' | 'diary' | 'diaryComment';
 
 export interface BaseLog {
   id: string;
@@ -76,7 +76,30 @@ export interface PlayLog extends BaseLog {
   endedAt?: number;
 }
 
-export type BabyLogEntry = FormulaLog | UrineLog | StoolLog | BathLog | WeightLog | TemperatureLog | SleepLog | TummyTimeLog | PlayLog;
+// ────────────── 한줄 육아일기와 댓글 ──────────────
+// 일기와 댓글은 기존 기록 목록(logs)에 새 종류로 함께 담겨 동기화·백업·삭제 표식을 그대로 물려받습니다.
+// 본문은 notes 칸에 담아, 이미 설치된 1.8.0 앱에서도 "📝 본문"으로 보이고 멈추지 않습니다.
+export type DiaryRole = 'dad' | 'mom';
+
+export interface DiaryLog extends BaseLog {
+  type: 'diary';
+  diaryDate: string; // 'YYYY-MM-DD', 기기 현지 날짜. 일기가 속한 날의 기준
+  authorRole: DiaryRole;
+  notes: string; // 본문, 1~200자(코드 포인트 기준)
+}
+
+export interface DiaryCommentLog extends BaseLog {
+  type: 'diaryComment';
+  parentId: string; // 댓글을 단 일기 줄의 id
+  diaryDate: string; // 부모 일기의 날짜. 부모를 못 찾아도 날짜로 묶을 수 있게 복사해 둔다
+  authorRole: DiaryRole;
+  notes: string; // 본문, 1~100자
+}
+
+/** 일기와 댓글은 "활동"이 아니므로 활동 타임라인·통계·위젯 계산에서 거를 때 씁니다. */
+export const isDiaryType = (type: string): boolean => type === 'diary' || type === 'diaryComment';
+
+export type BabyLogEntry = FormulaLog | UrineLog | StoolLog | BathLog | WeightLog | TemperatureLog | SleepLog | TummyTimeLog | PlayLog | DiaryLog | DiaryCommentLog;
 
 export interface BabyProfile {
   name: string;
@@ -94,4 +117,6 @@ export interface BabyProfile {
   feedingIntervalMinutes?: number;
   nextFeedingAt?: number; // 사용자가 직접 지정한 다음 수유 시각
   nextFeedingForLogId?: string; // 직접 지정 시각의 기준이 된 마지막 수유 기록
+  // 이 휴대폰 사용자의 "일기 작성자" 역할입니다. 휴대폰마다 따로 두는 값이라 가족 공유 항목에 넣지 않고 서버에도 올리지 않습니다.
+  diaryRole?: DiaryRole;
 }
