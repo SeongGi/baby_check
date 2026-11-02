@@ -1,8 +1,10 @@
 import AsyncStorage from '@react-native-async-storage/async-storage';
-import { NativeModules, Platform } from 'react-native';
+import { AppState, NativeModules, Platform } from 'react-native';
 import * as Notifications from 'expo-notifications';
 import { BabyLogEntry, BabyProfile, FormulaLog } from '../types';
 import { withoutDiaryLogs } from './diary';
+import { NOTIFICATION_PROMPT, shouldExplainBeforeRequest } from './permissionNotice';
+import { confirmPermissionPrompt } from './permissionPrompt';
 
 const NOTIFICATION_ID_KEY = '@baby_feeding_notification_id';
 // Android는 생성된 채널의 중요도를 앱에서 낮음→높음으로 바꿀 수 없으므로
@@ -16,6 +18,16 @@ Notifications.setNotificationHandler({
     shouldShowBanner: true,
     shouldShowList: true,
   }),
+});
+
+// 알림 사전 안내창이 떠 있는 동안의 표시 번호입니다. 없으면 null입니다.
+// 안내창이 떠 있는 동안 들어온 두 번째 요청은 안내창을 겹쳐 띄우지 않습니다.
+let notificationPromptSeq = 0;
+let notificationPromptPending: number | null = null;
+
+// 앱이 뒤로 가면 Alert가 콜백 없이 사라질 수 있으므로 표시 번호를 지워 다음 요청이 막히지 않게 합니다.
+AppState.addEventListener('change', state => {
+  if (state === 'background') notificationPromptPending = null;
 });
 
 export const getLatestFeeding = (logs: BabyLogEntry[]): FormulaLog | null =>
@@ -149,7 +161,10 @@ const updateWidget = async (logs: BabyLogEntry[], profile: BabyProfile) => {
   FeedingWidget.updateTimeline(timeline);
 };
 
-export const requestFeedingReminderPermission = async (): Promise<boolean> => {
+// 수유 알림 권한을 확인합니다. 허용돼 있으면 true입니다.
+// 허용 창을 띄우기 전에 앱이 먼저 안내창을 보여 주고, 사용자가 "계속"을 고를 때만 허용 창을 엽니다.
+// 안내창 응답을 기다리는 동안 수유 알림 처리 대기열이 멈추지 않도록, 이 함수는 대기열 밖에서 부릅니다.
+export const ensureFeedingReminderPermission = async (): Promise<boolean> => {
   if (Platform.OS === 'android') {
     await Notifications.setNotificationChannelAsync(CHANNEL_ID, {
       name: '다음 수유 알림',
@@ -163,6 +178,18 @@ export const requestFeedingReminderPermission = async (): Promise<boolean> => {
   }
   const current = await Notifications.getPermissionsAsync();
   if (current.status === 'granted') return true;
+  if (!shouldExplainBeforeRequest(current)) return false;
+  // 안내창이 이미 떠 있으면 새로 띄우지 않고 현재 허용 여부(미허용)만 돌려줍니다.
+  if (notificationPromptPending !== null) return false;
+  const promptId = ++notificationPromptSeq;
+  notificationPromptPending = promptId;
+  let choice: Awaited<ReturnType<typeof confirmPermissionPrompt>>;
+  try {
+    choice = await confirmPermissionPrompt(NOTIFICATION_PROMPT);
+  } finally {
+    if (notificationPromptPending === promptId) notificationPromptPending = null;
+  }
+  if (choice !== 'continue') return false;
   const requested = await Notifications.requestPermissionsAsync();
   return requested.status === 'granted';
 };
@@ -172,7 +199,6 @@ let reminderRefreshQueue: Promise<void> = Promise.resolve();
 const performFeedingReminderRefresh = async (
   logs: BabyLogEntry[],
   profile: BabyProfile,
-  askPermission = false,
 ): Promise<boolean> => {
   const previousId = await AsyncStorage.getItem(NOTIFICATION_ID_KEY);
   if (previousId) {
@@ -197,9 +223,7 @@ const performFeedingReminderRefresh = async (
       lockscreenVisibility: Notifications.AndroidNotificationVisibility.PUBLIC,
     });
   }
-  const allowed = askPermission
-    ? await requestFeedingReminderPermission()
-    : (await Notifications.getPermissionsAsync()).status === 'granted';
+  const allowed = (await Notifications.getPermissionsAsync()).status === 'granted';
   if (!allowed) return false;
 
   const id = await Notifications.scheduleNotificationAsync({
@@ -224,10 +248,9 @@ const performFeedingReminderRefresh = async (
 export const refreshFeedingReminder = (
   logs: BabyLogEntry[],
   profile: BabyProfile,
-  askPermission = false,
 ): Promise<boolean> => {
   const next = reminderRefreshQueue.catch(() => undefined)
-    .then(() => performFeedingReminderRefresh(logs, profile, askPermission));
+    .then(() => performFeedingReminderRefresh(logs, profile));
   reminderRefreshQueue = next.then(() => undefined, () => undefined);
   return next;
 };

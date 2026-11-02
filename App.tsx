@@ -29,7 +29,7 @@ import { decideAfterTokenError } from './src/database/syncDecision';
 import { createFamilyMigrator, MIGRATION_MESSAGES } from './src/database/familyMigration';
 import type { FamilyMigrator, LegacyDeletionChoice, LegacyDeletionPrompt, MigratorNotice } from './src/database/familyMigration';
 import { shouldAlertOnRefresh, shouldStartPolling } from './src/database/migrationDecision';
-import { refreshFeedingReminder } from './src/utils/feedingReminder';
+import { ensureFeedingReminderPermission, refreshFeedingReminder } from './src/utils/feedingReminder';
 import { canDispatchAutoVoiceLaunch, getAutoVoiceLaunchAction } from './src/utils/autoVoiceLaunch';
 import { Dashboard } from './src/screens/Dashboard';
 import { LogFormula } from './src/screens/LogFormula';
@@ -843,7 +843,12 @@ function MainApp() {
     if (success) {
       const savedProfile = await getProfile();
       setProfile(savedProfile);
-      void refreshFeedingReminder(logs, savedProfile, profilePatch.feedingReminderEnabled === true);
+      if (profilePatch.feedingReminderEnabled === true) {
+        // 저장 완료 Alert가 알림 안내창을 밀어내지 않도록 권한 확인을 먼저 끝냅니다.
+        // 허용 여부와 상관없이 저장 성공은 그대로 돌려줍니다.
+        await ensureFeedingReminderPermission().catch(error => console.warn('Notification permission check failed', error));
+      }
+      void refreshFeedingReminder(logs, savedProfile);
       if (syncInBackground && savedProfile.syncKey) {
         void syncLatestData(savedProfile.syncKey, false).then(result => {
           if (result.merged) {

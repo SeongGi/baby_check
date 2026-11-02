@@ -4,6 +4,8 @@ import { ExpoSpeechRecognitionModule, useSpeechRecognitionEvent } from 'expo-spe
 import { BabyLogEntry } from '../types';
 import { parseVoiceCommand, VoiceCommand } from '../utils/voiceCommand';
 import { getVoiceStatusText, VoicePhase } from '../utils/voiceFeedback';
+import { MICROPHONE_PROMPT, shouldExplainBeforeRequest } from '../utils/permissionNotice';
+import { confirmPermissionPrompt, PermissionPromptResult } from '../utils/permissionPrompt';
 
 type Props = {
   logs: BabyLogEntry[];
@@ -15,6 +17,10 @@ type Props = {
   onAutoStartHandled: (request: number) => void;
   onRecognitionActivity: (active: boolean) => void;
 };
+
+// 이번 실행 중에 사용자가 마이크 안내창에서 "취소"를 골랐는지 기억합니다.
+// 탭을 옮겨 이 컴포넌트가 다시 만들어져도 같은 실행 동안은 유지되도록 모듈 수준에 둡니다.
+let micNoticeDeclined = false;
 
 export const VoiceLogButton: React.FC<Props> = ({ logs, onAddLog, onUpdateLog, autoVoiceEnabled, onAutoVoiceEnabledChange, autoStartRequest, onAutoStartHandled, onRecognitionActivity }) => {
   const [phase, setPhase] = useState<VoicePhase>('idle');
@@ -35,6 +41,8 @@ export const VoiceLogButton: React.FC<Props> = ({ logs, onAddLog, onUpdateLog, a
   const nativeSessionOpenRef = useRef(false);
   const terminalEventRef = useRef<'none' | 'result' | 'error'>('none');
   const permissionPromptRef = useRef(false);
+  // 마이크 안내창이 떠 있는 동안 그 시작의 세대 번호를 담습니다. 없으면 null입니다.
+  const explainPromptRef = useRef<number | null>(null);
   const resumeAfterPermissionRef = useRef(false);
   const processingTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const resetTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -65,6 +73,12 @@ export const VoiceLogButton: React.FC<Props> = ({ logs, onAddLog, onUpdateLog, a
       }
       if (nativeSessionOpenRef.current) ExpoSpeechRecognitionModule.abort();
       starting.current = false;
+      if (explainPromptRef.current !== null) {
+        // 안내창이 콜백 없이 사라져도 새 시작이 막히지 않게 정리합니다.
+        explainPromptRef.current = null;
+        setPhase('idle');
+        setStatusMessage('음성 버튼을 다시 눌러 주세요.');
+      }
       if (nativeSessionOpenRef.current && !hasFinalResult) {
         terminalEventRef.current = 'error';
         setPhase('error');
@@ -279,8 +293,8 @@ export const VoiceLogButton: React.FC<Props> = ({ logs, onAddLog, onUpdateLog, a
         : `음성 인식 오류 (${event.error}): ${event.message || '기기의 음성 인식 서비스를 확인해 주세요.'}`);
   });
 
-  const start = async (): Promise<'handled' | 'deferred'> => {
-    if (savePendingRef.current || starting.current || nativeSessionOpenRef.current) return 'deferred';
+  const start = async (source: 'manual' | 'auto' = 'manual'): Promise<'handled' | 'deferred'> => {
+    if (savePendingRef.current || starting.current || nativeSessionOpenRef.current || explainPromptRef.current !== null) return 'deferred';
     if (AppState.currentState !== 'active') {
       setPhase('error');
       setStatusMessage('앱이 화면에 있을 때 음성 버튼을 다시 눌러 주세요.');
@@ -312,6 +326,41 @@ export const VoiceLogButton: React.FC<Props> = ({ logs, onAddLog, onUpdateLog, a
         return 'handled';
       }
       let permission = await ExpoSpeechRecognitionModule.getPermissionsAsync();
+      if (!permission.granted && shouldExplainBeforeRequest(permission)) {
+        let choice: PermissionPromptResult | 'skipped';
+        if (source === 'auto' && micNoticeDeclined) {
+          // 앱을 열 때마다 안내창이 반복되지 않도록 같은 실행 중에는 자동 시작에서 다시 묻지 않습니다.
+          choice = 'skipped';
+        } else {
+          explainPromptRef.current = generation;
+          try {
+            choice = await confirmPermissionPrompt(MICROPHONE_PROMPT);
+          } finally {
+            if (explainPromptRef.current === generation) explainPromptRef.current = null;
+          }
+          if (!mounted.current || interrupted.current || generation !== startGeneration.current) {
+            if (generation === startGeneration.current) starting.current = false;
+            // 다른 시작이 진행 중이면 아무것도 바꾸지 않습니다.
+            if (mounted.current && !starting.current && !nativeSessionOpenRef.current) {
+              setPhase('idle');
+              setStatusMessage('음성 버튼을 다시 눌러 주세요.');
+              onRecognitionActivity(false);
+            }
+            return 'deferred';
+          }
+        }
+        if (choice === 'continue') {
+          micNoticeDeclined = false;
+        } else {
+          // 뒤로 가기나 다른 Alert에 밀려 닫힌 경우('dismissed')는 거절로 기억하지 않습니다.
+          if (choice === 'cancel') micNoticeDeclined = true;
+          setStatusMessage('마이크 사용에 동의하지 않아 음성 기록을 시작하지 않았어요.');
+          setPhase('error');
+          starting.current = false;
+          onRecognitionActivity(false);
+          return 'handled';
+        }
+      }
       if (!permission.granted) {
         permissionPromptRef.current = true;
         permission = await ExpoSpeechRecognitionModule.requestPermissionsAsync();
@@ -373,7 +422,7 @@ export const VoiceLogButton: React.FC<Props> = ({ logs, onAddLog, onUpdateLog, a
   useEffect(() => {
     if (!resumeAfterPermissionRef.current || AppState.currentState !== 'active') return;
     resumeAfterPermissionRef.current = false;
-    void start();
+    void start('manual');
   }, [foregroundRevision]);
 
   useEffect(() => {
@@ -390,7 +439,7 @@ export const VoiceLogButton: React.FC<Props> = ({ logs, onAddLog, onUpdateLog, a
       return;
     }
     completeAutoRequest(autoStartRequest);
-    void start();
+    void start('auto');
   }, [autoStartRequest, autoVoiceEnabled, foregroundRevision, attemptRevision, busy]);
 
   const voiceStatusText = getVoiceStatusText(phase, statusMessage);
@@ -413,7 +462,7 @@ export const VoiceLogButton: React.FC<Props> = ({ logs, onAddLog, onUpdateLog, a
           ExpoSpeechRecognitionModule.stop();
         } : () => {
           if (autoStartRequest) completeAutoRequest(autoStartRequest);
-          void start();
+          void start('manual');
         }}
         accessibilityLabel={listening ? '음성 입력 끝내기' : '음성으로 기록하기'}
       >
