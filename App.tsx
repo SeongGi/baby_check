@@ -17,6 +17,8 @@ import * as Notifications from 'expo-notifications';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { SafeAreaProvider, useSafeAreaInsets } from 'react-native-safe-area-context';
 import { COLORS } from './src/theme/colors';
+import { PermissionNoticeModal } from './src/components/PermissionNoticeModal';
+import { PERMISSION_NOTICE_KEY, shouldShowPermissionNotice } from './src/utils/permissionNotice';
 import { BabyLogEntry, BabyProfile } from './src/types';
 import { getLogs, getProfile, addLog, deleteLog, updateLog, saveProfile, migrateStoredData, importDataWithoutLoss, backupLocalData, readProfileAfterPendingWrites, saveDiaryLine, deleteDiaryGroup } from './src/database/storage';
 import * as storage from './src/database/storage';
@@ -136,7 +138,31 @@ function MainApp() {
     return () => subscription.remove();
   }, []);
 
+  // 첫 실행 접근권한 안내입니다. 저장값을 읽기 전에는 음성 자동 시작을 막습니다.
+  const [permissionNoticeVisible, setPermissionNoticeVisible] = useState(false);
+  const [permissionNoticeReady, setPermissionNoticeReady] = useState(false);
+
   useEffect(() => {
+    let mounted = true;
+    // 읽기에 실패하면 저장값이 없는 것으로 보고 안내를 보여 줍니다.
+    AsyncStorage.getItem(PERMISSION_NOTICE_KEY)
+      .catch(() => null)
+      .then(stored => {
+        if (!mounted) return;
+        setPermissionNoticeVisible(shouldShowPermissionNotice(stored));
+        setPermissionNoticeReady(true);
+      });
+    return () => { mounted = false; };
+  }, []);
+
+  const handlePermissionNoticeConfirm = () => {
+    // 먼저 화면에서 닫습니다. 저장에 실패하면 다음 실행 때 다시 보이는 것으로 충분합니다.
+    setPermissionNoticeVisible(false);
+    AsyncStorage.setItem(PERMISSION_NOTICE_KEY, '1').catch(() => undefined);
+  };
+
+  useEffect(() => {
+    if (!permissionNoticeReady || permissionNoticeVisible) return;
     if (!autoVoiceReady || isLoading || !profile) return;
     const action = getAutoVoiceLaunchAction(
       voiceLaunchCandidate,
@@ -161,7 +187,7 @@ function MainApp() {
       setVoiceStartRequest(voiceLaunchCandidate);
     }, 800);
     return () => clearTimeout(timer);
-  }, [autoVoiceReady, isLoading, profile, voiceLaunchCandidate, activeScreen, autoVoiceEnabled, foregroundRevision]);
+  }, [permissionNoticeReady, permissionNoticeVisible, autoVoiceReady, isLoading, profile, voiceLaunchCandidate, activeScreen, autoVoiceEnabled, foregroundRevision]);
 
   useEffect(() => {
     if (activeScreen !== 'dashboard') setVoiceStartRequest(0);
@@ -1088,6 +1114,7 @@ function MainApp() {
           </TouchableOpacity>
         </View>
       )}
+      <PermissionNoticeModal visible={permissionNoticeVisible} onConfirm={handlePermissionNoticeConfirm} />
     </View>
   );
 }
