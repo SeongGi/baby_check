@@ -21,7 +21,7 @@ import { BabyLogEntry, BabyProfile } from './src/types';
 import { getLogs, getProfile, addLog, deleteLog, updateLog, saveProfile, migrateStoredData, importDataWithoutLoss, backupLocalData, readProfileAfterPendingWrites, saveDiaryLine, deleteDiaryGroup } from './src/database/storage';
 import * as storage from './src/database/storage';
 import * as cloudClient from './src/database/cloudClient';
-import { cancelFamilyDeletion, deleteFamilyCloudData, getFamilyDeletionStatus, getSyncClientId, parseFamilySyncId, readFamilyChangeToken, scheduleFamilyDeletion, subscribeToCloudChanges, syncWithCloud } from './src/database/sync';
+import { cancelFamilyDeletion, deleteFamilyCloudData, getFamilyDeletionStatus, getSyncClientId, parseFamilyInviteLink, readFamilyChangeToken, scheduleFamilyDeletion, subscribeToCloudChanges, syncWithCloud } from './src/database/sync';
 import { createSyncRunner } from './src/database/syncRunner';
 import { decideAfterTokenError } from './src/database/syncDecision';
 // 이전 모듈은 firestoreImport.ts와 firebase.ts를 동적 import()로만 불러옵니다(07 2.3.1, 2.11). 혼자 쓰는 기기와
@@ -529,8 +529,8 @@ function MainApp() {
 
     const connectFromInvite = async (url: string | null) => {
       if (!url) return;
-      const syncId = parseFamilySyncId(url);
-      if (!syncId || !/^babycheck:\/\/family\/[a-f0-9]{32}$/i.test(url.trim())) return;
+      const syncId = parseFamilyInviteLink(url);
+      if (!syncId) return;
       if (processedInviteRef.current === syncId) return;
       // 이 핸들러는 오래 살아 있으므로, 화면이 들고 있던 옛 프로필을 그대로 쓰면
       // 그 사이에 수정한 이름·생일이 되돌아갑니다. 저장된 최신 값을 다시 읽습니다.

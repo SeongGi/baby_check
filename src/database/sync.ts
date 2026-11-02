@@ -73,6 +73,12 @@ export const parseFamilySyncId = (value: string): string | null => {
   return /^[a-zA-Z0-9_-]+$/.test(key) ? key : null;
 };
 
+// 가족 초대 링크에서 가족 키를 꺼냅니다. 링크 형식이 아니면 null입니다.
+// 키 길이는 서버가 받는 범위(1~256자)와 같습니다. 예전 앱에서 사용자가 직접 친 짧은 그룹 비밀번호도
+// 가족 키로 쓰이고 있어서, 32자 16진수만 받으면 그 가족은 새 기기를 합류시킬 수 없습니다.
+export const parseFamilyInviteLink = (value: string): string | null =>
+  value.trim().match(/^babycheck:\/\/family\/([a-zA-Z0-9_-]{1,256})$/i)?.[1] ?? null;
+
 export interface SyncAbortToken {
   aborted: boolean;
 }

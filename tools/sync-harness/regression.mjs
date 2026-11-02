@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import AsyncStorage from './stubs/async-storage.mjs';
 import * as storage from '../../src/database/storage.ts';
-import { syncWithCloud, parseFamilySyncId, deleteFamilyCloudData, scheduleFamilyDeletion, cancelFamilyDeletion } from '../../src/database/sync.ts';
+import { syncWithCloud, parseFamilySyncId, parseFamilyInviteLink, deleteFamilyCloudData, scheduleFamilyDeletion, cancelFamilyDeletion } from '../../src/database/sync.ts';
 import { withSyncDeadline } from '../../src/database/syncDeadline.ts';
 import { createSyncRunner } from '../../src/database/syncRunner.ts';
 import { setSyncTimingForTests } from '../../src/database/cloudClient.ts';
@@ -156,6 +156,42 @@ assert.equal(parseFamilySyncId('https://wrong.example/invite'), null);
 assert.equal(parseFamilySyncId('abc def'), null);
 assert.equal(parseFamilySyncId(`babycheck://family/${key}`), key);
 console.log('PASS 잘못된 주소를 임의 가족 키로 변환하지 않음');
+
+// 짧은 가족 키 초대 링크: 서버가 받는 키(1~256자, 영문·숫자·_·-)는 링크로도 합류할 수 있어야 한다.
+assert.equal(parseFamilyInviteLink(`babycheck://family/${key}`), key);
+assert.equal(parseFamilyInviteLink('babycheck://family/abc12'), 'abc12');
+assert.equal(parseFamilyInviteLink('babycheck://family/a'), 'a');
+assert.equal(parseFamilyInviteLink('  babycheck://family/MyFamily_1-x  '), 'MyFamily_1-x');
+assert.equal(parseFamilyInviteLink('BabyCheck://Family/Ab9'), 'Ab9');
+assert.equal(parseFamilyInviteLink(`babycheck://family/${'z'.repeat(256)}`), 'z'.repeat(256));
+assert.equal(parseFamilyInviteLink(`babycheck://family/${'z'.repeat(257)}`), null);
+assert.equal(parseFamilyInviteLink('babycheck://family/'), null);
+assert.equal(parseFamilyInviteLink('babycheck://family/bad.key'), null);
+assert.equal(parseFamilyInviteLink('babycheck://family/abc def'), null);
+assert.equal(parseFamilyInviteLink('babycheck://family/abc/def'), null);
+assert.equal(parseFamilyInviteLink('abc12'), null);
+assert.equal(parseFamilyInviteLink('https://wrong.example/family/abc12'), null);
+assert.equal(parseFamilyInviteLink('xbabycheck://family/abc12'), null);
+assert.equal(parseFamilyInviteLink('https://a.example/?u=babycheck://family/abc12'), null);
+console.log('PASS 짧은 가족 키 초대 링크를 받고, 링크가 아니거나 서버가 거절할 키는 받지 않음');
+
+// 두 합류 진입점(초대 링크 열기, 설정 화면 붙여넣기)이 같은 해석 함수를 쓰고, 32자 16진수 검사가 남지 않아야 한다.
+{
+  const { readFileSync } = await import('node:fs');
+  const root = new URL('../../', import.meta.url);
+  // 진입점에서 키를 꺼내는 문장 자체를 맞춘다. 주석에 함수 이름만 있어도 통과하는 일을 막는다.
+  const entryPoints = [
+    ['App.tsx', 'const syncId = parseFamilyInviteLink(url);\n      if (!syncId) return;'],
+    ['src/screens/Profile.tsx', 'const syncId = parseFamilyInviteLink(inviteInput);\n    if (!syncId) {'],
+  ];
+  for (const [file, statement] of entryPoints) {
+    const source = readFileSync(new URL(file, root), 'utf8');
+    assert.ok(source.includes(statement), `${file}: 합류 진입점이 parseFamilyInviteLink 결과만으로 판정하지 않음`);
+    assert.ok(!source.includes('parseFamilySyncId'), `${file}: 링크가 아닌 키도 받는 parseFamilySyncId가 남아 있음`);
+    assert.ok(!/\{32(,32)?\}|length\s*={2,3}\s*32/.test(source), `${file}: 32자 고정 초대 검사가 남아 있음`);
+  }
+}
+console.log('PASS 두 합류 진입점이 짧은 키 초대 링크 해석 함수를 씀');
 
 await storage.saveProfile({ ...await storage.getProfile(), syncKey: key });
 await storage.addLog({ type: 'formula', amount: 180, timestamp: 2000 });
