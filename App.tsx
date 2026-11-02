@@ -870,11 +870,28 @@ function MainApp() {
       const savedProfile = await getProfile();
       setProfile(savedProfile);
       if (profilePatch.feedingReminderEnabled === true) {
-        // 저장 완료 Alert가 알림 안내창을 밀어내지 않도록 권한 확인을 먼저 끝냅니다.
-        // 허용 여부와 상관없이 저장 성공은 그대로 돌려줍니다.
-        await ensureFeedingReminderPermission().catch(error => console.warn('Notification permission check failed', error));
+        // 저장 완료 Alert가 알림 안내창을 밀어내지 않도록 권한 확인을 먼저 기다립니다.
+        // 응답을 기다리는 사이 새 기록이 들어올 수 있으므로, 권한 확인 뒤에는 저장소의 최신 기록과 프로필로 알림을 갱신합니다.
+        // 안내창이 응답 없이 사라져도 저장이 끝나지 않는 일이 없도록 최대 60초만 기다립니다. 허용 여부와 상관없이 저장 성공은 그대로 돌려줍니다.
+        const reminderUpdate = ensureFeedingReminderPermission()
+          .catch(error => {
+            console.warn('Notification permission check failed', error);
+            return false;
+          })
+          .then(async () => refreshFeedingReminder(await getLogs(), await getProfile()))
+          .catch(error => {
+            console.warn('Feeding reminder refresh failed', error);
+            return false;
+          });
+        let waitTimer: ReturnType<typeof setTimeout> | null = null;
+        await Promise.race([
+          reminderUpdate,
+          new Promise(resolve => { waitTimer = setTimeout(resolve, 60_000); }),
+        ]);
+        if (waitTimer) clearTimeout(waitTimer);
+      } else {
+        void refreshFeedingReminder(logs, savedProfile);
       }
-      void refreshFeedingReminder(logs, savedProfile);
       if (syncInBackground && savedProfile.syncKey) {
         void syncLatestData(savedProfile.syncKey, false).then(result => {
           if (result.merged) {

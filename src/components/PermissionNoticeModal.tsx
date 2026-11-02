@@ -1,5 +1,5 @@
 import React from 'react';
-import { Modal, StyleSheet, Text, TouchableOpacity, View } from 'react-native';
+import { Modal, ScrollView, StyleSheet, Text, TouchableOpacity, View } from 'react-native';
 import { COLORS } from '../theme/colors';
 import { PERMISSION_NOTICE_ITEMS, PERMISSION_NOTICE_TEXT } from '../utils/permissionNotice';
 
@@ -9,21 +9,24 @@ interface PermissionNoticeModalProps {
 }
 
 // 앱을 처음 실행할 때 한 번 보여 주는 접근권한 안내입니다. 뒤로 가기도 확인과 같게 처리합니다.
+// 작은 화면이나 큰 글꼴에서도 내용을 끝까지 읽을 수 있도록 본문은 스크롤하고, 확인 버튼은 아래에 고정합니다.
 export const PermissionNoticeModal: React.FC<PermissionNoticeModalProps> = ({ visible, onConfirm }) => (
-  <Modal visible={visible} transparent animationType="fade" onRequestClose={onConfirm}>
+  <Modal visible={visible} transparent animationType="fade" statusBarTranslucent onRequestClose={onConfirm}>
     <View style={styles.overlay}>
       <View style={styles.card}>
-        <Text style={styles.title}>{PERMISSION_NOTICE_TEXT.title}</Text>
-        <Text style={styles.description}>{PERMISSION_NOTICE_TEXT.noRequired}</Text>
-        <View style={styles.list}>
-          {PERMISSION_NOTICE_ITEMS.map(item => (
-            <View key={item.name} style={styles.item}>
-              <Text style={styles.itemName}>{item.name} (선택)</Text>
-              <Text style={styles.itemReason}>{item.reason}</Text>
-            </View>
-          ))}
-        </View>
-        <Text style={styles.closing}>{PERMISSION_NOTICE_TEXT.closing}</Text>
+        <ScrollView style={styles.body} contentContainerStyle={styles.bodyContent}>
+          <Text style={styles.title}>{PERMISSION_NOTICE_TEXT.title}</Text>
+          <Text style={styles.description}>{PERMISSION_NOTICE_TEXT.noRequired}</Text>
+          <View style={styles.list}>
+            {PERMISSION_NOTICE_ITEMS.map(item => (
+              <View key={item.name} style={styles.item}>
+                <Text style={styles.itemName}>{item.name} (선택)</Text>
+                <Text style={styles.itemReason}>{item.reason}</Text>
+              </View>
+            ))}
+          </View>
+          <Text style={styles.closing}>{PERMISSION_NOTICE_TEXT.closing}</Text>
+        </ScrollView>
         <TouchableOpacity
           style={styles.button}
           onPress={onConfirm}
@@ -48,6 +51,13 @@ const styles = StyleSheet.create({
     backgroundColor: COLORS.card,
     borderRadius: 22,
     padding: 22,
+    maxHeight: '90%',
+  },
+  body: {
+    flexGrow: 0,
+  },
+  bodyContent: {
+    paddingBottom: 2,
   },
   title: {
     fontSize: 20,

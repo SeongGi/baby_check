@@ -41,7 +41,7 @@ export const NOTIFICATION_PROMPT: PermissionPrompt = {
 
 export const PERMISSION_NOTICE_TEXT = {
   title: '앱 접근권한 안내',
-  noRequired: '필수 접근권한은 없습니다. 아래 권한은 모두 선택이며, 해당 기능을 처음 쓸 때 한 번 더 여쭙니다.',
+  noRequired: '필수 접근권한은 없습니다. 아래 권한은 모두 선택이며, 해당 기능을 쓸 때 앱이 먼저 이유를 알려 드리고 동의를 여쭙니다.',
   closing:
     '허용하지 않아도 다른 기능은 그대로 쓸 수 있습니다. 휴대폰 설정 > 애플리케이션 > 아기기록 > 권한에서 언제든 바꿀 수 있습니다.',
   confirm: '확인',

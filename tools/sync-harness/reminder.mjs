@@ -45,6 +45,7 @@ let hangingSettled = false;
 void hanging.then(() => { hangingSettled = true; });
 assert.equal(await refreshFeedingReminder([log], base), false, '권한이 없으면 예약하지 않습니다');
 assert.equal(hangingSettled, false, '시험 전제: 안내창은 아직 응답을 기다립니다');
+assert.equal(getPermissionRequests(), 0, '대기열 작업은 허용 창을 열면 안 됩니다');
 assert.equal(await ensureFeedingReminderPermission(), false, '안내창이 떠 있는 동안 들어온 요청은 바로 false입니다');
 assert.equal(getAlertCalls().length, 1, '안내창이 겹쳐 뜨면 안 됩니다');
 console.log('PASS 응답 없는 안내창이 대기열과 두 번째 요청을 막지 않는다');
