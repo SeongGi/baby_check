@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # 동기화 검증 실행기.
 #   ./verify.sh unit        네트워크 없이 프로필 규칙만 (무료, 항상 먼저 돌릴 것)
+#   ./verify.sh diary       한줄 육아일기와 댓글의 단위 시험 (네트워크 없음, 무료)
 #   ./verify.sh regression  가짜 Worker로 도는 회귀 시나리오 (무료)
 #   ./verify.sh real        실제 Worker 코드를 서버 프로세스로 띄운 모드 (무료, 127.0.0.1만 사용).
 #                           제어 엔드포인트 자체 점검, 같은 회귀, 시나리오(real-scenarios-*.mjs)
@@ -11,7 +12,7 @@
 #   ./verify.sh rules       firestore.rules 가정 여덟 가지를 로컬 Firebase 에뮬레이터로 확인
 #                           (Java 17과 에뮬레이터 내려받기가 필요해 offline, all에는 넣지 않음.
 #                           tools/rules-check 에서 npm install 을 먼저 하세요. 실제 Firebase에는 접속하지 않음)
-#   ./verify.sh offline     unit + regression + real + reminder. 할당량을 쓰지 않는 전부
+#   ./verify.sh offline     unit + diary + regression + real + reminder. 할당량을 쓰지 않는 전부
 #   ./verify.sh all         offline 다음에 compat, full을 순서대로
 # real 모드의 기기는 firestoreImport.ts와 firebase.ts의 firebase/* import를 가짜 Firestore(stubs/fake-firestore.mjs)로 보냅니다
 # (loader.mjs, HARNESS_REAL_WORKER=1에서 자동). 실제 Firebase에는 접속하지 않습니다.
@@ -24,6 +25,11 @@ LOADER_IMPORT="data:text/javascript,import { register } from 'node:module'; impo
 run_unit() {
   rm -f "$DIR/storage-unit.json"
   HARNESS_STORAGE_FILE="$DIR/storage-unit.json" node --import "$LOADER_IMPORT" "$DIR/unit.mjs"
+}
+
+run_diary() {
+  rm -f "$DIR/storage-diary-unit.json"
+  HARNESS_STORAGE_FILE="$DIR/storage-diary-unit.json" node --import "$LOADER_IMPORT" "$DIR/diary-unit.mjs"
 }
 
 run_regression() {
@@ -77,14 +83,15 @@ run_rules() {
 
 case "${1:-all}" in
   unit)       run_unit ;;
+  diary)      run_diary ;;
   regression) run_regression ;;
   real)       run_real ;;
   scenario)   run_scenario "${2:?시나리오 파일 이름이 필요합니다}" ;;
   reminder)   run_reminder ;;
   rules)      run_rules ;;
-  offline)    run_unit && run_regression && run_real && run_reminder ;;
+  offline)    run_unit && run_diary && run_regression && run_real && run_reminder ;;
   compat)     node "$DIR/compat.mjs" ;;
   full)       node "$DIR/run.mjs" ;;
-  all)        run_unit && run_regression && run_real && run_reminder && node "$DIR/compat.mjs" && node "$DIR/run.mjs" ;;
-  *)          echo "usage: $0 [unit|regression|real|scenario <파일>|reminder|rules|offline|compat|full|all]" >&2; exit 2 ;;
+  all)        run_unit && run_diary && run_regression && run_real && run_reminder && node "$DIR/compat.mjs" && node "$DIR/run.mjs" ;;
+  *)          echo "usage: $0 [unit|diary|regression|real|scenario <파일>|reminder|rules|offline|compat|full|all]" >&2; exit 2 ;;
 esac

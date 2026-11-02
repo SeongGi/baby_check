@@ -16,7 +16,8 @@ import {
 import { Directory, File, Paths } from 'expo-file-system';
 import * as Sharing from 'expo-sharing';
 import { DISTRIBUTION_STORE, getInstalledAppVersion, openGooglePlayListing } from '../utils/appUpdater';
-import { BabyProfile, BabyLogEntry } from '../types';
+import { BabyProfile, BabyLogEntry, DiaryRole } from '../types';
+import { DIARY_ROLE_EMOJI, DIARY_ROLE_LABEL, DIARY_ROLES } from '../utils/diary';
 import { COLORS } from '../theme/colors';
 import { KeyboardAwareScrollView } from '../components/KeyboardAwareScrollView';
 import { getLogs, getProfile, getLocalBackup, restoreFromLocalBackup, getPreMigrationBackupInfo, restorePreMigrationBackup, getMigrationState, clearLegacyKeyMarker } from '../database/storage';
@@ -117,6 +118,26 @@ export const Profile: React.FC<ProfileProps> = ({
     setSyncKey(profile.syncKey || '');
   }, [profile]);
   const [isSaving, setIsSaving] = useState(false);
+  // 일기 작성자 역할은 누르는 즉시 저장합니다(가족 공유 항목이 아니라 동기화를 부르지 않습니다).
+  const [isSavingDiaryRole, setIsSavingDiaryRole] = useState(false);
+  const diaryRoleSavingRef = useRef(false);
+  const handleSelectDiaryRole = async (diaryRole: DiaryRole) => {
+    if (diaryRoleSavingRef.current || profile.diaryRole === diaryRole) return;
+    diaryRoleSavingRef.current = true;
+    setIsSavingDiaryRole(true);
+    try {
+      let saved = false;
+      try {
+        saved = await onSaveProfile({ diaryRole }, false);
+      } catch {
+        saved = false;
+      }
+      if (!saved) Alert.alert('저장 실패', '일기 작성자를 저장하지 못했어요. 잠시 뒤 다시 시도해 주세요.');
+    } finally {
+      diaryRoleSavingRef.current = false;
+      setIsSavingDiaryRole(false);
+    }
+  };
   const [isCheckingUpdates, setIsCheckingUpdates] = useState(false);
   const [syncKey, setSyncKey] = useState(profile.syncKey || '');
   const [inviteInput, setInviteInput] = useState('');
@@ -752,6 +773,36 @@ export const Profile: React.FC<ProfileProps> = ({
         </View>
 
         <View style={styles.backupCard}>
+          <Text style={styles.backupTitle}>✍️ 일기 작성자</Text>
+          <Text style={styles.backupDesc}>
+            한줄 일기에 이 이름으로 표시돼요. 이 휴대폰에만 저장됩니다.
+          </Text>
+          <View style={styles.diaryRoleRow}>
+            {DIARY_ROLES.map(role => {
+              const selected = profile.diaryRole === role;
+              return (
+                <TouchableOpacity
+                  key={role}
+                  style={[styles.diaryRoleButton, selected && styles.diaryRoleButtonActive, isSavingDiaryRole && styles.diaryRoleButtonDisabled]}
+                  onPress={() => handleSelectDiaryRole(role)}
+                  disabled={isSavingDiaryRole}
+                  accessibilityRole="button"
+                  accessibilityState={{ selected }}
+                  accessibilityLabel={`일기 작성자 ${DIARY_ROLE_LABEL[role]}`}
+                >
+                  <Text style={[styles.diaryRoleText, selected && styles.diaryRoleTextActive]}>
+                    {DIARY_ROLE_EMOJI[role]} {DIARY_ROLE_LABEL[role]}
+                  </Text>
+                </TouchableOpacity>
+              );
+            })}
+          </View>
+          {!profile.diaryRole && (
+            <Text style={styles.reminderHint}>아빠인지 엄마인지 정하면 한줄 일기를 쓸 수 있어요.</Text>
+          )}
+        </View>
+
+        <View style={styles.backupCard}>
           <View style={styles.reminderHeader}>
             <View style={styles.reminderText}>
               <Text style={styles.backupTitle}>🍼 다음 수유 자동 알림</Text>
@@ -1246,6 +1297,36 @@ const styles = StyleSheet.create({
     fontSize: 11,
     lineHeight: 16,
     marginTop: 7,
+  },
+  diaryRoleRow: {
+    flexDirection: 'row',
+    gap: 10,
+    marginTop: 12,
+  },
+  diaryRoleButton: {
+    flex: 1,
+    borderWidth: 1,
+    borderColor: COLORS.border,
+    borderRadius: 14,
+    paddingVertical: 12,
+    alignItems: 'center',
+    backgroundColor: COLORS.background,
+  },
+  diaryRoleButtonActive: {
+    borderColor: COLORS.primary,
+    backgroundColor: COLORS.primary + '15',
+  },
+  diaryRoleButtonDisabled: {
+    opacity: 0.6,
+  },
+  diaryRoleText: {
+    color: COLORS.textMuted,
+    fontSize: 14,
+    fontWeight: '600',
+  },
+  diaryRoleTextActive: {
+    color: COLORS.primary,
+    fontWeight: 'bold',
   },
   intervalPresets: {
     flexDirection: 'row',

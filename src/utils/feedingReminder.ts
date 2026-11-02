@@ -2,6 +2,7 @@ import AsyncStorage from '@react-native-async-storage/async-storage';
 import { NativeModules, Platform } from 'react-native';
 import * as Notifications from 'expo-notifications';
 import { BabyLogEntry, BabyProfile, FormulaLog } from '../types';
+import { withoutDiaryLogs } from './diary';
 
 const NOTIFICATION_ID_KEY = '@baby_feeding_notification_id';
 // Android는 생성된 채널의 중요도를 앱에서 낮음→높음으로 바꿀 수 없으므로
@@ -56,7 +57,7 @@ const formatElapsed = (timestamp: number | undefined, now = Date.now()) => {
   return `${Math.floor(hours / 24)}일 전`;
 };
 
-const buildWidgetSnapshot = (logs: BabyLogEntry[], profile: BabyProfile, now = Date.now()) => {
+export const buildWidgetSnapshot = (logs: BabyLogEntry[], profile: BabyProfile, now = Date.now()) => {
   const latest = getLatestFeeding(logs);
   const nextAt = getNextFeedingAt(logs, profile);
   const latestOf = <T extends BabyLogEntry['type']>(type: T) =>
@@ -65,7 +66,8 @@ const buildWidgetSnapshot = (logs: BabyLogEntry[], profile: BabyProfile, now = D
   const stool = latestOf('stool');
   const sleep = latestOf('sleep');
   const activeSleep = logs.find(log => log.type === 'sleep' && !log.endedAt);
-  const mostRecent = logs[0];
+  // 마지막 기록이 일기나 댓글이면 위젯 상태 문구가 "잘 지내고 있어요"로 바뀌므로, 활동 기록 중 가장 최근 것을 씁니다.
+  const mostRecent = withoutDiaryLogs(logs)[0];
   const statusByType: Partial<Record<BabyLogEntry['type'], string>> = {
     formula: '배부르게 먹었어요',
     urine: '쉬 했어요',

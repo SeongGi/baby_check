@@ -1,7 +1,16 @@
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import * as Crypto from 'expo-crypto';
-import { BabyLogEntry, BabyProfile } from '../types';
+import { BabyLogEntry, BabyProfile, DiaryLog, DiaryRole } from '../types';
 import { compareCodePoints } from '../utils/compareCodePoints';
+import {
+  countCodePoints,
+  DIARY_MAX_LENGTH,
+  diaryTimestampFor,
+  isDiaryLog,
+  isValidDiaryDate,
+  makeDiaryId,
+  toDiaryDate,
+} from '../utils/diary';
 import { isCompleteSharedProfile, SyncLimits } from './syncDecision';
 
 const LOGS_STORAGE_KEY = '@baby_logs';
@@ -75,6 +84,8 @@ const normalizeProfile = (profile: BabyProfile): BabyProfile => ({
     profile.feedingIntervalMinutes <= 720
       ? Math.round(profile.feedingIntervalMinutes)
       : 180,
+  // 일기 작성자 역할은 'dad'나 'mom'만 인정하고, 그 밖의 값은 지웁니다.
+  diaryRole: profile.diaryRole === 'dad' || profile.diaryRole === 'mom' ? profile.diaryRole : undefined,
 });
 
 // ────────────── 1.7.9 연결 근거 표식 (07 2.1) ──────────────
@@ -304,6 +315,113 @@ export const getProfile = async (): Promise<BabyProfile> => {
     return { ...DEFAULT_PROFILE };
   }
 };
+
+// ────────────── 한줄 육아일기 ──────────────
+// 새 쓰기 경로는 아래 두 함수뿐입니다. saveDiaryLine은 일기 한 건만 추가하거나 바꾸고,
+// deleteDiaryGroup은 같은 날짜·역할의 일기만 지웁니다. 다른 기록은 원래 배열 그대로 둡니다.
+
+const isDiaryRole = (value: unknown): value is DiaryRole => value === 'dad' || value === 'mom';
+
+/**
+ * 일기 한 줄을 저장합니다. 성공하면 저장한 줄을, 입력이 잘못됐거나 저장소를 읽지 못했으면 null을 돌려줍니다.
+ * 고칠 줄은 입력 창을 열 때 고른 줄(targetId)로 정하고, 저장 순간에 다시 고르지 않습니다.
+ * 고치는 사이 동기화로 같은 역할의 다른 줄이 내려와도 그 줄을 덮지 않기 위해서입니다.
+ */
+export const saveDiaryLine = async (input: {
+  diaryDate: string;
+  role: DiaryRole;
+  text: string;
+  targetId: string | null;
+  now?: number;
+}): Promise<DiaryLog | null> =>
+  runStorageWrite(async () => {
+    try {
+      if (!isValidDiaryDate(input.diaryDate) || !isDiaryRole(input.role) || typeof input.text !== 'string') return null;
+      const text = input.text.trim();
+      const length = countCodePoints(text);
+      if (length < 1 || length > DIARY_MAX_LENGTH) return null;
+      const now = input.now ?? Date.now();
+      // 'YYYY-MM-DD'는 문자열 비교가 날짜 순서입니다. 저장 시각 기준 오늘보다 뒤 날짜인지 봅니다.
+      const isFutureDate = input.diaryDate > toDiaryDate(now);
+
+      // 읽기가 실패(손상 포함)하면 예외로 빠져 아무것도 쓰지 않습니다.
+      const logs = await readLogsUnsafe();
+      const profile = await readProfileUnsafe();
+
+      const target = input.targetId ? logs.find(log => log.id === input.targetId) : undefined;
+      if (target && isDiaryLog(target)
+        && target.diaryDate === input.diaryDate && target.authorRole === input.role) {
+        const updated: DiaryLog = { ...target, notes: text, updatedAt: now };
+        await AsyncStorage.setItem(
+          LOGS_STORAGE_KEY,
+          JSON.stringify(logs.map(log => (log === target ? updated : log))),
+        );
+        return updated;
+      }
+
+      // 미래 날짜에는 새 줄을 만들지 않습니다. 시계가 앞서 있던 기기에서 이미 쓴 미래 날짜 줄은
+      // 바로 위의 고치기 경로로 고칠 수 있게 둡니다(그렇지 않으면 그 날짜가 올 때까지 고칠 길이 없습니다).
+      if (isFutureDate) return null;
+
+      // 처음 쓰거나, 고르던 줄이 사라졌거나, 날짜·역할이 달라졌으면 새 줄을 만듭니다.
+      const usedIds = new Set<string>([...logs.map(log => log.id), ...(profile.deletedLogIds || [])]);
+      let id = makeDiaryId(input.diaryDate, input.role, now);
+      while (usedIds.has(id)) id = makeDiaryId(input.diaryDate, input.role, now);
+      const created: DiaryLog = {
+        id,
+        type: 'diary',
+        timestamp: diaryTimestampFor(input.diaryDate, now),
+        updatedAt: now,
+        diaryDate: input.diaryDate,
+        authorRole: input.role,
+        notes: text,
+      };
+      await AsyncStorage.setItem(LOGS_STORAGE_KEY, JSON.stringify([...logs, created]));
+      return created;
+    } catch (error) {
+      console.error('Error saving diary line', error);
+      return null;
+    }
+  });
+
+/**
+ * 내 줄을 지울 때 씁니다. 같은 날짜·역할 묶음의 일기를 모두 목록에서 빼고 그 id들을 삭제 표식에 더합니다.
+ * 숨은 중복 줄까지 지우는 까닭은, 남기면 지운 뒤 옛 줄이 다시 보이기 때문입니다.
+ * 기록과 프로필은 한 번에 저장해, 중간에 실패해도 숨은 줄만 다시 보이는 일이 없게 합니다.
+ */
+export const deleteDiaryGroup = async (input: {
+  diaryDate: string;
+  role: DiaryRole;
+}): Promise<boolean> =>
+  runStorageWrite(async () => {
+    try {
+      if (!isValidDiaryDate(input.diaryDate) || !isDiaryRole(input.role)) return false;
+      const logs = await readLogsUnsafe();
+      const profile = await readProfileUnsafe();
+      // type === 'diary'이고 형식 검사를 통과한 같은 날짜·역할의 줄만 대상입니다.
+      const doomed = logs.filter(
+        log => isDiaryLog(log) && log.diaryDate === input.diaryDate && log.authorRole === input.role,
+      );
+      if (doomed.length === 0) return true;
+      const doomedIds = new Set(doomed.map(log => log.id));
+      const deletedIds = new Set(profile.deletedLogIds || []);
+      doomedIds.forEach(id => deletedIds.add(id));
+      // 공유 항목 판정을 타는 saveProfile은 거치지 않고, deleteLog와 같은 방식으로 프로필을 만듭니다.
+      const updatedProfile = normalizeProfile({
+        ...profile,
+        deletedLogIds: Array.from(deletedIds),
+        updatedAt: Date.now(),
+      });
+      await AsyncStorage.multiSet([
+        [LOGS_STORAGE_KEY, JSON.stringify(logs.filter(log => !doomedIds.has(log.id)))],
+        [PROFILE_STORAGE_KEY, JSON.stringify(updatedProfile)],
+      ]);
+      return true;
+    } catch (error) {
+      console.error('Error deleting diary group', error);
+      return false;
+    }
+  });
 
 const saveProfileUnsafe = async (incomingProfile: BabyProfile): Promise<boolean> => {
   try {
@@ -825,6 +943,8 @@ export const importDataWithoutLoss = async (
     ...importedProfile,
     syncKey: currentProfile.syncKey,
     deletedLogIds: Array.from(deletedIds),
+    // 일기 작성자 역할은 휴대폰마다 따로 두는 값입니다. 가져온 백업(다른 가족의 휴대폰 것일 수 있음)이 바꾸지 못하게 합니다.
+    diaryRole: currentProfile.diaryRole,
   });
   // 복원한 프로필이 클라우드의 값보다 오래돼 보이면, 방금 되돌린 아기 정보가
   // 곧바로 다시 덮여 버립니다. 복원은 사용자의 명시적 변경으로 취급합니다.
@@ -892,6 +1012,8 @@ export const restoreFromLocalBackup = async (): Promise<{ success: boolean; back
       const restoredProfile = normalizeProfile({
         ...backup.profile,
         syncKey: currentProfile.syncKey,
+        // 일기 작성자 역할은 이 휴대폰의 값을 유지합니다.
+        diaryRole: currentProfile.diaryRole,
         updatedAt: restoredAt,
         sharedUpdatedAt: restoredAt,
       });

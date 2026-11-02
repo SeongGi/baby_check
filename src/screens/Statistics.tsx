@@ -2,6 +2,7 @@ import React, { useState } from 'react';
 import { ScrollView, StyleSheet, Text, TouchableOpacity, View } from 'react-native';
 import { BabyLogEntry, FormulaLog, SleepLog, TummyTimeLog, PlayLog, WeightLog, TemperatureLog } from '../types';
 import { COLORS } from '../theme/colors';
+import { withoutDiaryLogs } from '../utils/diary';
 
 interface StatisticsProps { logs: BabyLogEntry[]; }
 type Range = 'week' | 'all';
@@ -49,8 +50,10 @@ const formatDuration = (minutes: number) => {
   return hours > 0 ? `${hours}시간${restMinutes > 0 ? ` ${restMinutes}분` : ''}` : `${restMinutes}분`;
 };
 
-export const Statistics: React.FC<StatisticsProps> = ({ logs }) => {
+export const Statistics: React.FC<StatisticsProps> = ({ logs: allLogs }) => {
   const [range, setRange] = useState<Range>('week');
+  // 일기와 댓글은 활동이 아니므로, 하루 평균의 일수와 "총 N개의 활동 기록"까지 모든 계산에서 뺍니다.
+  const logs = withoutDiaryLogs(allLogs);
   const last7Days = Array.from({ length: 7 }, (_, index) => {
     const date = new Date();
     date.setDate(date.getDate() - (6 - index));
