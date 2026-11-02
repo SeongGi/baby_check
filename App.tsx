@@ -869,6 +869,16 @@ function MainApp() {
     if (success) {
       const savedProfile = await getProfile();
       setProfile(savedProfile);
+      // 알림 권한 안내창 응답을 기다리는 동안에도 바뀐 프로필이 상대 기기에 바로 전달되도록 동기화를 먼저 시작합니다.
+      if (syncInBackground && savedProfile.syncKey) {
+        void syncLatestData(savedProfile.syncKey, false).then(result => {
+          if (result.merged) {
+            setLogs(result.logs);
+            setProfile(result.profile);
+            void refreshFeedingReminder(result.logs, result.profile);
+          }
+        }).catch(error => console.warn('Background profile sync failed', error));
+      }
       if (profilePatch.feedingReminderEnabled === true) {
         // 저장 완료 Alert가 알림 안내창을 밀어내지 않도록 권한 확인을 먼저 기다립니다.
         // 응답을 기다리는 사이 새 기록이 들어올 수 있으므로, 권한 확인 뒤에는 저장소의 최신 기록과 프로필로 알림을 갱신합니다.
@@ -891,15 +901,6 @@ function MainApp() {
         if (waitTimer) clearTimeout(waitTimer);
       } else {
         void refreshFeedingReminder(logs, savedProfile);
-      }
-      if (syncInBackground && savedProfile.syncKey) {
-        void syncLatestData(savedProfile.syncKey, false).then(result => {
-          if (result.merged) {
-            setLogs(result.logs);
-            setProfile(result.profile);
-            void refreshFeedingReminder(result.logs, result.profile);
-          }
-        }).catch(error => console.warn('Background profile sync failed', error));
       }
     }
     return success;
