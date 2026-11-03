@@ -21,7 +21,7 @@ import { DIARY_ROLE_EMOJI, DIARY_ROLE_LABEL, DIARY_ROLES } from '../utils/diary'
 import { COLORS } from '../theme/colors';
 import { KeyboardAwareScrollView } from '../components/KeyboardAwareScrollView';
 import { getLogs, getProfile, getLocalBackup, restoreFromLocalBackup, getPreMigrationBackupInfo, restorePreMigrationBackup, getMigrationState, clearLegacyKeyMarker } from '../database/storage';
-import { createFamilyInviteLink, createFamilySyncId, parseFamilySyncId, FamilyDeletionStatus } from '../database/sync';
+import { createFamilyInviteLink, createFamilySyncId, parseFamilyInviteLink, FamilyDeletionStatus } from '../database/sync';
 import { shouldCheckDeletionStatus } from '../database/migrationDecision';
 import type { MigrationGate } from '../database/migrationDecision';
 
@@ -529,9 +529,7 @@ export const Profile: React.FC<ProfileProps> = ({
   };
 
   const handleJoinFamily = async () => {
-    const syncId = /^babycheck:\/\/family\/[a-f0-9]{32}$/i.test(inviteInput.trim())
-      ? parseFamilySyncId(inviteInput)
-      : null;
+    const syncId = parseFamilyInviteLink(inviteInput);
     if (!syncId) {
       Alert.alert('초대 확인', '받은 가족 초대 링크를 붙여넣어 주세요.');
       return;
