@@ -16,11 +16,11 @@ const isPartnerNotification = (notification: Notifications.Notification): boolea
   notification.request.content.data?.kind === 'partnerLog';
 
 // 안드로이드는 FCM 메시지의 채널 번호를 trigger.remoteMessage에서 읽습니다. 없으면 undefined입니다.
-const readPartnerSoundInfo = (notification: Notifications.Notification): { channelId?: unknown; sound?: unknown } => {
+const readPartnerSoundInfo = (notification: Notifications.Notification): { channelId?: unknown; quiet?: unknown } => {
   const trigger = notification.request.trigger as { remoteMessage?: { notification?: { channelId?: unknown } | null } } | null;
   return {
     channelId: trigger?.remoteMessage?.notification?.channelId,
-    sound: notification.request.content.sound,
+    quiet: notification.request.content.data?.quiet,
   };
 };
 

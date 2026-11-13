@@ -216,7 +216,7 @@ export interface ExpoMessage {
   to: string;
   title: string;
   body: string;
-  data: { kind: 'partnerLog'; logId: string; type: PushType };
+  data: { kind: 'partnerLog'; logId: string; type: PushType; quiet: boolean };
   channelId: string;
   priority: 'high' | 'normal';
   sound: 'default' | null;
@@ -239,7 +239,7 @@ export function buildExpoMessage(
     to: device.token,
     title: babyName ? `${babyName} 새 기록` : '아기 새 기록',
     body: `${summarizeLog(latest)} · ${formatClock(latest.timestamp, device.tz_offset_min)}${extra}`,
-    data: { kind: 'partnerLog', logId: latest.id, type: latest.type },
+    data: { kind: 'partnerLog', logId: latest.id, type: latest.type, quiet },
     channelId: quiet ? 'partner-records-quiet' : 'partner-records',
     priority: quiet ? 'normal' : 'high',
     sound: quiet ? null : 'default',

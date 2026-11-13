@@ -683,12 +683,13 @@ test('가족 알림 권한: 안내창이 떠 있는 동안 들어온 두 번째 
   assert.equal(await ensurePartnerPushPermission(third.deps), 'granted');
 });
 
-test('가족 알림 소리: 조용한 채널이거나 내용의 소리가 비어 있으면 내지 않는다', () => {
-  assert.equal(shouldPlayPartnerSound({ channelId: 'partner-records', sound: 'default' }), true);
-  assert.equal(shouldPlayPartnerSound({ channelId: undefined, sound: 'default' }), true);
-  assert.equal(shouldPlayPartnerSound({ channelId: 'partner-records-quiet', sound: 'default' }), false);
-  assert.equal(shouldPlayPartnerSound({ channelId: 'partner-records', sound: null }), false);
-  assert.equal(shouldPlayPartnerSound({ channelId: undefined, sound: null }), false);
+test('가족 알림 소리: data.quiet가 참이거나 조용한 채널이면 내지 않는다', () => {
+  assert.equal(shouldPlayPartnerSound({ channelId: 'partner-records', quiet: false }), true);
+  assert.equal(shouldPlayPartnerSound({ channelId: undefined, quiet: false }), true);
+  assert.equal(shouldPlayPartnerSound({ channelId: undefined, quiet: true }), false);
+  assert.equal(shouldPlayPartnerSound({ channelId: 'partner-records-quiet', quiet: false }), false);
+  assert.equal(shouldPlayPartnerSound({ channelId: 'partner-records-quiet' }), false);
+  // 옛 서버처럼 quiet가 없으면 소리를 냅니다.
   assert.equal(shouldPlayPartnerSound({}), true);
 });
 

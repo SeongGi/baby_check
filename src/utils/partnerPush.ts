@@ -190,8 +190,10 @@ export const createDeviceTokenChangeGate = (): ((token: unknown) => boolean) => 
  * 앞에 떠 있을 때 가족 기록 알림에서 소리를 낼지 정합니다. 방해 금지 시간대에 서버는 소리 없는 알림과
  * 조용한 채널을 쓰므로, 채널이 조용한 채널이거나 알림 내용의 소리가 비어 있으면 소리를 내지 않습니다.
  */
-export const shouldPlayPartnerSound = (info: { channelId?: unknown; sound?: unknown }): boolean =>
-  info.channelId !== PARTNER_PUSH_QUIET_CHANNEL_ID && info.sound !== null;
+// 서버가 data.quiet로 방해 금지 시간대를 알려 줍니다. 안드로이드의 조용한 채널 번호는 보조 신호입니다.
+// content.sound는 플랫폼마다 평소에도 비어 있을 수 있어서 보지 않습니다.
+export const shouldPlayPartnerSound = (info: { channelId?: unknown; quiet?: unknown }): boolean =>
+  info.quiet !== true && info.channelId !== PARTNER_PUSH_QUIET_CHANNEL_ID;
 
 // 해제 요청은 화면 흐름을 막지 않도록 이 시간까지만 기다립니다.
 const UNREGISTER_TIMEOUT_MS = 2000;

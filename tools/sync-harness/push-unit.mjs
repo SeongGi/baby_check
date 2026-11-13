@@ -277,7 +277,7 @@ await test('P1', '새 기록 하나는 다른 기기에만 알림이 가고, 보
     to: TOKEN_B,
     title: '아기 새 기록',
     body: '🍼 분유 120ml · 오후 3:19',
-    data: { kind: 'partnerLog', logId: log.id, type: 'formula' },
+    data: { kind: 'partnerLog', logId: log.id, type: 'formula', quiet: false },
     channelId: 'partner-records',
     priority: 'high',
     sound: 'default',
@@ -414,8 +414,8 @@ await test('P7', '방해 금지: 자정을 넘는 구간과 넘지 않는 구간
   for (const [name, clockMs, body, expected] of cases) {
     const message = await messageAt(clockMs, body);
     assert.deepEqual(
-      { channelId: message.channelId, priority: message.priority, sound: message.sound },
-      expected,
+      { channelId: message.channelId, priority: message.priority, sound: message.sound, quiet: message.data.quiet },
+      { ...expected, quiet: expected.sound === null },
       name,
     );
   }
