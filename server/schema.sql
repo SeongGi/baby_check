@@ -36,3 +36,17 @@ CREATE TABLE IF NOT EXISTS logs (
 
 CREATE INDEX IF NOT EXISTS idx_logs_family_updated_log
 ON logs (family_id, updated_at, log_id);
+
+-- 상대 기기 기록 알림을 받을 기기(푸시 토큰). 가족 연결(members)이 있는 기기만 등록한다.
+CREATE TABLE IF NOT EXISTS push_devices (
+  family_id TEXT NOT NULL,
+  client_id TEXT NOT NULL,
+  token TEXT NOT NULL,                 -- ExponentPushToken[...]
+  types_json TEXT NOT NULL,            -- 받을 기록 종류 배열, 예: ["formula","urine"]
+  quiet_start INTEGER DEFAULT NULL,    -- 방해 금지 시작(기기 현지 0~1439분), NULL이면 끔
+  quiet_end INTEGER DEFAULT NULL,      -- 방해 금지 끝(기기 현지 0~1439분)
+  tz_offset_min INTEGER NOT NULL,      -- 기기 현지 시각 - UTC (분). 한국은 540
+  updated_at INTEGER NOT NULL,
+  PRIMARY KEY (family_id, client_id)
+) WITHOUT ROWID;
+CREATE INDEX IF NOT EXISTS idx_push_devices_token ON push_devices (token);

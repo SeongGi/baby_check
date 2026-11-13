@@ -11,7 +11,7 @@
 //            {op:'list'} | {op:'remove', ruleId} | {op:'clear'}
 //   background {op:'wait'} 응답 뒤에도 도는 백그라운드 작업(ctx.waitUntil)이 모두 끝날 때까지 기다림 -> {waited}
 //   expo     {op:'mode', mode, delayMs?, tokens?} | {op:'requests'} | {op:'reset'} 가짜 Expo 푸시 서버 제어. 사용법은 fake-expo.mjs 머리말
-//   state    {q:'requests'|'family'|'logs'|'stats'|'held'|'config', key?, from?} 서버 상태 조회
+//   state    {q:'requests'|'family'|'logs'|'stats'|'held'|'config'|'pushDevices', key?, from?} 서버 상태 조회
 //   inject   {key, ensureFamily?, family?, log?, logs?, tombstone?, tombstones?, serverTime?, member?, remove?, gone?}
 //   wipe     {scope:'logs'|'all'|'snapshot'|'restore'|'reset', name?}
 //   config   {maxPushItems?, maxPageRows?} 서버 상수 변경
@@ -422,6 +422,7 @@ function injectState(body) {
   if (body.remove || body.gone) {
     d1.raw.prepare('DELETE FROM logs WHERE family_id = ?').run(id);
     d1.raw.prepare('DELETE FROM members WHERE family_id = ?').run(id);
+    d1.raw.prepare('DELETE FROM push_devices WHERE family_id = ?').run(id);
     d1.raw.prepare('DELETE FROM families WHERE id = ?').run(id);
     if (body.gone) d1.raw.prepare('INSERT OR REPLACE INTO deleted_families (id, deleted_at) VALUES (?, ?)').run(id, serverTime);
     d1.invalidateCounts();
@@ -463,7 +464,7 @@ function injectState(body) {
   return { injected: { logs: logs.length, tombstones: tombstones.length } };
 }
 
-const TABLES = ['families', 'members', 'deleted_families', 'logs'];
+const TABLES = ['families', 'members', 'deleted_families', 'logs', 'push_devices'];
 
 async function wipeState(body) {
   const scope = body.scope;
@@ -584,6 +585,13 @@ async function control(name, body) {
         case 'family': return familyState(body.key);
         case 'logs': return logsState(body.key);
         case 'stats': return statsState();
+        // 알림 받을 기기 등록 행. key가 있으면 그 가족 것만, 없으면 전부.
+        case 'pushDevices': {
+          const rows = body.key !== undefined
+            ? d1.raw.prepare('SELECT * FROM push_devices WHERE family_id = ? ORDER BY client_id').all(familyIdOf(body.key))
+            : d1.raw.prepare('SELECT * FROM push_devices ORDER BY family_id, client_id').all();
+          return { rows: rows.map((r) => ({ ...r })) };
+        }
         case 'held': return { held: heldView() };
         case 'config': return { ...config, clock: clockStatus() };
         default: throw new Error(`알 수 없는 state 질의: ${body.q}`);

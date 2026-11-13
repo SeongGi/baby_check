@@ -384,6 +384,11 @@ globalThis.fetch = async function fakeFetch(url, options = {}) {
     return makeJsonResponse({ ok: true });
   }
 
+  // 8. POST /api/family/push-register, push-unregister: 푸시 판정이 없는 가짜 Worker는 200으로만 받습니다.
+  if ((pathname === '/api/family/push-register' || pathname === '/api/family/push-unregister') && method === 'POST') {
+    return makeJsonResponse({ ok: true });
+  }
+
   // 7. GET /api/family/deletion-status
   if (pathname === '/api/family/deletion-status' && method === 'GET') {
     const fam = state.families.get(syncKey);

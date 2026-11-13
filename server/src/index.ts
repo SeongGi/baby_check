@@ -1,3 +1,5 @@
+import { parsePushRegistration } from './push';
+
 export interface Env {
   DB: D1Database;
   /** 시험 전용 서버 시계. 운영(wrangler.toml)에는 이 바인딩이 없어서 항상 Date.now()를 쓴다. */
@@ -358,12 +360,75 @@ export default {
           ).bind(familyId, t),
           env.DB.prepare(`DELETE FROM logs WHERE family_id = ?1 AND ${deleteGuard}`).bind(familyId, t),
           env.DB.prepare(`DELETE FROM members WHERE family_id = ?1 AND ${deleteGuard}`).bind(familyId, t),
+          env.DB.prepare(`DELETE FROM push_devices WHERE family_id = ?1 AND ${deleteGuard}`).bind(familyId, t),
           env.DB.prepare(`DELETE FROM families WHERE id = ?1 AND ${deleteGuard}`).bind(familyId, t),
         ]);
 
         if (changesOf(results[0]) === 0) {
           return errorResponse('cooling_period_active', 400);
         }
+        return jsonResponse({ ok: true });
+      }
+
+      // 6-1. POST /api/family/push-register (상대 기기 기록 알림 등록)
+      if (request.method === 'POST' && path === '/api/family/push-register') {
+        const registration = parsePushRegistration(body);
+        if (!registration) {
+          return errorResponse('invalid_push_token', 400);
+        }
+        // 받을 종류가 없으면 등록하지 않고 해제와 같게 처리한다.
+        if (registration.types.length === 0) {
+          await env.DB.prepare('DELETE FROM push_devices WHERE family_id = ?1 AND client_id = ?2')
+            .bind(familyId, clientId)
+            .run();
+          return jsonResponse({ ok: true });
+        }
+        const t = now(env);
+        // 같은 토큰을 가진 다른 (가족, 기기) 행을 지우고, members에 있는 기기만 upsert한다. 한 배치로 확정한다.
+        const results = await env.DB.batch([
+          env.DB.prepare(
+            'DELETE FROM push_devices WHERE token = ?1 AND NOT (family_id = ?2 AND client_id = ?3)',
+          ).bind(registration.token, familyId, clientId),
+          env.DB.prepare(
+            `INSERT INTO push_devices
+               (family_id, client_id, token, types_json, quiet_start, quiet_end, tz_offset_min, updated_at)
+             SELECT ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8
+             WHERE EXISTS (SELECT 1 FROM members WHERE family_id = ?1 AND client_id = ?2)
+             ON CONFLICT(family_id, client_id) DO UPDATE SET
+               token = excluded.token,
+               types_json = excluded.types_json,
+               quiet_start = excluded.quiet_start,
+               quiet_end = excluded.quiet_end,
+               tz_offset_min = excluded.tz_offset_min,
+               updated_at = excluded.updated_at`,
+          ).bind(
+            familyId,
+            clientId,
+            registration.token,
+            JSON.stringify(registration.types),
+            registration.quietStart,
+            registration.quietEnd,
+            registration.tzOffsetMinutes,
+            t,
+          ),
+        ]);
+        if (changesOf(results[1]) === 0) {
+          const family = await env.DB.prepare('SELECT id FROM families WHERE id = ?1')
+            .bind(familyId)
+            .first<{ id: string }>();
+          if (!family) {
+            return familyMissingResponse(env, familyId);
+          }
+          return errorResponse('not_member', 403);
+        }
+        return jsonResponse({ ok: true });
+      }
+
+      // 6-2. POST /api/family/push-unregister (가족이 없어도 200)
+      if (request.method === 'POST' && path === '/api/family/push-unregister') {
+        await env.DB.prepare('DELETE FROM push_devices WHERE family_id = ?1 AND client_id = ?2')
+          .bind(familyId, clientId)
+          .run();
         return jsonResponse({ ok: true });
       }
 
