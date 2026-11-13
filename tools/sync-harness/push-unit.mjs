@@ -36,6 +36,7 @@ const TOKEN_C = 'ExponentPushToken[cccccccccccccccccccccc]';
 const TOKEN_D = 'ExponentPushToken[dddddddddddddddddddddd]';
 const KEY1 = 'push-family-key-0000000000000001';
 const KEY2 = 'push-family-key-0000000000000002';
+const KEY3 = 'push-family-key-0000000000000003'; // 서버에 없는 가족
 
 async function reset() {
   await server.adapter.reset();
@@ -189,6 +190,10 @@ await test('R6', '토큰 이동: 같은 토큰을 다른 가족이나 같은 가
   // 거부된 등록(회원 아님)은 아무 행도 만들지 않는다.
   assert.equal((await register(KEY1, 'dev-stranger', { token: TOKEN_D })).status, 403);
   assert.equal((await allPushDevices()).filter((r) => r.token === TOKEN_D).length, 0);
+  // 거부된 등록(403·404·410)은 다른 가족에 남은 같은 토큰의 행도 지우지 않는다.
+  assert.equal((await register(KEY1, 'dev-stranger', { token: TOKEN_B })).status, 403);
+  assert.equal((await register(KEY3, 'dev-z', { token: TOKEN_B })).status, 404);
+  assert.deepEqual((await pushDevices(KEY2)).map((r) => [r.client_id, r.token]), [['dev-y', TOKEN_B]]);
 });
 
 await test('R7', '해제: 내 행만 지우고, 행이 없어도 가족이 없어도 200이다', async () => {

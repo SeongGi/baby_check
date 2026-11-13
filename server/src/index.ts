@@ -397,10 +397,13 @@ export default {
           return jsonResponse({ ok: true });
         }
         const t = now(env);
-        // 같은 토큰을 가진 다른 (가족, 기기) 행을 지우고, members에 있는 기기만 upsert한다. 한 배치로 확정한다.
+        // members에 있는 기기일 때만 같은 토큰을 가진 다른 (가족, 기기) 행을 지우고 upsert한다. 한 배치로 확정하므로
+        // 거절되는 요청(403·404·410)은 D1 상태를 바꾸지 않는다.
         const results = await env.DB.batch([
           env.DB.prepare(
-            'DELETE FROM push_devices WHERE token = ?1 AND NOT (family_id = ?2 AND client_id = ?3)',
+            `DELETE FROM push_devices
+             WHERE token = ?1 AND NOT (family_id = ?2 AND client_id = ?3)
+               AND EXISTS (SELECT 1 FROM members WHERE family_id = ?2 AND client_id = ?3)`,
           ).bind(registration.token, familyId, clientId),
           env.DB.prepare(
             `INSERT INTO push_devices

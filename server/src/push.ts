@@ -269,7 +269,8 @@ function parseTypes(typesJson: string): ReadonlySet<string> {
 /**
  * 2.5의 발송. 받을 기기를 조회해 기기마다 메시지를 만들고, 100개씩 묶어 Expo 푸시 API로 보낸다.
  * 재시도하지 않고 5초 안에 끝내며, DeviceNotRegistered 토큰의 행만 지운다.
- * 첫 줄의 await는 호출한 쪽이 waitUntil에 넘길 틈을 주고, D1 문장이 응답 경로와 같은 흐름에서 나가지 않게 한다.
+ * 첫 줄의 await는 호출한 쪽이 waitUntil을 먼저 부르게 해서, 하네스가 이 함수의 D1 문장을 백그라운드 쿼리로 세게 한다.
+ * 이 줄을 지우면 P14가 실패한다. 운영 동작에는 차이가 없다.
  */
 export async function sendPartnerPush(
   env: Env,

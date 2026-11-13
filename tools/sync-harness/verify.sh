@@ -67,7 +67,7 @@ run_scenario() {
 }
 
 # 상대 기기 기록 알림의 서버 단위 시험. real-server와 fake-expo.mjs(127.0.0.1)만 쓰므로 외부 네트워크는 호출하지 않습니다.
-# 지연(6초)과 연결 거부 시나리오가 있어 1분 안팎 걸립니다.
+# 지연(6초)과 연결 거부 시나리오가 있어 15초 안팎 걸립니다. 동기화 보호(S1~S3)를 확인하므로 offline과 all에도 넣습니다.
 run_push() {
   node --disable-warning=ExperimentalWarning --import "$LOADER_IMPORT" "$DIR/push-unit.mjs"
 }
@@ -98,9 +98,9 @@ case "${1:-all}" in
   scenario)   run_scenario "${2:?시나리오 파일 이름이 필요합니다}" ;;
   reminder)   run_reminder ;;
   rules)      run_rules ;;
-  offline)    run_unit && run_diary && run_regression && run_real && run_reminder ;;
+  offline)    run_unit && run_diary && run_regression && run_real && run_reminder && run_push ;;
   compat)     node "$DIR/compat.mjs" ;;
   full)       node "$DIR/run.mjs" ;;
-  all)        run_unit && run_diary && run_regression && run_real && run_reminder && node "$DIR/compat.mjs" && node "$DIR/run.mjs" ;;
+  all)        run_unit && run_diary && run_regression && run_real && run_reminder && run_push && node "$DIR/compat.mjs" && node "$DIR/run.mjs" ;;
   *)          echo "usage: $0 [unit|diary|regression|real|push|scenario <파일>|reminder|rules|offline|compat|full|all]" >&2; exit 2 ;;
 esac
