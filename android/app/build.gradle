@@ -1,3 +1,14 @@
+buildscript {
+    // FCM 푸시에 필요한 google-services 플러그인입니다. 루트 build.gradle은 git에 없으므로 여기에 둡니다.
+    repositories {
+        google()
+        mavenCentral()
+    }
+    dependencies {
+        classpath('com.google.gms:google-services:4.4.2')
+    }
+}
+
 apply plugin: "com.android.application"
 apply plugin: "org.jetbrains.kotlin.android"
 apply plugin: "com.facebook.react"
@@ -92,8 +103,8 @@ android {
         applicationId 'com.seonggi.babycheck'
         minSdkVersion rootProject.ext.minSdkVersion
         targetSdkVersion rootProject.ext.targetSdkVersion
-        versionCode 30
-        versionName "1.8.2"
+        versionCode 31
+        versionName "1.8.3"
 
         buildConfigField "String", "REACT_NATIVE_RELEASE_LEVEL", "\"${findProperty('reactNativeReleaseLevel') ?: 'stable'}\""
     }
@@ -189,3 +200,6 @@ dependencies {
         implementation jscFlavor
     }
 }
+
+// android/app/google-services.json이 있어야 합니다. 빌드 전에 저장소 루트의 파일을 복사합니다.
+apply plugin: "com.google.gms.google-services"

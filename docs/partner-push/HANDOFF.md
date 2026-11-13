@@ -51,6 +51,11 @@
 - 많은 프로세스를 띄우는 명령은 `(ulimit -u $(( $(ps -u $(id -u) -o pid= | wc -l) + 150 )); <명령>)`으로 감싼다.
 - 4b 시나리오 [32]는 부하가 많으면 30초 대기로 한 번 실패할 수 있다. 그 파일만 다시 돌려 확인한다.
 
+### 진행 기록 (2026-11-14 00시, 세션 4a7d7a43)
+1. Firebase: Android 앱 `1:446080458953:android:703026ffba89a9a4606d18`을 API로 등록하고 `google-services.json`을 저장소 루트에 받았다. `firebase-adminsdk-fbsvc` 계정에 새 키를 만들어 Expo GraphQL API로 올리고(키 id `ed10d9ba-…`) Android 자격 증명 `165591e4-…`의 FCM V1 키로 연결했다. 로컬 키 사본은 지웠다. Expo `pushSecurityEnabled`는 false라 서버에 접근 토큰이 필요 없다.
+2. 서버: 운영 D1에 `push_devices` 표와 색인만 만들었다. 전후 행 수는 families 7, members 8, logs 2775, deleted_families 0으로 같다. Worker 버전 `7b2569a4`를 배포했다(이전 버전 `360f2ef1`). 인증 없는 `/push-register`, `/sync`는 401이다.
+3. 빌드: `android/app/build.gradle`에 google-services 플러그인을 넣었다(루트 build.gradle이 git에 없어 classpath도 앱 모듈에 둔다). 빌드 전에 `google-services.json`을 `android/app/`에 복사해야 한다. Play AAB `~/Desktop/babycheck-1.8.3-code31.aab`, 원스토어 APK `~/Desktop/babycheck-1.8.3-code31-onestore.apk`를 만들었고, 서명 SHA-256은 1.8.2와 같은 `6A:92:…:09:ED:73`이다.
+
 ### 남겨 둘 것
 - tmux `PDS`의 이전 세션(76194178)은 성기님이 두라고 했다. 끄지 않는다.
 - 텔레그램 연동은 같은 날 고쳤다(`~/.ccgram-focus/hide-bridge.mjs`, patch v11, `live-sessions.js`). 건드리지 않는다.
