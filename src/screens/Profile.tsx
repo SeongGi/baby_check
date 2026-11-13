@@ -24,9 +24,9 @@ import { getLogs, getProfile, getLocalBackup, restoreFromLocalBackup, getPreMigr
 import { createFamilyInviteLink, createFamilySyncId, parseFamilyInviteLink, FamilyDeletionStatus } from '../database/sync';
 import { shouldCheckDeletionStatus } from '../database/migrationDecision';
 import type { MigrationGate } from '../database/migrationDecision';
-import { ensureFeedingReminderPermission } from '../utils/feedingReminder';
 import {
   PARTNER_PUSH_DEFAULT_QUIET,
+  PartnerPushPermissionResult,
   PartnerPushSettings,
   PartnerPushType,
   PARTNER_PUSH_TYPES,
@@ -35,7 +35,7 @@ import {
   savePartnerPushSettings,
   stepQuietTime,
 } from '../utils/partnerPush';
-import { getPartnerPushDeps } from '../utils/partnerPushDeps';
+import { ensurePartnerPushPermission, getPartnerPushDeps } from '../utils/partnerPushDeps';
 
 const PRIVACY_POLICY_URL = 'https://seonggi.github.io/baby_check/privacy-policy.html';
 
@@ -132,8 +132,17 @@ const PartnerPushCard: React.FC<{
   };
 
   // App이 토큰 오류를 알리면 안내를 보이고 스위치를 끕니다.
+  // tokenError가 false에서 true로 바뀔 때만 반응합니다. 사용자가 다시 켰는데 App이 아직 오류를 지우지 못한 동안에는 끄지 않습니다.
+  // 바뀐 순간에 설정이 아직 로딩 중이면 설정이 올 때까지 기억해 둡니다.
+  const prevTokenErrorRef = useRef(false);
+  const tokenErrorPendingRef = useRef(false);
   useEffect(() => {
-    if (!tokenError || !settings || !settings.enabled) return;
+    if (tokenError && !prevTokenErrorRef.current) tokenErrorPendingRef.current = true;
+    if (!tokenError) tokenErrorPendingRef.current = false;
+    prevTokenErrorRef.current = tokenError;
+    if (!tokenErrorPendingRef.current || !settings) return;
+    tokenErrorPendingRef.current = false;
+    if (!settings.enabled) return;
     setNotice(PARTNER_PUSH_TOKEN_ERROR_NOTICE);
     persist({ ...settings, enabled: false });
   }, [tokenError, settings]);
@@ -147,16 +156,17 @@ const PartnerPushCard: React.FC<{
       return;
     }
     setRequestingPermission(true);
-    let granted = false;
+    let result: PartnerPushPermissionResult = 'denied';
     try {
-      granted = await ensureFeedingReminderPermission();
+      result = await ensurePartnerPushPermission();
     } catch (error) {
       console.warn('Partner push permission request failed', error);
     } finally {
       if (mountedRef.current) setRequestingPermission(false);
     }
     if (!mountedRef.current) return;
-    if (!granted) {
+    if (result === 'later') return;
+    if (result !== 'granted') {
       setNotice(PARTNER_PUSH_DENIED_NOTICE);
       return;
     }
@@ -225,7 +235,7 @@ const PartnerPushCard: React.FC<{
         <View style={styles.reminderText}>
           <Text style={styles.backupTitle}>👪 가족 기록 알림</Text>
           <Text style={[styles.backupDesc, enabled && styles.partnerNoMargin]}>
-            가족이 기록을 남기면 이 휴대폰에 알림이 와요.
+            가족이 기록을 남기면 이 휴대폰에 알림이 와요. 바뀐 설정은 바로 적용돼요.
           </Text>
         </View>
         <Switch

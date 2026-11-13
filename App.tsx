@@ -32,7 +32,7 @@ import { createFamilyMigrator, MIGRATION_MESSAGES } from './src/database/familyM
 import type { FamilyMigrator, LegacyDeletionChoice, LegacyDeletionPrompt, MigratorNotice } from './src/database/familyMigration';
 import { shouldAlertOnRefresh, shouldStartPolling } from './src/database/migrationDecision';
 import { ensureFeedingReminderPermission, refreshFeedingReminder } from './src/utils/feedingReminder';
-import { loadPartnerPushSettings, reconcilePartnerPush } from './src/utils/partnerPush';
+import { createDeviceTokenChangeGate, loadPartnerPushSettings, reconcilePartnerPush } from './src/utils/partnerPush';
 import { getPartnerPushDeps } from './src/utils/partnerPushDeps';
 import { canDispatchAutoVoiceLaunch, getAutoVoiceLaunchAction } from './src/utils/autoVoiceLaunch';
 import { Dashboard } from './src/screens/Dashboard';
@@ -591,10 +591,12 @@ function MainApp() {
     // foregroundRevision은 앱이 다시 앞으로 올 때마다 올라가므로 "앱이 활성이 됨"을 뜻합니다.
   }, [profile?.syncKey, partnerPushClientId, partnerPushSettingsVersion, foregroundRevision]);
 
-  // 푸시 토큰이 바뀌면 다시 맞춥니다. 리스너가 주는 값은 기기 토큰이라 쓰지 않고, 모듈이 Expo 토큰을 다시 얻습니다.
+  // 푸시 토큰이 바뀌면 다시 맞춥니다. 리스너가 주는 값은 기기 토큰이라 서버에는 쓰지 않고, 모듈이 Expo 토큰을 다시 얻습니다.
+  // iOS는 Expo 토큰을 얻을 때마다 같은 기기 토큰을 다시 알리므로, 값이 실제로 달라졌을 때만 다시 맞춥니다.
   useEffect(() => {
-    const subscription = Notifications.addPushTokenListener(() => {
-      setPartnerPushSettingsVersion(version => version + 1);
+    const tokenChanged = createDeviceTokenChangeGate();
+    const subscription = Notifications.addPushTokenListener(token => {
+      if (tokenChanged(token?.data)) setPartnerPushSettingsVersion(version => version + 1);
     });
     return () => subscription.remove();
   }, []);

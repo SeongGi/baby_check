@@ -13,6 +13,9 @@ import {
   loadPartnerPushSettings,
   reconcilePartnerPush,
   savePartnerPushSettings,
+  createDeviceTokenChangeGate,
+  ensurePartnerPushPermission,
+  shouldPlayPartnerSound,
 } from '../src/utils/partnerPush.ts';
 
 const sha = text => createHash('sha256').update(text).digest('hex');
@@ -586,6 +589,107 @@ test('방해 금지 시각을 옮겨 시작과 끝이 같아지면 한 칸 더 �
   assert.deepEqual(stepQuietTime({ start: 450, end: 420 }, 'start', -1), { start: 390, end: 420 });
   assert.deepEqual(stepQuietTime({ start: 420, end: 450 }, 'end', -1), { start: 420, end: 390 });
   assert.deepEqual(stepQuietTime({ start: 420, end: 390 }, 'end', 1), { start: 420, end: 450 });
+});
+
+test('기기 토큰 변경 감지기는 첫 값을 기준으로만 삼고 값이 달라질 때만 true를 돌려준다', () => {
+  const gate = createDeviceTokenChangeGate();
+  assert.equal(gate('dev-1'), false);
+  assert.equal(gate('dev-1'), false);
+  assert.equal(gate('dev-1'), false);
+  assert.equal(gate('dev-2'), true);
+  assert.equal(gate('dev-2'), false);
+  assert.equal(gate('dev-1'), true);
+  assert.equal(gate(undefined), false);
+  assert.equal(gate(''), false);
+  assert.equal(gate('dev-1'), false);
+});
+
+const makePermissionDeps = ({ platformOS = 'android', current, requested = { status: 'granted' }, choice = 'continue' } = {}) => {
+  const calls = [];
+  return {
+    calls,
+    deps: {
+      platformOS,
+      setNotificationChannelAsync: async (id, spec) => void calls.push(`channel:${id}:${spec.sound}`),
+      getPermissionsAsync: async () => (calls.push('get'), current),
+      requestPermissionsAsync: async () => (calls.push('request'), requested),
+      confirmPrompt: async () => (calls.push('prompt'), choice),
+    },
+  };
+};
+
+test('가족 알림 권한: Android는 채널 두 개를 먼저 만든 뒤 안내하고 허용 창을 연다', async () => {
+  const { calls, deps } = makePermissionDeps({ current: { status: 'undetermined', canAskAgain: true } });
+  assert.equal(await ensurePartnerPushPermission(deps), 'granted');
+  assert.deepEqual(calls, [
+    'channel:partner-records:true',
+    'channel:partner-records-quiet:false',
+    'get',
+    'prompt',
+    'request',
+  ]);
+});
+
+test('가족 알림 권한: iOS는 채널을 만들지 않는다', async () => {
+  const { calls, deps } = makePermissionDeps({ platformOS: 'ios', current: { status: 'undetermined' } });
+  assert.equal(await ensurePartnerPushPermission(deps), 'granted');
+  assert.deepEqual(calls, ['get', 'prompt', 'request']);
+});
+
+test('가족 알림 권한: 이미 허용돼 있으면 안내 없이 granted', async () => {
+  const { calls, deps } = makePermissionDeps({ platformOS: 'ios', current: { status: 'granted' } });
+  assert.equal(await ensurePartnerPushPermission(deps), 'granted');
+  assert.deepEqual(calls, ['get']);
+});
+
+test('가족 알림 권한: 다시 물을 수 없으면 안내 없이 denied', async () => {
+  const { calls, deps } = makePermissionDeps({ platformOS: 'ios', current: { status: 'denied', canAskAgain: false } });
+  assert.equal(await ensurePartnerPushPermission(deps), 'denied');
+  assert.deepEqual(calls, ['get']);
+});
+
+test('가족 알림 권한: 안내창에서 취소하거나 닫으면 later이며 허용 창을 열지 않는다', async () => {
+  for (const choice of ['cancel', 'dismissed']) {
+    const { calls, deps } = makePermissionDeps({ platformOS: 'ios', current: { status: 'undetermined' }, choice });
+    assert.equal(await ensurePartnerPushPermission(deps), 'later');
+    assert.deepEqual(calls, ['get', 'prompt']);
+  }
+});
+
+test('가족 알림 권한: 허용 창에서 거부하면 denied', async () => {
+  const { deps } = makePermissionDeps({ platformOS: 'ios', current: { status: 'undetermined' }, requested: { status: 'denied' } });
+  assert.equal(await ensurePartnerPushPermission(deps), 'denied');
+});
+
+test('가족 알림 권한: 채널 생성이 실패해도 권한 흐름은 계속된다', async () => {
+  const { calls, deps } = makePermissionDeps({ current: { status: 'granted' } });
+  deps.setNotificationChannelAsync = async () => { throw new Error('boom'); };
+  assert.equal(await ensurePartnerPushPermission(deps), 'granted');
+  assert.deepEqual(calls, ['get']);
+});
+
+test('가족 알림 권한: 안내창이 떠 있는 동안 들어온 두 번째 호출은 later이고 이후 호출은 다시 된다', async () => {
+  let release;
+  const first = makePermissionDeps({ platformOS: 'ios', current: { status: 'undetermined' } });
+  first.deps.confirmPrompt = () => new Promise(resolve => { release = resolve; });
+  const pending = ensurePartnerPushPermission(first.deps);
+  await tick();
+  const second = makePermissionDeps({ platformOS: 'ios', current: { status: 'undetermined' } });
+  assert.equal(await ensurePartnerPushPermission(second.deps), 'later');
+  assert.deepEqual(second.calls, ['get']);
+  release('continue');
+  assert.equal(await pending, 'granted');
+  const third = makePermissionDeps({ platformOS: 'ios', current: { status: 'undetermined' } });
+  assert.equal(await ensurePartnerPushPermission(third.deps), 'granted');
+});
+
+test('가족 알림 소리: 조용한 채널이거나 내용의 소리가 비어 있으면 내지 않는다', () => {
+  assert.equal(shouldPlayPartnerSound({ channelId: 'partner-records', sound: 'default' }), true);
+  assert.equal(shouldPlayPartnerSound({ channelId: undefined, sound: 'default' }), true);
+  assert.equal(shouldPlayPartnerSound({ channelId: 'partner-records-quiet', sound: 'default' }), false);
+  assert.equal(shouldPlayPartnerSound({ channelId: 'partner-records', sound: null }), false);
+  assert.equal(shouldPlayPartnerSound({ channelId: undefined, sound: null }), false);
+  assert.equal(shouldPlayPartnerSound({}), true);
 });
 
 // getPartnerPushDeps 싱글톤 시험은 partnerPushDeps.ts가 react-native와 expo 모듈을 가져와서 순수 node에서 불러올 수 없어 두지 않았습니다.

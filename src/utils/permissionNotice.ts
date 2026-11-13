@@ -39,6 +39,12 @@ export const NOTIFICATION_PROMPT: PermissionPrompt = {
     '다음 수유 시간이 되면 알려 드리려고 알림을 사용합니다. 알림은 선택 권한이라서 허용하지 않아도 다른 기능은 그대로 쓸 수 있습니다.',
 };
 
+export const PARTNER_PUSH_PROMPT: PermissionPrompt = {
+  title: '알림 사용 안내',
+  message:
+    '가족이 기록을 남기면 알려 드리려고 알림을 사용합니다. 알림은 선택 권한이라서 허용하지 않아도 다른 기능은 그대로 쓸 수 있습니다.',
+};
+
 export const PERMISSION_NOTICE_TEXT = {
   title: '앱 접근권한 안내',
   noRequired: '필수 접근권한은 없습니다. 아래 권한은 모두 선택이며, 해당 기능을 쓸 때 앱이 먼저 이유를 알려 드리고 동의를 여쭙니다.',

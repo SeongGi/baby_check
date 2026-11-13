@@ -104,6 +104,95 @@ export type PartnerPushSettingsDeps = Pick<PartnerPushDeps, 'storage' | 'getPerm
 export const PARTNER_PUSH_CHANNEL_ID = 'partner-records';
 export const PARTNER_PUSH_QUIET_CHANNEL_ID = 'partner-records-quiet';
 
+/**
+ * Android에서 가족 기록 알림 채널 두 개를 만듭니다. 다른 플랫폼에서는 아무것도 하지 않습니다.
+ * 채널이 한 번 만들어진 뒤에는 중요도와 소리를 바꿀 수 없으므로, 이 사양을 바꾸려면 새 채널 번호를 써야 합니다.
+ * 채널을 못 만들어도 던지지 않습니다. 알림은 기본 채널로 도착할 수 있습니다.
+ */
+export const ensurePartnerPushChannels = async (
+  deps: Pick<PartnerPushDeps, 'platformOS' | 'setNotificationChannelAsync'>
+): Promise<void> => {
+  if (deps.platformOS !== 'android') return;
+  try {
+    await deps.setNotificationChannelAsync(PARTNER_PUSH_CHANNEL_ID, {
+      name: '가족 기록 알림',
+      importance: 'high',
+      sound: true,
+      vibrate: true,
+    });
+    await deps.setNotificationChannelAsync(PARTNER_PUSH_QUIET_CHANNEL_ID, {
+      name: '가족 기록 알림(조용히)',
+      importance: 'low',
+      sound: false,
+      vibrate: false,
+    });
+  } catch {
+    // 채널을 못 만들어도 호출한 쪽은 계속 진행합니다.
+  }
+};
+
+export type PartnerPushPermissionResult = 'granted' | 'denied' | 'later';
+
+export type PartnerPushPermissionDeps = Pick<PartnerPushDeps, 'platformOS' | 'setNotificationChannelAsync'> & {
+  getPermissionsAsync(): Promise<{ status: string; canAskAgain?: boolean }>;
+  requestPermissionsAsync(): Promise<{ status: string }>;
+  /** 운영체제 허용 창 앞에 보이는 사전 안내창입니다. 'continue'만 계속으로 보고 나머지는 모두 "나중에"로 봅니다. */
+  confirmPrompt(): Promise<string>;
+};
+
+let partnerPermissionPromptPending = false;
+
+/**
+ * 가족 기록 알림을 켤 때 알림 권한을 확인합니다(설계 3.5).
+ * Android는 채널 두 개를 먼저 만들어야 허용 창이 뜨므로 권한 조회보다 앞서 만듭니다.
+ * 이미 허용돼 있으면 안내 없이 granted, 다시 물을 수 없으면 안내 없이 denied입니다.
+ * 안내창에서 "나중에"를 고르면 허용 창을 열지 않고 later를 돌려줍니다. 안내창이 이미 떠 있을 때 들어온 호출도 later입니다.
+ */
+export const ensurePartnerPushPermission = async (deps: PartnerPushPermissionDeps): Promise<PartnerPushPermissionResult> => {
+  await ensurePartnerPushChannels(deps);
+  const current = await deps.getPermissionsAsync();
+  if (current.status === 'granted') return 'granted';
+  if (current.canAskAgain === false) return 'denied';
+  if (partnerPermissionPromptPending) return 'later';
+  partnerPermissionPromptPending = true;
+  let choice: string;
+  try {
+    choice = await deps.confirmPrompt();
+  } finally {
+    partnerPermissionPromptPending = false;
+  }
+  if (choice !== 'continue') return 'later';
+  const requested = await deps.requestPermissionsAsync();
+  return requested.status === 'granted' ? 'granted' : 'denied';
+};
+
+/**
+ * 기기 푸시 토큰 리스너용 변경 감지기입니다. 첫 값은 기준으로만 삼고 false를 돌려주며,
+ * 이후에는 값이 실제로 달라졌을 때만 true를 돌려줍니다.
+ * iOS는 Expo 토큰을 얻을 때마다 같은 기기 토큰을 다시 알리므로, 값을 비교하지 않으면 맞추기가 끝없이 되풀이됩니다.
+ */
+export const createDeviceTokenChangeGate = (): ((token: unknown) => boolean) => {
+  let last: string | null = null;
+  return token => {
+    const value = typeof token === 'string' && token ? token : null;
+    if (value === null) return false;
+    if (last === null) {
+      last = value;
+      return false;
+    }
+    if (last === value) return false;
+    last = value;
+    return true;
+  };
+};
+
+/**
+ * 앞에 떠 있을 때 가족 기록 알림에서 소리를 낼지 정합니다. 방해 금지 시간대에 서버는 소리 없는 알림과
+ * 조용한 채널을 쓰므로, 채널이 조용한 채널이거나 알림 내용의 소리가 비어 있으면 소리를 내지 않습니다.
+ */
+export const shouldPlayPartnerSound = (info: { channelId?: unknown; sound?: unknown }): boolean =>
+  info.channelId !== PARTNER_PUSH_QUIET_CHANNEL_ID && info.sound !== null;
+
 // 해제 요청은 화면 흐름을 막지 않도록 이 시간까지만 기다립니다.
 const UNREGISTER_TIMEOUT_MS = 2000;
 // 권한 조회와 토큰 조회가 끝나지 않아도 reconcile이 멈춰 있지 않도록 기다리는 최대 시간입니다.
@@ -447,25 +536,7 @@ const reconcileOnce = async (args: ReconcileArgs, deps: PartnerPushDeps): Promis
   if (state.rejectedKey === inputKey) return 'rejected';
 
   // 4. Android는 토큰을 얻기 전에 채널 두 개를 만듭니다. 이미 있으면 그대로 두는 호출이라 매번 불러도 됩니다.
-  // 채널이 한 번 만들어진 뒤에는 중요도와 소리를 바꿀 수 없으므로, 이 사양을 바꾸려면 새 채널 번호를 써야 합니다.
-  if (deps.platformOS === 'android') {
-    try {
-      await deps.setNotificationChannelAsync(PARTNER_PUSH_CHANNEL_ID, {
-        name: '가족 기록 알림',
-        importance: 'high',
-        sound: true,
-        vibrate: true,
-      });
-      await deps.setNotificationChannelAsync(PARTNER_PUSH_QUIET_CHANNEL_ID, {
-        name: '가족 기록 알림(조용히)',
-        importance: 'low',
-        sound: false,
-        vibrate: false,
-      });
-    } catch {
-      // 채널을 못 만들어도 토큰 조회는 시도합니다. 알림은 기본 채널로 도착할 수 있습니다.
-    }
-  }
+  await ensurePartnerPushChannels(deps);
 
   let token: string;
   try {

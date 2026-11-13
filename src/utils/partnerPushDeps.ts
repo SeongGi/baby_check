@@ -6,7 +6,10 @@ import * as Notifications from 'expo-notifications';
 import { Platform } from 'react-native';
 import appConfig from '../../app.json';
 import { registerPushDevice, unregisterPushDevice } from '../database/cloudClient';
-import type { PartnerPushDeps } from './partnerPush';
+import { ensurePartnerPushPermission as runPartnerPushPermissionFlow } from './partnerPush';
+import type { PartnerPushDeps, PartnerPushPermissionResult } from './partnerPush';
+import { PARTNER_PUSH_PROMPT } from './permissionNotice';
+import { confirmPermissionPrompt } from './permissionPrompt';
 
 // EAS 프로젝트 번호는 app.json의 extra.eas.projectId에서 읽습니다.
 const EAS_PROJECT_ID: string = (appConfig as any).expo?.extra?.eas?.projectId ?? '';
@@ -43,4 +46,17 @@ let singleton: PartnerPushDeps | null = null;
 export const getPartnerPushDeps = (): PartnerPushDeps => {
   if (!singleton) singleton = createPartnerPushDeps();
   return singleton;
+};
+
+// 가족 기록 알림을 켤 때 부릅니다. 가족 기록용 안내창을 먼저 보이고 운영체제 허용 창을 엽니다.
+// granted는 허용, denied는 거부(휴대폰 설정 안내 대상), later는 안내창에서 "나중에"를 고른 경우입니다.
+export const ensurePartnerPushPermission = (): Promise<PartnerPushPermissionResult> => {
+  const deps = getPartnerPushDeps();
+  return runPartnerPushPermissionFlow({
+    platformOS: deps.platformOS,
+    setNotificationChannelAsync: deps.setNotificationChannelAsync,
+    getPermissionsAsync: () => Notifications.getPermissionsAsync(),
+    requestPermissionsAsync: () => Notifications.requestPermissionsAsync(),
+    confirmPrompt: () => confirmPermissionPrompt(PARTNER_PUSH_PROMPT),
+  });
 };
