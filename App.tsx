@@ -17,6 +17,8 @@ import * as Notifications from 'expo-notifications';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { SafeAreaProvider, useSafeAreaInsets } from 'react-native-safe-area-context';
 import { COLORS } from './src/theme/colors';
+import { PermissionNoticeModal } from './src/components/PermissionNoticeModal';
+import { PERMISSION_NOTICE_KEY, shouldShowPermissionNotice } from './src/utils/permissionNotice';
 import { BabyLogEntry, BabyProfile } from './src/types';
 import { getLogs, getProfile, addLog, deleteLog, updateLog, saveProfile, migrateStoredData, importDataWithoutLoss, backupLocalData, readProfileAfterPendingWrites, saveDiaryLine, deleteDiaryGroup } from './src/database/storage';
 import * as storage from './src/database/storage';
@@ -29,7 +31,7 @@ import { decideAfterTokenError } from './src/database/syncDecision';
 import { createFamilyMigrator, MIGRATION_MESSAGES } from './src/database/familyMigration';
 import type { FamilyMigrator, LegacyDeletionChoice, LegacyDeletionPrompt, MigratorNotice } from './src/database/familyMigration';
 import { shouldAlertOnRefresh, shouldStartPolling } from './src/database/migrationDecision';
-import { refreshFeedingReminder } from './src/utils/feedingReminder';
+import { ensureFeedingReminderPermission, refreshFeedingReminder } from './src/utils/feedingReminder';
 import { canDispatchAutoVoiceLaunch, getAutoVoiceLaunchAction } from './src/utils/autoVoiceLaunch';
 import { Dashboard } from './src/screens/Dashboard';
 import { LogFormula } from './src/screens/LogFormula';
@@ -136,7 +138,31 @@ function MainApp() {
     return () => subscription.remove();
   }, []);
 
+  // 첫 실행 접근권한 안내입니다. 저장값을 읽기 전에는 음성 자동 시작을 막습니다.
+  const [permissionNoticeVisible, setPermissionNoticeVisible] = useState(false);
+  const [permissionNoticeReady, setPermissionNoticeReady] = useState(false);
+
   useEffect(() => {
+    let mounted = true;
+    // 읽기에 실패하면 저장값이 없는 것으로 보고 안내를 보여 줍니다.
+    AsyncStorage.getItem(PERMISSION_NOTICE_KEY)
+      .catch(() => null)
+      .then(stored => {
+        if (!mounted) return;
+        setPermissionNoticeVisible(shouldShowPermissionNotice(stored));
+        setPermissionNoticeReady(true);
+      });
+    return () => { mounted = false; };
+  }, []);
+
+  const handlePermissionNoticeConfirm = () => {
+    // 먼저 화면에서 닫습니다. 저장에 실패하면 다음 실행 때 다시 보이는 것으로 충분합니다.
+    setPermissionNoticeVisible(false);
+    AsyncStorage.setItem(PERMISSION_NOTICE_KEY, '1').catch(() => undefined);
+  };
+
+  useEffect(() => {
+    if (!permissionNoticeReady || permissionNoticeVisible) return;
     if (!autoVoiceReady || isLoading || !profile) return;
     const action = getAutoVoiceLaunchAction(
       voiceLaunchCandidate,
@@ -161,7 +187,7 @@ function MainApp() {
       setVoiceStartRequest(voiceLaunchCandidate);
     }, 800);
     return () => clearTimeout(timer);
-  }, [autoVoiceReady, isLoading, profile, voiceLaunchCandidate, activeScreen, autoVoiceEnabled, foregroundRevision]);
+  }, [permissionNoticeReady, permissionNoticeVisible, autoVoiceReady, isLoading, profile, voiceLaunchCandidate, activeScreen, autoVoiceEnabled, foregroundRevision]);
 
   useEffect(() => {
     if (activeScreen !== 'dashboard') setVoiceStartRequest(0);
@@ -843,7 +869,7 @@ function MainApp() {
     if (success) {
       const savedProfile = await getProfile();
       setProfile(savedProfile);
-      void refreshFeedingReminder(logs, savedProfile, profilePatch.feedingReminderEnabled === true);
+      // 알림 권한 안내창 응답을 기다리는 동안에도 바뀐 프로필이 상대 기기에 바로 전달되도록 동기화를 먼저 시작합니다.
       if (syncInBackground && savedProfile.syncKey) {
         void syncLatestData(savedProfile.syncKey, false).then(result => {
           if (result.merged) {
@@ -852,6 +878,29 @@ function MainApp() {
             void refreshFeedingReminder(result.logs, result.profile);
           }
         }).catch(error => console.warn('Background profile sync failed', error));
+      }
+      if (profilePatch.feedingReminderEnabled === true) {
+        // 저장 완료 Alert가 알림 안내창을 밀어내지 않도록 권한 확인을 먼저 기다립니다.
+        // 응답을 기다리는 사이 새 기록이 들어올 수 있으므로, 권한 확인 뒤에는 저장소의 최신 기록과 프로필로 알림을 갱신합니다.
+        // 안내창이 응답 없이 사라져도 저장이 끝나지 않는 일이 없도록 최대 60초만 기다립니다. 허용 여부와 상관없이 저장 성공은 그대로 돌려줍니다.
+        const reminderUpdate = ensureFeedingReminderPermission()
+          .catch(error => {
+            console.warn('Notification permission check failed', error);
+            return false;
+          })
+          .then(async () => refreshFeedingReminder(await getLogs(), await getProfile()))
+          .catch(error => {
+            console.warn('Feeding reminder refresh failed', error);
+            return false;
+          });
+        let waitTimer: ReturnType<typeof setTimeout> | null = null;
+        await Promise.race([
+          reminderUpdate,
+          new Promise(resolve => { waitTimer = setTimeout(resolve, 60_000); }),
+        ]);
+        if (waitTimer) clearTimeout(waitTimer);
+      } else {
+        void refreshFeedingReminder(logs, savedProfile);
       }
     }
     return success;
@@ -1083,6 +1132,7 @@ function MainApp() {
           </TouchableOpacity>
         </View>
       )}
+      <PermissionNoticeModal visible={permissionNoticeVisible} onConfirm={handlePermissionNoticeConfirm} />
     </View>
   );
 }
