@@ -1,4 +1,11 @@
-import { parsePushRegistration } from './push';
+import {
+  babyNameFromShared,
+  confirmNewPushLogs,
+  parsePushRegistration,
+  pickPushCandidates,
+  sendPartnerPush,
+  type NewPushLog,
+} from './push';
 
 export interface Env {
   DB: D1Database;
@@ -6,6 +13,10 @@ export interface Env {
   clock?: () => number;
   MAX_PUSH_ITEMS?: string;
   MAX_PAGE_ROWS?: string;
+  /** 시험 전용. 상대 기기 알림을 보낼 때 쓰는 fetch. 없으면 전역 fetch를 쓴다. */
+  pushFetch?: (url: string, init: RequestInit) => Promise<Response>;
+  /** Expo 푸시 API 주소. 없으면 https://exp.host/--/api/v2/push/send. 시험은 127.0.0.1의 가짜 서버로 바꾼다. */
+  EXPO_PUSH_URL?: string;
 }
 
 interface FamilyRow {
@@ -133,6 +144,8 @@ interface PushLog {
 
 interface WriteItem {
   isProfile: boolean;
+  /** 새 기록 후보의 id. 이 항목이 든 쓰기 배치의 첫 문장이 이 id의 존재를 확인한다. */
+  candidateId?: string;
   build: (t: number) => D1PreparedStatement;
 }
 
@@ -147,7 +160,7 @@ interface ServerRow {
 const utf8Bytes = (text: string): number => textEncoder.encode(text).length;
 
 export default {
-  async fetch(request: Request, env: Env): Promise<Response> {
+  async fetch(request: Request, env: Env, ctx?: ExecutionContext): Promise<Response> {
     if (request.method === 'OPTIONS') {
       return new Response(null, { status: 204, headers: CORS_HEADERS });
     }
@@ -463,6 +476,15 @@ export default {
           new Set(rawPushDeletedIds.filter((id): id is string => typeof id === 'string')),
         );
 
+        // 새 기록 후보(02 설계 2.4-1). 메모리 계산만 하고, 계산이 실패하면 후보 없음으로 본다.
+        let candidates: ReturnType<typeof pickPushCandidates> = [];
+        try {
+          candidates = pickPushCandidates(pushLogs, now(env));
+        } catch (err) {
+          console.warn('Push candidate selection failed', err);
+        }
+        const candidateIds = new Set(candidates.map(candidate => candidate.id));
+
         // 아기 정보: 공유 항목 4개가 모두 있고 형식이 맞을 때만 쓴다.
         const pushProfile = body.pushProfile;
         let profileJson: string | null = null;
@@ -511,6 +533,7 @@ export default {
         for (const log of pushLogs) {
           items.push({
             isProfile: false,
+            candidateId: candidateIds.has(log.id) ? log.id : undefined,
             build: t =>
               env.DB.prepare(
                 `INSERT INTO logs (family_id, log_id, client_updated_at, updated_at, deleted_at, raw_json)
@@ -543,11 +566,27 @@ export default {
         }
 
         // 쓰기 배치(100문장 이하): 배치마다 새 시각을 찍고, 행이 있으면 마지막 문장으로 조건부 토큰 갱신.
-        const chunkSize = D1_BATCH_CHUNK_SIZE - 1;
+        // 후보가 든 배치는 첫 문장으로 후보 id의 존재 확인 SELECT를 하나 더 넣으므로 항목은 98개까지 담는다.
+        const chunkSize = D1_BATCH_CHUNK_SIZE - 2;
+        // 쓰기 전에 이미 있던 후보 id(수정이거나 삭제 표식이 있는 기록). 새 기록 판정에서 뺀다.
+        const preExistingIds = new Set<string>();
+        // 앞선 배치에 담아 이미 쓴 후보 id. 같은 id가 뒤 배치에 또 있어도 앞 배치가 쓴 것을 "이미 있음"으로 세지 않는다.
+        const writtenCandidateIds = new Set<string>();
         for (let i = 0; i < items.length; i += chunkSize) {
           const chunk = items.slice(i, i + chunkSize);
           const t = now(env);
           const statements = chunk.map(item => item.build(t));
+          const chunkCandidateIds = Array.from(
+            new Set(chunk.flatMap(item => (item.candidateId !== undefined ? [item.candidateId] : []))),
+          );
+          if (chunkCandidateIds.length > 0) {
+            const placeholders = chunkCandidateIds.map((_, idx) => `?${idx + 2}`).join(',');
+            statements.unshift(
+              env.DB.prepare(
+                `SELECT log_id FROM logs WHERE family_id = ?1 AND log_id IN (${placeholders})`,
+              ).bind(familyId, ...chunkCandidateIds),
+            );
+          }
           if (chunk.some(item => !item.isProfile)) {
             statements.push(
               env.DB.prepare(
@@ -557,7 +596,17 @@ export default {
               ).bind(t, clientId, familyId),
             );
           }
-          await env.DB.batch(statements);
+          const batchResults = await env.DB.batch(statements);
+          if (chunkCandidateIds.length > 0) {
+            try {
+              for (const row of (batchResults[0].results ?? []) as Array<{ log_id: string }>) {
+                if (!writtenCandidateIds.has(row.log_id)) preExistingIds.add(row.log_id);
+              }
+            } catch (err) {
+              console.warn('Push existence result failed', err);
+            }
+            for (const id of chunkCandidateIds) writtenCandidateIds.add(id);
+          }
         }
 
         // 읽기 배치 하나: 아기 정보, 올리기 분류(id 99개씩 IN), 당겨 받기 페이지(요청했을 때만).
@@ -614,6 +663,16 @@ export default {
         for (let i = 0; i < classifyStatementCount; i += 1) {
           for (const row of (readResults[1 + i].results ?? []) as ServerRow[]) {
             serverRows.set(row.log_id, row);
+          }
+        }
+        // 새 기록 확정(2.4-4~6). 계산이 실패하면 새 기록 없음으로 처리하고 응답에는 영향을 주지 않는다.
+        let newLogs: NewPushLog[] = [];
+        if (candidates.length > 0) {
+          try {
+            newLogs = confirmNewPushLogs(candidates, preExistingIds, serverRows);
+          } catch (err) {
+            console.warn('Push confirmation failed', err);
+            newLogs = [];
           }
         }
         const acceptedIds: string[] = [];
@@ -700,6 +759,17 @@ export default {
         });
         // raw_json은 파싱하지 않고 저장된 canonical JSON 문자열을 그대로 이어 붙인다.
         const responseBody = `${head.slice(0, -1)},"remoteLogs":[${remoteRawParts.join(',')}]}`;
+        if (newLogs.length > 0) {
+          // 응답을 막지 않도록 응답 뒤에 보낸다. ctx가 없는 호출(시험 하네스, 옛 호출)에서는 약속만 만들고 기다리지 않는다.
+          const pushPromise = sendPartnerPush(
+            env,
+            familyId,
+            clientId,
+            newLogs,
+            babyNameFromShared(profileRow.shared_json),
+          ).catch(err => console.warn('Partner push failed', err));
+          ctx?.waitUntil?.(pushPromise);
+        }
         return new Response(responseBody, {
           status: 200,
           headers: {
