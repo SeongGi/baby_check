@@ -196,6 +196,32 @@ export const loadPartnerPushSettings = async (deps: PartnerPushSettingsDeps): Pr
   return initial;
 };
 
+export const PARTNER_PUSH_DEFAULT_QUIET = { start: 23 * 60, end: 7 * 60 };
+const MINUTES_PER_DAY = 24 * 60;
+const QUIET_STEP_MINUTES = 30;
+
+/** 분 단위 시각을 `HH:MM`으로 보여 줍니다. */
+export const formatMinuteOfDay = (minute: number): string => {
+  const hours = Math.floor(minute / 60);
+  const minutes = minute % 60;
+  return `${String(hours).padStart(2, '0')}:${String(minutes).padStart(2, '0')}`;
+};
+
+/**
+ * 방해 금지 시작이나 끝 시각을 30분 단위로 옮깁니다(0~1439 안에서 한 바퀴 돕니다).
+ * 옮긴 결과가 반대쪽 시각과 같아지면 같은 방향으로 한 칸 더 옮겨서 시작과 끝이 항상 다르게 합니다.
+ */
+export const stepQuietTime = (
+  quiet: { start: number; end: number },
+  which: 'start' | 'end',
+  direction: 1 | -1
+): { start: number; end: number } => {
+  const other = which === 'start' ? quiet.end : quiet.start;
+  let next = (quiet[which] + direction * QUIET_STEP_MINUTES + MINUTES_PER_DAY) % MINUTES_PER_DAY;
+  if (next === other) next = (next + direction * QUIET_STEP_MINUTES + MINUTES_PER_DAY) % MINUTES_PER_DAY;
+  return which === 'start' ? { start: next, end: quiet.end } : { start: quiet.start, end: next };
+};
+
 /** 서버에 보낸 내용을 가리키는 지문입니다. 가족 키 원문은 넣지 않고 해시만 넣습니다. */
 export const buildPartnerPushFingerprint = (parts: {
   syncKeyHash: string;

@@ -1113,6 +1113,8 @@ function MainApp() {
             onScheduleFamilyDeletion={scheduleFamilyDeletion}
             onCancelFamilyDeletion={cancelFamilyDeletion}
             onGetFamilyDeletionStatus={getFamilyDeletionStatus}
+            partnerPushTokenError={partnerPushTokenError}
+            onPartnerPushSettingsChanged={() => setPartnerPushSettingsVersion(version => version + 1)}
           />
         );
     }

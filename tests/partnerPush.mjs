@@ -7,6 +7,9 @@ import {
   PARTNER_PUSH_SETTINGS_KEY,
   PARTNER_PUSH_UNREGISTER_PENDING_KEY,
   PARTNER_PUSH_TYPES,
+  PARTNER_PUSH_DEFAULT_QUIET,
+  formatMinuteOfDay,
+  stepQuietTime,
   loadPartnerPushSettings,
   reconcilePartnerPush,
   savePartnerPushSettings,
@@ -564,6 +567,25 @@ test('400은 network_error로 다루고 기록을 그대로 둔다', async () =>
   // 거절로 굳지 않으므로 다음 호출이 다시 시도한다.
   h.state.registerError = null;
   assert.equal(await reconcilePartnerPush(args({ settings: settings({ types: ['formula'] }) }), h.deps), 'registered');
+});
+
+test('방해 금지 시각은 HH:MM으로 보이고 30분씩 한 바퀴 돈다', () => {
+  assert.deepEqual(PARTNER_PUSH_DEFAULT_QUIET, { start: 1380, end: 420 });
+  assert.equal(formatMinuteOfDay(1380), '23:00');
+  assert.equal(formatMinuteOfDay(420), '07:00');
+  assert.equal(formatMinuteOfDay(0), '00:00');
+  assert.equal(formatMinuteOfDay(1439), '23:59');
+  assert.deepEqual(stepQuietTime({ start: 1380, end: 420 }, 'start', 1), { start: 1410, end: 420 });
+  assert.deepEqual(stepQuietTime({ start: 1410, end: 420 }, 'start', 1), { start: 0, end: 420 });
+  assert.deepEqual(stepQuietTime({ start: 0, end: 420 }, 'start', -1), { start: 1410, end: 420 });
+  assert.deepEqual(stepQuietTime({ start: 1380, end: 420 }, 'end', -1), { start: 1380, end: 390 });
+});
+
+test('방해 금지 시각을 옮겨 시작과 끝이 같아지면 한 칸 더 옮긴다', () => {
+  assert.deepEqual(stepQuietTime({ start: 390, end: 420 }, 'start', 1), { start: 450, end: 420 });
+  assert.deepEqual(stepQuietTime({ start: 450, end: 420 }, 'start', -1), { start: 390, end: 420 });
+  assert.deepEqual(stepQuietTime({ start: 420, end: 450 }, 'end', -1), { start: 420, end: 390 });
+  assert.deepEqual(stepQuietTime({ start: 420, end: 390 }, 'end', 1), { start: 420, end: 450 });
 });
 
 // getPartnerPushDeps 싱글톤 시험은 partnerPushDeps.ts가 react-native와 expo 모듈을 가져와서 순수 node에서 불러올 수 없어 두지 않았습니다.
