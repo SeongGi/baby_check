@@ -25,6 +25,37 @@
 - `075739c`(커밋 5·6 리뷰 반영), `6dfda28`(서버 `data.quiet`), `a3c54e1`(대량 업로드 시나리오 10개)가 끝났다. 결과는 `04-검증.md`에 있다.
 - 남은 일: 설정 카드 웹 export 스크린샷, 성기님께 결과와 승인 목록 보고. 그 뒤 일은 모두 5장의 승인 전 목록이다.
 
+## 0. 2026-11-13 23:55 인수인계: 출시 전체 진행 (이 장을 먼저 읽는다)
+
+이전 세션: `d1aae06b-e16e-4600-8d02-e8463cb8de32` (Hide 창, `claude --resume`으로 복구 가능)
+
+### 지금 상태
+- 코드와 검증은 끝났다. 커밋 1~7, 리뷰 반영, `04-검증.md`, 카드 스크린샷(`b6ee0f4`)까지 로컬 커밋만 있고 origin에는 올리지 않았다.
+- 테스트(`a3c54e1` 기준, 주 세션이 다시 돌림): 앱과 서버 tsc 0, partnerPush 44개, push 25/25, 푸시 시나리오 10/10. offline은 rc=0(구현 에이전트가 돌림).
+
+### 받은 허락 (성기님, 2026-11-13 23:5x, 원문 "1번을 왜 .. 너가 전체 진행해줘")
+아래를 **모두 직접 진행하라는 허락**을 받았다. 다시 묻지 말고 순서대로 하되, 결과는 단계마다 보고한다.
+1. Firebase 프로젝트 `babycheck-sync`에 Android 앱(`com.seonggi.babycheck`) 등록, `google-services.json` 받기, FCM V1용 서비스 계정 키를 Expo(EAS) 프로젝트에 등록, Expo push 보안 설정 확인
+2. 운영 D1에 `push_devices` 테이블 추가(`server/schema.sql`의 해당 CREATE만, 기존 표는 건드리지 않음)와 Worker 배포. **서버를 앱보다 먼저** 낸다.
+3. `feat/partner-push` 푸시, PR, 머지
+4. 버전 1.8.3(코드 31) 올리기, Play AAB와 원스토어 APK 빌드, Play와 원스토어 등록, Play 데이터 보안 항목 수정(Expo와 FCM 전달 추가)
+
+### 막힐 수 있는 곳과 처리
+- `firebase`, `eas`, `wrangler` 명령은 전역에 없다. `npx firebase-tools`, `npx eas-cli`, `cd server && npx wrangler`로 쓴다. gcloud는 로그인돼 있다(gmail 계정). Expo 로그인 상태는 `~/.expo/state.json`에 있다.
+- FCM V1 키 등록은 `eas credentials`가 대화형이다. 대화형으로 안 되면 expo.dev 웹 화면으로 한다. 브라우저 조작은 Claude in Chrome 확장이 이 세션에서 연결되지 않았으므로 `orca computer`(orca-computer-use 스킬)를 쓴다.
+- 서비스 계정 키 JSON은 저장소에 넣지 않고 화면에 출력하지 않는다. 등록 뒤 로컬 사본은 지운다.
+- 빌드는 `expo prebuild`나 `expo run:android`를 쓰지 않는다. `android/`(git에 없음)에서 `./gradlew`로 한다(`docs/daily-diary/HANDOFF.md`의 방법, `JAVA_HOME=/opt/homebrew/opt/openjdk@17`). FCM을 쓰려면 `android/app/google-services.json`과 Gradle의 google-services 플러그인이 필요하다. `app.json`에도 `android.googleServicesFile`을 넣는다.
+- 원스토어 APK는 `EXPO_PUBLIC_DISTRIBUTION_STORE=onestore`로 따로 빌드한다. 서명은 Play와 원스토어 모두 EAS 키다(메모리 "서명 키 결정").
+- 사용자를 묻기 전에 운영 D1 데이터를 읽기 전용으로 확인한다. 실사용자 2명의 기록은 절대 지우거나 덮어쓰지 않는다(메모리 "jjukkom 데이터 보전").
+- gh 기본 계정은 쓰기 권한이 없다. `GH_TOKEN=$(gh auth token -u SeongGi)`를 그 명령에만 쓴다. 전역 `gh auth switch`는 하지 않는다.
+- 많은 프로세스를 띄우는 명령은 `(ulimit -u $(( $(ps -u $(id -u) -o pid= | wc -l) + 150 )); <명령>)`으로 감싼다.
+- 4b 시나리오 [32]는 부하가 많으면 30초 대기로 한 번 실패할 수 있다. 그 파일만 다시 돌려 확인한다.
+
+### 남겨 둘 것
+- tmux `PDS`의 이전 세션(76194178)은 성기님이 두라고 했다. 끄지 않는다.
+- 텔레그램 연동은 같은 날 고쳤다(`~/.ccgram-focus/hide-bridge.mjs`, patch v11, `live-sessions.js`). 건드리지 않는다.
+- 카드 위치(수유 카드와 저장 버튼 사이)는 그대로 두었다. 성기님이 옮기라고 하면 옮긴다.
+
 ## 2. 커밋 1~3에서 아직 하지 않은 것
 1. **독립 리뷰 2개가 아직 없다.** 다음 세션이 먼저 돌린다. 하나는 `02-설계.md`와 맞는지, 하나는 정확성 버그만 본다. 대상은 `git diff e29c745..9addb87`이다.
 2. 구현 에이전트가 설계와 다르게 하거나 덧붙인 점이 있다. 리뷰 때 함께 확인한다.
