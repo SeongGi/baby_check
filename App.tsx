@@ -32,6 +32,8 @@ import { createFamilyMigrator, MIGRATION_MESSAGES } from './src/database/familyM
 import type { FamilyMigrator, LegacyDeletionChoice, LegacyDeletionPrompt, MigratorNotice } from './src/database/familyMigration';
 import { shouldAlertOnRefresh, shouldStartPolling } from './src/database/migrationDecision';
 import { ensureFeedingReminderPermission, refreshFeedingReminder } from './src/utils/feedingReminder';
+import { loadPartnerPushSettings, reconcilePartnerPush } from './src/utils/partnerPush';
+import { getPartnerPushDeps } from './src/utils/partnerPushDeps';
 import { canDispatchAutoVoiceLaunch, getAutoVoiceLaunchAction } from './src/utils/autoVoiceLaunch';
 import { Dashboard } from './src/screens/Dashboard';
 import { LogFormula } from './src/screens/LogFormula';
@@ -114,6 +116,14 @@ function MainApp() {
   const [joinProgress, setJoinProgress] = useState<string | null>(null);
   // 이전 모듈이 마지막으로 알린 오류 문구. 이전 준비 중에는 이 문구를 동기화 오류로 계속 보여 줍니다.
   const migrationErrorRef = useRef<string | null>(null);
+  // 가족 기록 알림(설계 3.2, 3.4). 설정이 바뀌면 버전을 올려 등록 맞추기를 다시 돌립니다.
+  const [partnerPushSettingsVersion, setPartnerPushSettingsVersion] = useState(0);
+  const [partnerPushClientId, setPartnerPushClientId] = useState<string | null>(null);
+  // 푸시 토큰을 얻지 못했을 때 설정 화면이 안내를 띄우도록 알려 주는 값입니다.
+  const [partnerPushTokenError, setPartnerPushTokenError] = useState(false);
+  // 알림을 눌렀거나 받아서 동기화를 한 번 해야 한다는 표시입니다. 프로필이 불러와지기 전에도 세울 수 있습니다.
+  const pendingPartnerSyncRef = useRef(false);
+  const [partnerSyncTick, setPartnerSyncTick] = useState(0);
 
   const insets = useSafeAreaInsets();
 
@@ -549,6 +559,72 @@ function MainApp() {
     };
   }, [profile?.syncKey]);
 
+  // 가족 기록 알림 등록을 현재 가족, 기기, 설정에 맞춥니다. 가족 연결이 없으면 모듈이 푸시 관련 호출을 하지 않습니다.
+  useEffect(() => {
+    let mounted = true;
+    getSyncClientId()
+      .then(id => { if (mounted) setPartnerPushClientId(id); })
+      .catch(error => console.warn('Partner push client id failed', error));
+    return () => { mounted = false; };
+  }, []);
+
+  useEffect(() => {
+    // 기기 번호를 읽기 전에 맞추면 저장된 등록을 다른 기기 것으로 오해해 해제하므로, 둘 다 준비된 뒤에만 합니다.
+    if (!profile || !partnerPushClientId) return;
+    let mounted = true;
+    const deps = getPartnerPushDeps();
+    void (async () => {
+      try {
+        const settings = await loadPartnerPushSettings(deps);
+        const status = await reconcilePartnerPush(
+          { syncKey: profile.syncKey, clientId: partnerPushClientId, settings },
+          deps,
+        );
+        if (!mounted) return;
+        // 알림을 켠 상태에서만 토큰 오류를 설정 화면에 알립니다.
+        setPartnerPushTokenError(status === 'token_error' && settings.enabled);
+      } catch (error) {
+        console.warn('Partner push reconcile failed', error);
+      }
+    })();
+    return () => { mounted = false; };
+    // foregroundRevision은 앱이 다시 앞으로 올 때마다 올라가므로 "앱이 활성이 됨"을 뜻합니다.
+  }, [profile?.syncKey, partnerPushClientId, partnerPushSettingsVersion, foregroundRevision]);
+
+  // 푸시 토큰이 바뀌면 다시 맞춥니다. 리스너가 주는 값은 기기 토큰이라 쓰지 않고, 모듈이 Expo 토큰을 다시 얻습니다.
+  useEffect(() => {
+    const subscription = Notifications.addPushTokenListener(() => {
+      setPartnerPushSettingsVersion(version => version + 1);
+    });
+    return () => subscription.remove();
+  }, []);
+
+  // 알림을 누르거나 받아서 세워 둔 표시를 보고, 가족 키가 확인되면 동기화를 한 번 요청합니다(설계 3.4).
+  // 앱이 꺼진 상태에서 알림을 눌러 시작한 경우에도 프로필을 불러온 뒤 여기서 처리됩니다. 요청 합치기는 syncRunner가 맡습니다.
+  useEffect(() => {
+    const syncKey = profile?.syncKey;
+    if (!syncKey || !pendingPartnerSyncRef.current) return;
+    pendingPartnerSyncRef.current = false;
+    void syncLatestData(syncKey, false).then(result => {
+      if (result.merged) {
+        setLogs(result.logs);
+        setProfile(result.profile);
+        void refreshFeedingReminder(result.logs, result.profile);
+      }
+      if (result.success) runTransitionTick(syncKey);
+    }).catch(error => console.warn('Partner notification sync failed', error));
+  }, [profile?.syncKey, partnerSyncTick]);
+
+  // 앱이 켜져 있을 때 상대 기기의 알림이 도착하면 같은 동기화 표시를 세웁니다.
+  useEffect(() => {
+    const subscription = Notifications.addNotificationReceivedListener(notification => {
+      if (notification.request.content.data?.kind !== 'partnerLog') return;
+      pendingPartnerSyncRef.current = true;
+      setPartnerSyncTick(tick => tick + 1);
+    });
+    return () => subscription.remove();
+  }, []);
+
   // 가족 초대 링크를 누르면 그룹 키를 직접 입력하지 않고 자동으로 연결합니다.
   useEffect(() => {
     if (!profile) return;
@@ -620,7 +696,23 @@ function MainApp() {
       const responseKey = `${request.identifier}:${response.actionIdentifier}`;
       if (processedNotificationRef.current === responseKey) return;
       processedNotificationRef.current = responseKey;
-      if (request.content.data?.screen === 'formula') setActiveScreen('formula');
+      const data = request.content.data;
+      if (data?.screen === 'formula') setActiveScreen('formula');
+      if (data?.kind === 'partnerLog') {
+        // 상대 기기 기록 알림은 기록 종류에 맞는 화면을 열고, 동기화를 한 번 요청하도록 표시합니다(설계 3.4).
+        const partnerRoutes: Record<string, typeof activeScreen> = {
+          formula: 'formula',
+          urine: 'diaper',
+          stool: 'diaper',
+          bath: 'bath',
+          weight: 'weight',
+          temperature: 'temperature',
+        };
+        const type = typeof data.type === 'string' ? data.type : '';
+        setActiveScreen(partnerRoutes[type] ?? 'dashboard');
+        pendingPartnerSyncRef.current = true;
+        setPartnerSyncTick(tick => tick + 1);
+      }
     };
 
     Notifications.getLastNotificationResponseAsync()
