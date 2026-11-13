@@ -1,5 +1,6 @@
 import { BabyLogEntry, BabyProfile } from '../types';
 import { getWorkerUrl } from './cloudConfig';
+import type { PartnerPushRegisterBody } from '../utils/partnerPush';
 
 export interface ConnectFamilyResponse {
   ok: boolean;
@@ -213,4 +214,30 @@ export const getFamilyDeletionStatus = async (
     clientId,
     { method: 'GET' }
   );
+};
+
+// 상대 기기 기록 알림 등록 본문입니다. 타입 정의는 partnerPush.ts 한 곳에 두고 여기서는 그대로 가져다 씁니다.
+export type PushRegisterBody = PartnerPushRegisterBody;
+
+export const registerPushDevice = async (
+  syncKey: string,
+  clientId: string,
+  body: PushRegisterBody
+): Promise<{ ok: boolean; error?: string }> => {
+  return requestJson<{ ok: boolean; error?: string }>('/api/family/push-register', syncKey, clientId, {
+    method: 'POST',
+    body,
+  });
+};
+
+export const unregisterPushDevice = async (
+  syncKey: string,
+  clientId: string,
+  options: { timeoutMs?: number } = {}
+): Promise<{ ok: boolean; error?: string }> => {
+  return requestJson<{ ok: boolean; error?: string }>('/api/family/push-unregister', syncKey, clientId, {
+    method: 'POST',
+    body: {},
+    timeoutMs: options.timeoutMs,
+  });
 };

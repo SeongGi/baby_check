@@ -42,7 +42,8 @@
     "test:offline": "bash tools/sync-harness/verify.sh offline",
     "test:push": "bash tools/sync-harness/verify.sh push",
     "test:voice": "node tests/autoVoiceLaunch.mjs && node tests/voiceCommand.mjs && node tests/voiceFeedback.mjs",
-    "test:permission": "node tests/permissionNotice.mjs"
+    "test:permission": "node tests/permissionNotice.mjs",
+    "test:partner-push": "node tests/partnerPush.mjs"
   },
   "private": true
 }
