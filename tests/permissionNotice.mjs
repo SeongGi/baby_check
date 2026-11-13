@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import {
   MICROPHONE_PROMPT,
   NOTIFICATION_PROMPT,
+  PARTNER_PUSH_PROMPT,
   PERMISSION_NOTICE_ITEMS,
   PERMISSION_NOTICE_KEY,
   PERMISSION_NOTICE_TEXT,
@@ -36,6 +37,12 @@ for (const prompt of [MICROPHONE_PROMPT, NOTIFICATION_PROMPT]) {
   assert.ok(prompt.message.includes('선택'), '안내 문구에 "선택"이 들어 있어야 합니다');
   assert.ok(prompt.message.includes('허용하지 않아도'), '거부해도 쓸 수 있다는 문구가 있어야 합니다');
 }
+// 가족 기록 알림 안내는 수유 알림 문구와 달라야 하고 같은 조건(선택, 거부해도 사용 가능)을 담는다.
+assert.notEqual(PARTNER_PUSH_PROMPT.message, NOTIFICATION_PROMPT.message);
+assert.ok(PARTNER_PUSH_PROMPT.message.includes('가족'));
+assert.ok(!PARTNER_PUSH_PROMPT.message.includes('수유'));
+assert.ok(PARTNER_PUSH_PROMPT.message.includes('선택'));
+assert.ok(PARTNER_PUSH_PROMPT.message.includes('허용하지 않아도'));
 assert.ok(PERMISSION_NOTICE_TEXT.noRequired.includes('선택'));
 assert.ok(PERMISSION_NOTICE_TEXT.noRequired.includes('필수'));
 assert.ok(PERMISSION_NOTICE_TEXT.closing.includes('허용하지 않아도 다른 기능은 그대로 쓸 수 있습니다.'));

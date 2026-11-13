@@ -24,6 +24,18 @@ import { getLogs, getProfile, getLocalBackup, restoreFromLocalBackup, getPreMigr
 import { createFamilyInviteLink, createFamilySyncId, parseFamilyInviteLink, FamilyDeletionStatus } from '../database/sync';
 import { shouldCheckDeletionStatus } from '../database/migrationDecision';
 import type { MigrationGate } from '../database/migrationDecision';
+import {
+  PARTNER_PUSH_DEFAULT_QUIET,
+  PartnerPushPermissionResult,
+  PartnerPushSettings,
+  PartnerPushType,
+  PARTNER_PUSH_TYPES,
+  formatMinuteOfDay,
+  loadPartnerPushSettings,
+  savePartnerPushSettings,
+  stepQuietTime,
+} from '../utils/partnerPush';
+import { ensurePartnerPushPermission, getPartnerPushDeps } from '../utils/partnerPushDeps';
 
 const PRIVACY_POLICY_URL = 'https://seonggi.github.io/baby_check/privacy-policy.html';
 
@@ -55,7 +67,234 @@ interface ProfileProps {
   onScheduleFamilyDeletion: (syncKey: string) => Promise<{ success: boolean; readyAt?: number; error?: string }>;
   onCancelFamilyDeletion: (syncKey: string) => Promise<{ success: boolean; error?: string }>;
   onGetFamilyDeletionStatus: (syncKey: string) => Promise<FamilyDeletionStatus>;
+  /** 가족 기록 알림을 켠 상태에서 푸시 토큰을 얻지 못했는지 여부입니다. */
+  partnerPushTokenError: boolean;
+  /** 가족 기록 알림 설정을 저장한 뒤 서버 등록을 다시 맞추도록 알립니다. */
+  onPartnerPushSettingsChanged: () => void;
 }
+
+const PARTNER_PUSH_TYPE_LABEL: Record<PartnerPushType, string> = {
+  formula: '분유',
+  urine: '소변',
+  stool: '대변',
+  bath: '목욕',
+  weight: '체중',
+  temperature: '체온',
+  sleep: '수면',
+  tummyTime: '터미타임',
+  play: '놀이',
+};
+
+const PARTNER_PUSH_DENIED_NOTICE = '휴대폰 설정에서 알림을 허용해 주세요';
+const PARTNER_PUSH_TOKEN_ERROR_NOTICE = '알림 서버에 연결하지 못해 가족 기록 알림을 껐어요. 잠시 뒤 다시 켜 주세요.';
+const PARTNER_PUSH_SAVE_ERROR_NOTICE = '설정을 저장하지 못했어요. 다시 시도해 주세요.';
+
+// 가족 기록 알림 카드입니다. 설정은 기기 저장소에 바로 저장하고, 저장이 끝나면 App에 알려 서버 등록을 맞추게 합니다.
+const PartnerPushCard: React.FC<{
+  hasFamily: boolean;
+  tokenError: boolean;
+  onChanged: () => void;
+}> = ({ hasFamily, tokenError, onChanged }) => {
+  const [settings, setSettings] = useState<PartnerPushSettings | null>(null);
+  const settingsRef = useRef<PartnerPushSettings | null>(null);
+  const [notice, setNotice] = useState<string | null>(null);
+  const [requestingPermission, setRequestingPermission] = useState(false);
+  const mountedRef = useRef(true);
+
+  useEffect(() => {
+    mountedRef.current = true;
+    return () => { mountedRef.current = false; };
+  }, []);
+
+  useEffect(() => {
+    if (!hasFamily) return;
+    let active = true;
+    loadPartnerPushSettings(getPartnerPushDeps())
+      .then(loaded => {
+        if (!active) return;
+        settingsRef.current = loaded;
+        setSettings(loaded);
+      })
+      .catch(error => console.warn('Partner push settings load failed', error));
+    return () => { active = false; };
+  }, [hasFamily]);
+
+  // 바뀐 설정을 화면에 먼저 반영하고 저장한 뒤 App에 알립니다. 연속으로 눌러도 가장 최근 값 위에서 바뀝니다.
+  const persist = (next: PartnerPushSettings) => {
+    settingsRef.current = next;
+    setSettings(next);
+    savePartnerPushSettings(getPartnerPushDeps(), next)
+      .then(() => onChanged())
+      .catch(error => {
+        console.warn('Partner push settings save failed', error);
+        if (mountedRef.current) setNotice(PARTNER_PUSH_SAVE_ERROR_NOTICE);
+      });
+  };
+
+  // App이 토큰 오류를 알리면 안내를 보이고 스위치를 끕니다.
+  // tokenError가 false에서 true로 바뀔 때만 반응합니다. 사용자가 다시 켰는데 App이 아직 오류를 지우지 못한 동안에는 끄지 않습니다.
+  // 바뀐 순간에 설정이 아직 로딩 중이면 설정이 올 때까지 기억해 둡니다.
+  const prevTokenErrorRef = useRef(false);
+  const tokenErrorPendingRef = useRef(false);
+  useEffect(() => {
+    if (tokenError && !prevTokenErrorRef.current) tokenErrorPendingRef.current = true;
+    if (!tokenError) tokenErrorPendingRef.current = false;
+    prevTokenErrorRef.current = tokenError;
+    if (!tokenErrorPendingRef.current || !settings) return;
+    tokenErrorPendingRef.current = false;
+    if (!settings.enabled) return;
+    setNotice(PARTNER_PUSH_TOKEN_ERROR_NOTICE);
+    persist({ ...settings, enabled: false });
+  }, [tokenError, settings]);
+
+  const handleToggleEnabled = async (value: boolean) => {
+    const current = settingsRef.current;
+    if (!current || requestingPermission) return;
+    setNotice(null);
+    if (!value) {
+      persist({ ...current, enabled: false });
+      return;
+    }
+    setRequestingPermission(true);
+    let result: PartnerPushPermissionResult = 'denied';
+    try {
+      result = await ensurePartnerPushPermission();
+    } catch (error) {
+      console.warn('Partner push permission request failed', error);
+    } finally {
+      if (mountedRef.current) setRequestingPermission(false);
+    }
+    if (!mountedRef.current) return;
+    if (result === 'later') return;
+    if (result !== 'granted') {
+      setNotice(PARTNER_PUSH_DENIED_NOTICE);
+      return;
+    }
+    persist({ ...(settingsRef.current ?? current), enabled: true });
+  };
+
+  const handleToggleType = (type: PartnerPushType) => {
+    const current = settingsRef.current;
+    if (!current) return;
+    const types = current.types.includes(type)
+      ? current.types.filter(item => item !== type)
+      : PARTNER_PUSH_TYPES.filter(item => item === type || current.types.includes(item));
+    persist({ ...current, types });
+  };
+
+  const handleToggleQuiet = (value: boolean) => {
+    const current = settingsRef.current;
+    if (!current) return;
+    persist({ ...current, quiet: value ? { ...PARTNER_PUSH_DEFAULT_QUIET } : null });
+  };
+
+  const handleStepQuiet = (which: 'start' | 'end', direction: 1 | -1) => {
+    const current = settingsRef.current;
+    if (!current || !current.quiet) return;
+    persist({ ...current, quiet: stepQuietTime(current.quiet, which, direction) });
+  };
+
+  if (!hasFamily) {
+    return (
+      <View style={[styles.backupCard, styles.partnerCardDisabled]}>
+        <Text style={styles.backupTitle}>👪 가족 기록 알림</Text>
+        <Text style={[styles.backupDesc, styles.partnerNoMargin]}>가족과 연결하면 쓸 수 있어요</Text>
+      </View>
+    );
+  }
+
+  const enabled = settings?.enabled === true;
+  const quiet = settings?.quiet ?? null;
+
+  const renderTimeRow = (label: string, which: 'start' | 'end', minute: number) => (
+    <View style={styles.partnerTimeRow}>
+      <Text style={styles.partnerTimeLabel}>{label}</Text>
+      <TouchableOpacity
+        style={styles.partnerStepButton}
+        onPress={() => handleStepQuiet(which, -1)}
+        accessibilityRole="button"
+        accessibilityLabel={`${label} 30분 앞으로`}
+      >
+        <Text style={styles.partnerStepText}>−30분</Text>
+      </TouchableOpacity>
+      <Text style={styles.partnerTimeValue}>{formatMinuteOfDay(minute)}</Text>
+      <TouchableOpacity
+        style={styles.partnerStepButton}
+        onPress={() => handleStepQuiet(which, 1)}
+        accessibilityRole="button"
+        accessibilityLabel={`${label} 30분 뒤로`}
+      >
+        <Text style={styles.partnerStepText}>+30분</Text>
+      </TouchableOpacity>
+    </View>
+  );
+
+  return (
+    <View style={styles.backupCard}>
+      <View style={styles.reminderHeader}>
+        <View style={styles.reminderText}>
+          <Text style={styles.backupTitle}>👪 가족 기록 알림</Text>
+          <Text style={[styles.backupDesc, enabled && styles.partnerNoMargin]}>
+            가족이 기록을 남기면 이 휴대폰에 알림이 와요. 바뀐 설정은 바로 적용돼요.
+          </Text>
+        </View>
+        <Switch
+          value={enabled}
+          disabled={!settings || requestingPermission}
+          onValueChange={value => { void handleToggleEnabled(value); }}
+          trackColor={{ false: COLORS.border, true: COLORS.primary + '80' }}
+          thumbColor={enabled ? COLORS.primary : '#FFFFFF'}
+        />
+      </View>
+      {!!notice && <Text style={styles.partnerNotice}>{notice}</Text>}
+      {enabled && settings && (
+        <View>
+          <Text style={styles.label}>알림 받을 기록</Text>
+          <View style={styles.intervalPresets}>
+            {PARTNER_PUSH_TYPES.map(type => {
+              const selected = settings.types.includes(type);
+              return (
+                <TouchableOpacity
+                  key={type}
+                  style={[styles.intervalPreset, selected && styles.intervalPresetActive]}
+                  onPress={() => handleToggleType(type)}
+                  accessibilityRole="button"
+                  accessibilityState={{ selected }}
+                  accessibilityLabel={`${PARTNER_PUSH_TYPE_LABEL[type]} 알림`}
+                >
+                  <Text style={[styles.intervalPresetText, selected && styles.intervalPresetTextActive]}>
+                    {PARTNER_PUSH_TYPE_LABEL[type]}
+                  </Text>
+                </TouchableOpacity>
+              );
+            })}
+          </View>
+          {settings.types.length === 0 && (
+            <Text style={styles.reminderHint}>받을 기록을 하나 이상 골라야 알림이 와요.</Text>
+          )}
+          <View style={[styles.reminderHeader, styles.partnerQuietHeader]}>
+            <View style={styles.reminderText}>
+              <Text style={styles.label}>방해 금지 시간</Text>
+              <Text style={styles.reminderHint}>이 시간에는 알림이 와도 소리와 진동 없이 조용히 와요.</Text>
+            </View>
+            <Switch
+              value={quiet !== null}
+              onValueChange={handleToggleQuiet}
+              trackColor={{ false: COLORS.border, true: COLORS.primary + '80' }}
+              thumbColor={quiet !== null ? COLORS.primary : '#FFFFFF'}
+            />
+          </View>
+          {quiet && (
+            <View>
+              {renderTimeRow('시작', 'start', quiet.start)}
+              {renderTimeRow('끝', 'end', quiet.end)}
+            </View>
+          )}
+        </View>
+      )}
+    </View>
+  );
+};
 
 export const Profile: React.FC<ProfileProps> = ({
   profile,
@@ -70,6 +309,8 @@ export const Profile: React.FC<ProfileProps> = ({
   onScheduleFamilyDeletion,
   onCancelFamilyDeletion,
   onGetFamilyDeletionStatus,
+  partnerPushTokenError,
+  onPartnerPushSettingsChanged,
 }) => {
   const [name, setName] = useState(profile.name);
   const [birthDate, setBirthDate] = useState(profile.birthDate);
@@ -852,6 +1093,12 @@ export const Profile: React.FC<ProfileProps> = ({
           </View>
         </View>
 
+        <PartnerPushCard
+          hasFamily={!!profile.syncKey}
+          tokenError={partnerPushTokenError}
+          onChanged={onPartnerPushSettingsChanged}
+        />
+
         {/* Save Button */}
         <TouchableOpacity 
           style={[styles.saveButton, isSaving && styles.saveButtonDisabled]}
@@ -1324,6 +1571,54 @@ const styles = StyleSheet.create({
   },
   diaryRoleTextActive: {
     color: COLORS.primary,
+    fontWeight: 'bold',
+  },
+  partnerCardDisabled: {
+    opacity: 0.6,
+  },
+  partnerNoMargin: {
+    marginBottom: 4,
+  },
+  partnerNotice: {
+    color: '#A33D29',
+    fontSize: 12,
+    lineHeight: 18,
+    marginTop: 8,
+    marginBottom: 4,
+  },
+  partnerQuietHeader: {
+    marginTop: 16,
+  },
+  partnerTimeRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+    marginTop: 10,
+  },
+  partnerTimeLabel: {
+    width: 36,
+    color: COLORS.text,
+    fontSize: 13,
+    fontWeight: '600',
+  },
+  partnerTimeValue: {
+    minWidth: 56,
+    textAlign: 'center',
+    color: COLORS.text,
+    fontSize: 16,
+    fontWeight: 'bold',
+  },
+  partnerStepButton: {
+    borderWidth: 1,
+    borderColor: COLORS.border,
+    borderRadius: 10,
+    paddingHorizontal: 12,
+    paddingVertical: 8,
+    backgroundColor: COLORS.background,
+  },
+  partnerStepText: {
+    color: COLORS.primary,
+    fontSize: 12,
     fontWeight: 'bold',
   },
   intervalPresets: {

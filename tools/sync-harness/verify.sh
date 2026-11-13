@@ -5,6 +5,8 @@
 #   ./verify.sh regression  가짜 Worker로 도는 회귀 시나리오 (무료)
 #   ./verify.sh real        실제 Worker 코드를 서버 프로세스로 띄운 모드 (무료, 127.0.0.1만 사용).
 #                           제어 엔드포인트 자체 점검, 같은 회귀, 시나리오(real-scenarios-*.mjs)
+#   ./verify.sh push        상대 기기 기록 알림의 서버 단위 시험(push-unit.mjs). 실제 Worker와 가짜 Expo 서버, 127.0.0.1만 사용
+#                           (offline, all에는 넣지 않음)
 #   ./verify.sh scenario <파일>  실제 서버 시나리오 파일 하나만
 #   ./verify.sh compat      예전 형식 데이터 호환성  (실제 Firestore 사용)
 #   ./verify.sh full        두 기기 통합 시나리오    (실제 Firestore 사용)
@@ -64,6 +66,12 @@ run_scenario() {
     node --disable-warning=ExperimentalWarning --import "$LOADER_IMPORT" "$scenario"
 }
 
+# 상대 기기 기록 알림의 서버 단위 시험. real-server와 fake-expo.mjs(127.0.0.1)만 쓰므로 외부 네트워크는 호출하지 않습니다.
+# 지연(6초)과 연결 거부 시나리오가 있어 15초 안팎 걸립니다. 동기화 보호(S1~S3)를 확인하므로 offline과 all에도 넣습니다.
+run_push() {
+  node --disable-warning=ExperimentalWarning --import "$LOADER_IMPORT" "$DIR/push-unit.mjs"
+}
+
 run_reminder() {
   rm -f "$DIR/storage-reminder.json"
   HARNESS_STORAGE_FILE="$DIR/storage-reminder.json" node --import "$LOADER_IMPORT" "$DIR/reminder.mjs"
@@ -86,12 +94,13 @@ case "${1:-all}" in
   diary)      run_diary ;;
   regression) run_regression ;;
   real)       run_real ;;
+  push)       run_push ;;
   scenario)   run_scenario "${2:?시나리오 파일 이름이 필요합니다}" ;;
   reminder)   run_reminder ;;
   rules)      run_rules ;;
-  offline)    run_unit && run_diary && run_regression && run_real && run_reminder ;;
+  offline)    run_unit && run_diary && run_regression && run_real && run_reminder && run_push ;;
   compat)     node "$DIR/compat.mjs" ;;
   full)       node "$DIR/run.mjs" ;;
-  all)        run_unit && run_diary && run_regression && run_real && run_reminder && node "$DIR/compat.mjs" && node "$DIR/run.mjs" ;;
-  *)          echo "usage: $0 [unit|diary|regression|real|scenario <파일>|reminder|rules|offline|compat|full|all]" >&2; exit 2 ;;
+  all)        run_unit && run_diary && run_regression && run_real && run_reminder && run_push && node "$DIR/compat.mjs" && node "$DIR/run.mjs" ;;
+  *)          echo "usage: $0 [unit|diary|regression|real|push|scenario <파일>|reminder|rules|offline|compat|full|all]" >&2; exit 2 ;;
 esac

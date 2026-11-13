@@ -124,7 +124,12 @@ export function createD1Mock({ schemaSql, onBatch, onStatement }) {
     info: {},
     ...extra,
   });
-  const currentContext = () => als.getStore() || newContext({ unbound: true });
+  // ctx.redirectTo가 있으면 응답 뒤에도 도는 백그라운드 작업(waitUntil)이므로 그 컨텍스트에 따로 센다.
+  // real-server가 waitUntil이 불린 순간 요청 컨텍스트에 redirectTo를 달아, 요청의 쿼리 수가 바뀌지 않게 합니다.
+  const currentContext = () => {
+    const stored = als.getStore();
+    return stored ? (stored.redirectTo || stored) : newContext({ unbound: true });
+  };
   const runInvocation = (ctx, fn) => als.run(ctx, fn);
 
   const countQuery = (ctx) => {

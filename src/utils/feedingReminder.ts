@@ -5,15 +5,29 @@ import { BabyLogEntry, BabyProfile, FormulaLog } from '../types';
 import { withoutDiaryLogs } from './diary';
 import { NOTIFICATION_PROMPT, shouldExplainBeforeRequest } from './permissionNotice';
 import { confirmPermissionPrompt } from './permissionPrompt';
+import { shouldPlayPartnerSound } from './partnerPush';
 
 const NOTIFICATION_ID_KEY = '@baby_feeding_notification_id';
 // Android는 생성된 채널의 중요도를 앱에서 낮음→높음으로 바꿀 수 없으므로
 // 새 채널 ID를 사용해 기존 설치에서도 헤드업 알림 설정을 확실히 적용합니다.
 const CHANNEL_ID = 'feeding-reminders-v2';
 
+const isPartnerNotification = (notification: Notifications.Notification): boolean =>
+  notification.request.content.data?.kind === 'partnerLog';
+
+// 안드로이드는 FCM 메시지의 채널 번호를 trigger.remoteMessage에서 읽습니다. 없으면 undefined입니다.
+const readPartnerSoundInfo = (notification: Notifications.Notification): { channelId?: unknown; quiet?: unknown } => {
+  const trigger = notification.request.trigger as { remoteMessage?: { notification?: { channelId?: unknown } | null } } | null;
+  return {
+    channelId: trigger?.remoteMessage?.notification?.channelId,
+    quiet: notification.request.content.data?.quiet,
+  };
+};
+
 Notifications.setNotificationHandler({
-  handleNotification: async () => ({
-    shouldPlaySound: true,
+  handleNotification: async notification => ({
+    // 방해 금지 시간대의 가족 기록 알림은 앞에 떠 있어도 소리를 내지 않습니다. 수유 알림은 항상 소리를 냅니다.
+    shouldPlaySound: !isPartnerNotification(notification) || shouldPlayPartnerSound(readPartnerSoundInfo(notification)),
     shouldSetBadge: false,
     shouldShowBanner: true,
     shouldShowList: true,

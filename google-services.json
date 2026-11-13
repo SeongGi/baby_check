@@ -1,0 +1,29 @@
+{
+  "project_info": {
+    "project_number": "446080458953",
+    "project_id": "babycheck-sync",
+    "storage_bucket": "babycheck-sync.firebasestorage.app"
+  },
+  "client": [
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:446080458953:android:703026ffba89a9a4606d18",
+        "android_client_info": {
+          "package_name": "com.seonggi.babycheck"
+        }
+      },
+      "oauth_client": [],
+      "api_key": [
+        {
+          "current_key": "AIzaSyCOWEbmNATEoCmHbUamqafR3PVgLcxU8vw"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": []
+        }
+      }
+    }
+  ],
+  "configuration_version": "1"
+}
