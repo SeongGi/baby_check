@@ -9,6 +9,8 @@
 //   fail     {op:'add', mode, match, at?, status?, skip?, times?} 실패 주입 -> {ruleId}
 //            mode: beforeCommit | afterCommit | http (status 기본 503, http503도 같은 뜻) | drop
 //            {op:'list'} | {op:'remove', ruleId} | {op:'clear'}
+//   background {op:'wait'} 응답 뒤에도 도는 백그라운드 작업(ctx.waitUntil)이 모두 끝날 때까지 기다림 -> {waited}
+//   expo     {op:'mode', mode, delayMs?, tokens?} | {op:'requests'} | {op:'reset'} 가짜 Expo 푸시 서버 제어. 사용법은 fake-expo.mjs 머리말
 //   state    {q:'requests'|'family'|'logs'|'stats'|'held'|'config', key?, from?} 서버 상태 조회
 //   inject   {key, ensureFamily?, family?, log?, logs?, tombstone?, tombstones?, serverTime?, member?, remove?, gone?}
 //   wipe     {scope:'logs'|'all'|'snapshot'|'restore'|'reset', name?}
@@ -31,6 +33,7 @@ import { performance } from 'node:perf_hooks';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { createD1Mock } from './stubs/d1-mock.mjs';
 import { createFakeFirestore } from './stubs/fake-firestore-state.mjs';
+import { createFakeExpo } from './fake-expo.mjs';
 
 const HARNESS_DIR = path.dirname(fileURLToPath(import.meta.url));
 const PROJECT_DIR = path.resolve(HARNESS_DIR, '../..');
@@ -52,7 +55,9 @@ const applyEnvConfig = () => {
   env.MAX_PAGE_ROWS = String(config.maxPageRows);
 };
 const fakeFirestore = createFakeFirestore();
-const env = { DB: null, clock: nowMs, MAX_PUSH_ITEMS: '', MAX_PAGE_ROWS: '' };
+// 가짜 Expo 푸시 서버(127.0.0.1). Worker의 env.EXPO_PUSH_URL이 여기를 가리키므로 외부 네트워크는 쓰지 않습니다.
+const fakeExpo = createFakeExpo();
+const env = { DB: null, clock: nowMs, MAX_PUSH_ITEMS: '', MAX_PAGE_ROWS: '', EXPO_PUSH_URL: await fakeExpo.start() };
 if (process.env.HARNESS_MAX_PUSH_ITEMS) config.maxPushItems = Number(process.env.HARNESS_MAX_PUSH_ITEMS);
 if (process.env.HARNESS_MAX_PAGE_ROWS) config.maxPageRows = Number(process.env.HARNESS_MAX_PAGE_ROWS);
 applyEnvConfig();
@@ -64,6 +69,8 @@ const held = [];
 const requests = [];
 const snapshots = new Map();
 let inflight = 0;
+// 응답 뒤에도 도는 백그라운드 작업(ctx.waitUntil)의 마무리 약속. background 제어가 기다립니다.
+const backgroundJobs = new Set();
 
 const sanitizeClientId = (value) => (String(value ?? '').trim().replace(/[^a-zA-Z0-9_-]/g, '').slice(0, 64) || 'unknown-client');
 const familyIdOf = (key) =>
@@ -235,6 +242,9 @@ function startRecord(req, pathname, body, json) {
     held: false,
     dropped: false,
     queries: 0,
+    backgroundQueries: 0,
+    backgroundRowsRead: 0,
+    backgroundRowsWritten: 0,
     rowsRead: 0,
     rowsWritten: 0,
     writtenByTable: {},
@@ -302,9 +312,34 @@ async function handleWorkerRequest(req, res, url) {
     const request = new Request(`http://127.0.0.1${req.url}`, { method: req.method, headers, body: hasBody ? body : undefined });
     const ctx = d1.newContext({ info, record });
     const startedAt = performance.now();
-    const response = await d1.runInvocation(ctx, () => worker.fetch(request, env));
+    // ctx.waitUntil(p): p를 모아 두었다가 응답을 보낸 뒤에 기다립니다. waitUntil이 불린 순간부터 D1 쓰기와 읽기는
+    // 별도 컨텍스트에 세므로 record.queries 같은 요청 집계는 백그라운드 작업 때문에 바뀌지 않습니다.
+    const pendingWork = [];
+    let backgroundCtx = null;
+    const execCtx = {
+      waitUntil(promise) {
+        if (!backgroundCtx) {
+          backgroundCtx = d1.newContext({ info, record });
+          ctx.redirectTo = backgroundCtx;
+        }
+        pendingWork.push(Promise.resolve(promise));
+      },
+      passThroughOnException() {},
+    };
+    const response = await d1.runInvocation(ctx, () => worker.fetch(request, env, execCtx));
     const responseText = await response.text();
     finishRecord(record, ctx, startedAt);
+    if (pendingWork.length > 0) {
+      const job = Promise.allSettled(pendingWork).then((settled) => {
+        record.backgroundQueries = backgroundCtx.queries;
+        record.backgroundRowsRead = backgroundCtx.rowsRead;
+        record.backgroundRowsWritten = backgroundCtx.rowsWritten;
+        for (const item of settled) {
+          if (item.status === 'rejected') console.error('[server] 백그라운드 작업 실패', item.reason);
+        }
+      }).finally(() => backgroundJobs.delete(job));
+      backgroundJobs.add(job);
+    }
 
     await applyHolds('response', info, record);
     const responseFault = takeRule(failRules.filter(isHttpFault), 'response', info);
@@ -430,7 +465,7 @@ function injectState(body) {
 
 const TABLES = ['families', 'members', 'deleted_families', 'logs'];
 
-function wipeState(body) {
+async function wipeState(body) {
   const scope = body.scope;
   if (scope === 'logs') {
     d1.raw.exec('DELETE FROM logs');
@@ -458,6 +493,7 @@ function wipeState(body) {
     requests.length = 0;
     snapshots.clear();
     fakeFirestore.reset();
+    await fakeExpo.control({ op: 'reset' });
     clock.fixed = null;
     clock.offset = 0;
     config.maxPushItems = DEFAULT_MAX_PUSH_ITEMS;
@@ -492,7 +528,7 @@ function ruleOps(body, rules, label, extra) {
   throw new Error(`알 수 없는 op: ${op}`);
 }
 
-function control(name, body) {
+async function control(name, body) {
   switch (name) {
     case 'clock': {
       if (body.real) { clock.fixed = null; clock.offset = 0; }
@@ -554,6 +590,16 @@ function control(name, body) {
       }
     }
     case 'fs': return fakeFirestore.control(body);
+    case 'expo': return fakeExpo.control(body);
+    case 'background': {
+      if ((body.op || 'wait') !== 'wait') throw new Error(`알 수 없는 background op: ${body.op}`);
+      let waited = 0;
+      while (backgroundJobs.size > 0) {
+        waited += backgroundJobs.size;
+        await Promise.allSettled([...backgroundJobs]);
+      }
+      return { waited };
+    }
     case 'inject': return injectState(body);
     case 'wipe': return wipeState(body);
     case 'config': {
@@ -571,7 +617,7 @@ async function handleControl(req, res, url) {
   try {
     const text = (await readBody(req)).toString('utf8');
     const body = text ? JSON.parse(text) : {};
-    const result = control(name, body);
+    const result = await control(name, body);
     res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
     res.end(JSON.stringify({ ok: true, ...result }));
   } catch (error) {
@@ -602,6 +648,7 @@ server.keepAliveTimeout = 5_000;
 const shutdown = () => {
   for (const item of [...held]) releaseItem(item);
   fakeFirestore.release();
+  fakeExpo.stop();
   server.closeAllConnections?.();
   server.close(() => process.exit(0));
   setTimeout(() => process.exit(0), 500).unref();
