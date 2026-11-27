@@ -37,7 +37,8 @@
       "predictiveBackGestureEnabled": false,
       "blockedPermissions": [
         "android.permission.READ_EXTERNAL_STORAGE",
-        "android.permission.WRITE_EXTERNAL_STORAGE"
+        "android.permission.WRITE_EXTERNAL_STORAGE",
+        "android.permission.RECORD_AUDIO"
       ]
     },
     "web": {
@@ -51,14 +52,6 @@
     "owner": "seonggi",
     "plugins": [
       "./plugins/withBabyStatusWidget",
-      [
-        "expo-speech-recognition",
-        {
-          "microphonePermission": "음성 기록을 위해 마이크를 사용합니다.",
-          "speechRecognitionPermission": "말한 내용을 수유와 수면 기록으로 입력하기 위해 음성을 인식합니다."
-        }
-      ],
-      "./plugins/withOptionalMicrophone",
       "expo-notifications",
       [
         "expo-widgets",
