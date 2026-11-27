@@ -3,9 +3,10 @@ import { ScrollView, StyleSheet, Text, TouchableOpacity, View } from 'react-nati
 import { BabyLogEntry, FormulaLog, SleepLog, TummyTimeLog, PlayLog, WeightLog, TemperatureLog } from '../types';
 import { COLORS } from '../theme/colors';
 import { withoutDiaryLogs } from '../utils/diary';
+import { WeeklyFlow } from '../components/WeeklyFlow';
 
 interface StatisticsProps { logs: BabyLogEntry[]; }
-type Range = 'week' | 'all';
+type Range = 'week' | 'weekly' | 'all';
 
 const DAY = 24 * 60 * 60 * 1000;
 const formatDate = (timestamp: number) => {
@@ -128,10 +129,10 @@ export const Statistics: React.FC<StatisticsProps> = ({ logs: allLogs }) => {
   return (
     <ScrollView style={styles.container} contentContainerStyle={styles.contentContainer}>
       <Text style={styles.screenTitle}>통계 & 분석</Text>
-      <Text style={styles.subtitle}>{range === 'week' ? '최근 7일의 생활 패턴을 한눈에 확인해요.' : '처음 기록한 날부터 지금까지의 누적 통계예요.'}</Text>
+      <Text style={styles.subtitle}>{range === 'week' ? '최근 7일의 생활 패턴을 한눈에 확인해요.' : range === 'weekly' ? '한 주씩 넘기며 생활 패턴의 변화를 확인해요.' : '처음 기록한 날부터 지금까지의 누적 통계예요.'}</Text>
 
       <View style={styles.rangeTabs}>
-        {([['week', '최근 7일'], ['all', '전체']] as const).map(([value, label]) => (
+        {([['week', '최근 7일'], ['weekly', '주별 흐름'], ['all', '전체']] as const).map(([value, label]) => (
           <TouchableOpacity key={value} style={[styles.rangeTab, range === value && styles.rangeTabActive]} onPress={() => setRange(value)} accessibilityRole="tab" accessibilityState={{ selected: range === value }}>
             <Text style={[styles.rangeTabText, range === value && styles.rangeTabTextActive]}>{label}</Text>
           </TouchableOpacity>
@@ -145,60 +146,65 @@ export const Statistics: React.FC<StatisticsProps> = ({ logs: allLogs }) => {
         </View>
       )}
 
-      <View style={styles.summaryCard}>
-        <Text style={styles.cardHeader}>{range === 'week' ? '일일 평균' : '전체 누적'}</Text>
-        <View style={styles.metricGrid}>
-          <Metric emoji="🍼" label="수유량" value={summary.formula} unit="ml" tint={COLORS.lightPink} />
-          <Metric emoji="💩" label="대변" value={summary.stools} unit="회" tint={COLORS.lightYellow} />
-          <Metric emoji="💧" label="소변" value={summary.urines} unit="회" tint={COLORS.lightBlue} />
-          <Metric emoji="🛁" label="목욕" value={summary.baths} unit="회" tint={COLORS.lightMint} />
-          <Metric emoji="🌙" label={range === 'week' ? '평균 수면' : '수면 시간'} value={summary.sleep} unit={range === 'week' ? '시간' : ''} tint="#EDE9F8" />
-          <Metric emoji="☀️" label={range === 'week' ? '평균 낮잠' : '낮잠 시간'} value={summary.nap} unit="" tint="#FFF3D6" />
-          <Metric emoji="🤸" label={range === 'week' ? '평균 터미타임' : '터미타임'} value={summary.tummyTime} unit="" tint="#FDF1E4" />
-          <Metric emoji="🎈" label={range === 'week' ? '평균 놀기시간' : '놀기시간'} value={summary.play} unit="" tint="#EDF7ED" />
-          {latestWeight && <Metric emoji="⚖️" label="최근 체중" value={latestWeight.weightKg} unit="kg" tint="#EAF0F7" />}
-          {latestTemperature && <Metric emoji="🌡️" label="최근 체온" value={latestTemperature.temperatureC} unit="℃" tint="#FBECE7" />}
-        </View>
-        {range === 'all' && logs.length > 0 && <Text style={styles.averageHint}>하루 평균 수유 {Math.round(allFormula / elapsedDays)}ml · 기저귀 {((allStools + allUrines) / elapsedDays).toFixed(1)}회</Text>}
-      </View>
-
-      {range === 'week' && (
+      {range === 'weekly' && <WeeklyFlow logs={logs} />}
+      {range !== 'weekly' && (
         <>
-          <View style={styles.chartCard}>
-            <Text style={styles.chartTitle}>일일 수유량 (ml)</Text>
-            <View style={styles.barChartContainer}>
-              {dailyData.map((day, index) => <Bar key={day.dateStr} value={day.formulaAmount} max={maxFormula} day={day} color={index === 6 ? COLORS.primary : COLORS.secondary} />)}
-            </View>
+        <View style={styles.summaryCard}>
+          <Text style={styles.cardHeader}>{range === 'week' ? '일일 평균' : '전체 누적'}</Text>
+          <View style={styles.metricGrid}>
+            <Metric emoji="🍼" label="수유량" value={summary.formula} unit="ml" tint={COLORS.lightPink} />
+            <Metric emoji="💩" label="대변" value={summary.stools} unit="회" tint={COLORS.lightYellow} />
+            <Metric emoji="💧" label="소변" value={summary.urines} unit="회" tint={COLORS.lightBlue} />
+            <Metric emoji="🛁" label="목욕" value={summary.baths} unit="회" tint={COLORS.lightMint} />
+            <Metric emoji="🌙" label={range === 'week' ? '평균 수면' : '수면 시간'} value={summary.sleep} unit={range === 'week' ? '시간' : ''} tint="#EDE9F8" />
+            <Metric emoji="☀️" label={range === 'week' ? '평균 낮잠' : '낮잠 시간'} value={summary.nap} unit="" tint="#FFF3D6" />
+            <Metric emoji="🤸" label={range === 'week' ? '평균 터미타임' : '터미타임'} value={summary.tummyTime} unit="" tint="#FDF1E4" />
+            <Metric emoji="🎈" label={range === 'week' ? '평균 놀기시간' : '놀기시간'} value={summary.play} unit="" tint="#EDF7ED" />
+            {latestWeight && <Metric emoji="⚖️" label="최근 체중" value={latestWeight.weightKg} unit="kg" tint="#EAF0F7" />}
+            {latestTemperature && <Metric emoji="🌡️" label="최근 체온" value={latestTemperature.temperatureC} unit="℃" tint="#FBECE7" />}
           </View>
-          <View style={styles.chartCard}>
-            <Text style={styles.chartTitle}>기저귀 교체 횟수 (회)</Text>
-            <View style={styles.barChartContainer}>
-              {dailyData.map(day => <DiaperBar key={day.dateStr} day={day} max={maxDiapers} />)}
+          {range === 'all' && logs.length > 0 && <Text style={styles.averageHint}>하루 평균 수유 {Math.round(allFormula / elapsedDays)}ml · 기저귀 {((allStools + allUrines) / elapsedDays).toFixed(1)}회</Text>}
+        </View>
+
+        {range === 'week' && (
+          <>
+            <View style={styles.chartCard}>
+              <Text style={styles.chartTitle}>일일 수유량 (ml)</Text>
+              <View style={styles.barChartContainer}>
+                {dailyData.map((day, index) => <Bar key={day.dateStr} value={day.formulaAmount} max={maxFormula} day={day} color={index === 6 ? COLORS.primary : COLORS.secondary} />)}
+              </View>
             </View>
-            <View style={styles.legendRow}>
-              <View style={styles.legendItem}><View style={[styles.legendDot, { backgroundColor: COLORS.secondary }]} /><Text style={styles.legendText}>소변</Text></View>
-              <View style={styles.legendItem}><View style={[styles.legendDot, { backgroundColor: COLORS.accent }]} /><Text style={styles.legendText}>대변</Text></View>
+            <View style={styles.chartCard}>
+              <Text style={styles.chartTitle}>기저귀 교체 횟수 (회)</Text>
+              <View style={styles.barChartContainer}>
+                {dailyData.map(day => <DiaperBar key={day.dateStr} day={day} max={maxDiapers} />)}
+              </View>
+              <View style={styles.legendRow}>
+                <View style={styles.legendItem}><View style={[styles.legendDot, { backgroundColor: COLORS.secondary }]} /><Text style={styles.legendText}>소변</Text></View>
+                <View style={styles.legendItem}><View style={[styles.legendDot, { backgroundColor: COLORS.accent }]} /><Text style={styles.legendText}>대변</Text></View>
+              </View>
             </View>
+            <View style={styles.chartCard}>
+              <Text style={styles.chartTitle}>목욕 횟수 (회)</Text>
+              <View style={styles.barChartContainer}>
+                {dailyData.map(day => <Bar key={day.dateStr} value={day.baths} max={maxBaths} day={day} color={COLORS.bath} />)}
+              </View>
+            </View>
+          </>
+        )}
+        {latestWeight && (
+          <View style={styles.periodCard}>
+            <Text style={styles.periodTitle}>⚖️ 성장 기록</Text>
+            <Text style={styles.periodText}>최근 {latestWeight.weightKg}kg · {formatDate(latestWeight.timestamp)}{firstWeight && firstWeight.id !== latestWeight.id ? ` · 첫 기록보다 ${(latestWeight.weightKg - firstWeight.weightKg).toFixed(2)}kg` : ''}</Text>
           </View>
-          <View style={styles.chartCard}>
-            <Text style={styles.chartTitle}>목욕 횟수 (회)</Text>
-            <View style={styles.barChartContainer}>
-              {dailyData.map(day => <Bar key={day.dateStr} value={day.baths} max={maxBaths} day={day} color={COLORS.bath} />)}
-            </View>
+        )}
+        {latestTemperature && (
+          <View style={styles.periodCard}>
+            <Text style={styles.periodTitle}>🌡️ 체온 기록</Text>
+            <Text style={styles.periodText}>최근 {latestTemperature.temperatureC}℃ · {formatDate(latestTemperature.timestamp)}{maxTemperature !== undefined ? ` · 최고 ${maxTemperature}℃` : ''}</Text>
           </View>
+        )}
         </>
-      )}
-      {latestWeight && (
-        <View style={styles.periodCard}>
-          <Text style={styles.periodTitle}>⚖️ 성장 기록</Text>
-          <Text style={styles.periodText}>최근 {latestWeight.weightKg}kg · {formatDate(latestWeight.timestamp)}{firstWeight && firstWeight.id !== latestWeight.id ? ` · 첫 기록보다 ${(latestWeight.weightKg - firstWeight.weightKg).toFixed(2)}kg` : ''}</Text>
-        </View>
-      )}
-      {latestTemperature && (
-        <View style={styles.periodCard}>
-          <Text style={styles.periodTitle}>🌡️ 체온 기록</Text>
-          <Text style={styles.periodText}>최근 {latestTemperature.temperatureC}℃ · {formatDate(latestTemperature.timestamp)}{maxTemperature !== undefined ? ` · 최고 ${maxTemperature}℃` : ''}</Text>
-        </View>
       )}
     </ScrollView>
   );
