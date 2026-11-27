@@ -41,7 +41,8 @@
     "test:offline": "bash tools/sync-harness/verify.sh offline",
     "test:push": "bash tools/sync-harness/verify.sh push",
     "test:permission": "node tests/permissionNotice.mjs",
-    "test:partner-push": "node tests/partnerPush.mjs"
+    "test:partner-push": "node tests/partnerPush.mjs",
+    "test:weekly-cards": "node tests/weeklyCards.mjs"
   },
   "private": true
 }
