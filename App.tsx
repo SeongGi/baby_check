@@ -34,7 +34,6 @@ import { shouldAlertOnRefresh, shouldStartPolling } from './src/database/migrati
 import { ensureFeedingReminderPermission, refreshFeedingReminder } from './src/utils/feedingReminder';
 import { createDeviceTokenChangeGate, loadPartnerPushSettings, reconcilePartnerPush } from './src/utils/partnerPush';
 import { getPartnerPushDeps } from './src/utils/partnerPushDeps';
-import { canDispatchAutoVoiceLaunch, getAutoVoiceLaunchAction } from './src/utils/autoVoiceLaunch';
 import { Dashboard } from './src/screens/Dashboard';
 import { LogFormula } from './src/screens/LogFormula';
 import { LogDiaper } from './src/screens/LogDiaper';
@@ -49,7 +48,8 @@ import { Diary } from './src/screens/Diary';
 const SYNC_TIMEOUT_MS = 20_000;
 // 실시간 알림이 조용히 끊겨도 상대방 기록이 결국 들어오도록 하는 안전망입니다.
 const SYNC_POLL_INTERVAL_MS = 90_000;
-const AUTO_VOICE_ON_OPEN_KEY = '@babycheck/autoVoiceOnOpen';
+// 음성기록을 뺀 뒤 기존 기기에 남은 설정값입니다. 한 번 지웁니다.
+const LEGACY_AUTO_VOICE_KEY = '@babycheck/autoVoiceOnOpen';
 
 // 'pending'은 이전 준비 중입니다(07 2.3 관문). 오류가 아니라서 재시도 배너를 띄우지 않습니다.
 type SyncState = 'idle' | 'syncing' | 'error' | 'pending';
@@ -91,17 +91,9 @@ function MainApp() {
   const [logs, setLogs] = useState<BabyLogEntry[]>([]);
   const [profile, setProfile] = useState<BabyProfile | null>(null);
   const [activeScreen, setActiveScreen] = useState<'dashboard' | 'formula' | 'diaper' | 'bath' | 'weight' | 'temperature' | 'statistics' | 'profile' | 'diary'>('dashboard');
-  const activeScreenRef = useRef(activeScreen);
-  activeScreenRef.current = activeScreen;
   const [isLoading, setIsLoading] = useState(true);
-  const [autoVoiceEnabled, setAutoVoiceEnabled] = useState(false);
-  const [autoVoiceReady, setAutoVoiceReady] = useState(false);
-  const [voiceLaunchCandidate, setVoiceLaunchCandidate] = useState(1);
-  const [voiceStartRequest, setVoiceStartRequest] = useState(0);
+  // 앱이 다시 앞으로 올 때마다 올라가는 값입니다. 가족 기록 알림 등록 맞추기가 씁니다.
   const [foregroundRevision, setForegroundRevision] = useState(0);
-  const consumedVoiceCandidateRef = useRef(0);
-  const suppressAutoVoiceUntilRef = useRef(0);
-  const previousAppStateRef = useRef(AppState.currentState);
   const [refreshing, setRefreshing] = useState(false);
   const [syncState, setSyncState] = useState<SyncState>('idle');
   const [lastSyncedAt, setLastSyncedAt] = useState<number | null>(null);
@@ -128,29 +120,18 @@ function MainApp() {
   const insets = useSafeAreaInsets();
 
   useEffect(() => {
-    let mounted = true;
-    AsyncStorage.getItem(AUTO_VOICE_ON_OPEN_KEY)
-      .then(value => { if (mounted) setAutoVoiceEnabled(value === 'true'); })
-      .catch(() => undefined)
-      .finally(() => { if (mounted) setAutoVoiceReady(true); });
-    return () => { mounted = false; };
+    AsyncStorage.removeItem(LEGACY_AUTO_VOICE_KEY).catch(() => undefined);
   }, []);
 
   useEffect(() => {
     const subscription = AppState.addEventListener('change', state => {
-      const previous = previousAppStateRef.current;
-      previousAppStateRef.current = state;
       if (state === 'active') setForegroundRevision(revision => revision + 1);
-      if (previous !== 'active' && state === 'active' && activeScreenRef.current === 'dashboard' && Date.now() >= suppressAutoVoiceUntilRef.current) {
-        setVoiceLaunchCandidate(candidate => candidate + 1);
-      }
     });
     return () => subscription.remove();
   }, []);
 
-  // 첫 실행 접근권한 안내입니다. 저장값을 읽기 전에는 음성 자동 시작을 막습니다.
+  // 첫 실행 접근권한 안내입니다.
   const [permissionNoticeVisible, setPermissionNoticeVisible] = useState(false);
-  const [permissionNoticeReady, setPermissionNoticeReady] = useState(false);
 
   useEffect(() => {
     let mounted = true;
@@ -160,7 +141,6 @@ function MainApp() {
       .then(stored => {
         if (!mounted) return;
         setPermissionNoticeVisible(shouldShowPermissionNotice(stored));
-        setPermissionNoticeReady(true);
       });
     return () => { mounted = false; };
   }, []);
@@ -169,50 +149,6 @@ function MainApp() {
     // 먼저 화면에서 닫습니다. 저장에 실패하면 다음 실행 때 다시 보이는 것으로 충분합니다.
     setPermissionNoticeVisible(false);
     AsyncStorage.setItem(PERMISSION_NOTICE_KEY, '1').catch(() => undefined);
-  };
-
-  useEffect(() => {
-    if (!permissionNoticeReady || permissionNoticeVisible) return;
-    if (!autoVoiceReady || isLoading || !profile) return;
-    const action = getAutoVoiceLaunchAction(
-      voiceLaunchCandidate,
-      consumedVoiceCandidateRef.current,
-      activeScreen === 'dashboard',
-      autoVoiceEnabled,
-      AppState.currentState,
-    );
-    if (action === 'none') return;
-    if (action === 'discard') {
-      consumedVoiceCandidateRef.current = voiceLaunchCandidate;
-      return;
-    }
-    if (action === 'defer') {
-      // currentState can be unknown during a cold launch before native state arrives.
-      const retry = setTimeout(() => setForegroundRevision(revision => revision + 1), 1000);
-      return () => clearTimeout(retry);
-    }
-    const timer = setTimeout(() => {
-      if (!canDispatchAutoVoiceLaunch(AppState.currentState)) return;
-      consumedVoiceCandidateRef.current = voiceLaunchCandidate;
-      setVoiceStartRequest(voiceLaunchCandidate);
-    }, 800);
-    return () => clearTimeout(timer);
-  }, [permissionNoticeReady, permissionNoticeVisible, autoVoiceReady, isLoading, profile, voiceLaunchCandidate, activeScreen, autoVoiceEnabled, foregroundRevision]);
-
-  useEffect(() => {
-    if (activeScreen !== 'dashboard') setVoiceStartRequest(0);
-  }, [activeScreen]);
-
-  const handleAutoVoiceEnabledChange = async (enabled: boolean) => {
-    consumedVoiceCandidateRef.current = voiceLaunchCandidate;
-    setAutoVoiceEnabled(enabled);
-    if (!enabled) setVoiceStartRequest(0);
-    try {
-      await AsyncStorage.setItem(AUTO_VOICE_ON_OPEN_KEY, enabled ? 'true' : 'false');
-    } catch {
-      setAutoVoiceEnabled(!enabled);
-      Alert.alert('설정 저장 실패', '다시 시도해 주세요.');
-    }
   };
 
   // 이전 모듈(07 2.3)과 러너는 서로를 참조합니다. 러너의 관문이 이전 모듈을 부르고, 이전 모듈이 러너에
@@ -1041,14 +977,6 @@ function MainApp() {
             onAddLog={handleAddLog} 
             onDeleteLog={handleDeleteLog} 
             onUpdateLog={handleUpdateLog}
-            autoVoiceEnabled={autoVoiceEnabled}
-            onAutoVoiceEnabledChange={handleAutoVoiceEnabledChange}
-            autoStartVoiceRequest={voiceStartRequest}
-            onAutoStartVoiceHandled={request => setVoiceStartRequest(current => current === request ? 0 : current)}
-            onVoiceRecognitionActivity={active => {
-              // The system recognizer may briefly background this Activity. Its return is not a new app launch.
-              suppressAutoVoiceUntilRef.current = Date.now() + (active ? 60_000 : 5_000);
-            }}
             onNavigate={setActiveScreen}
             onSaveDiaryLine={handleSaveDiaryLine}
             refreshing={refreshing}

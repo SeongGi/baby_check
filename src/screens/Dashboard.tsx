@@ -29,7 +29,6 @@ import {
   toDiaryDate,
   withoutDiaryLogs,
 } from '../utils/diary';
-import { VoiceLogButton } from '../components/VoiceLogButton';
 
 // 시작/종료를 한 번씩 눌러 기록하는 활동(수면·터미타임·놀기시간)은 동작이 동일해서
 // 개별 케이스를 세 번 복붙하는 대신 이 설정으로 공유합니다.
@@ -118,11 +117,6 @@ interface DashboardProps {
   onAddLog: (log: Omit<BabyLogEntry, 'id'>) => Promise<unknown>;
   onDeleteLog: (id: string) => Promise<void>;
   onUpdateLog: (log: BabyLogEntry) => Promise<boolean>;
-  autoVoiceEnabled: boolean;
-  onAutoVoiceEnabledChange: (enabled: boolean) => Promise<void>;
-  autoStartVoiceRequest: number;
-  onAutoStartVoiceHandled: (request: number) => void;
-  onVoiceRecognitionActivity: (active: boolean) => void;
   onNavigate: (screen: 'dashboard' | 'formula' | 'diaper' | 'bath' | 'weight' | 'temperature' | 'statistics' | 'profile' | 'diary') => void;
   onSaveDiaryLine: (date: string, text: string, targetId: string | null) => Promise<boolean>;
   refreshing?: boolean;
@@ -136,11 +130,6 @@ export const Dashboard: React.FC<DashboardProps> = ({
   onAddLog,
   onDeleteLog, 
   onUpdateLog,
-  autoVoiceEnabled,
-  onAutoVoiceEnabledChange,
-  autoStartVoiceRequest,
-  onAutoStartVoiceHandled,
-  onVoiceRecognitionActivity,
   onNavigate,
   onSaveDiaryLine,
   refreshing,
@@ -620,16 +609,6 @@ export const Dashboard: React.FC<DashboardProps> = ({
 
         {/* Quick Action Logging Buttons */}
         <Text style={styles.sectionHeader}>빠른 기록</Text>
-        <VoiceLogButton
-          logs={logs}
-          onAddLog={onAddLog}
-          onUpdateLog={onUpdateLog}
-          autoVoiceEnabled={autoVoiceEnabled}
-          onAutoVoiceEnabledChange={onAutoVoiceEnabledChange}
-          autoStartRequest={autoStartVoiceRequest}
-          onAutoStartHandled={onAutoStartVoiceHandled}
-          onRecognitionActivity={onVoiceRecognitionActivity}
-        />
         <View style={styles.quickActionsContainer}>
           <TouchableOpacity 
             style={[styles.quickButton, { backgroundColor: COLORS.primary }]}

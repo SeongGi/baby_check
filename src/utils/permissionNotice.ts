@@ -11,11 +11,6 @@ export type PermissionNoticeItem = {
 
 export const PERMISSION_NOTICE_ITEMS: PermissionNoticeItem[] = [
   {
-    name: '마이크',
-    required: false,
-    reason: '음성으로 수유·수면 등을 기록할 때 말소리를 인식합니다.',
-  },
-  {
     name: '알림',
     required: false,
     reason: '다음 수유 시간이 되면 알려 드립니다.',
@@ -25,12 +20,6 @@ export const PERMISSION_NOTICE_ITEMS: PermissionNoticeItem[] = [
 export type PermissionPrompt = {
   title: string;
   message: string;
-};
-
-export const MICROPHONE_PROMPT: PermissionPrompt = {
-  title: '마이크 사용 안내',
-  message:
-    '음성으로 수유·수면 등을 기록할 때 말소리를 인식하려고 마이크를 사용합니다. 마이크는 선택 권한이라서 허용하지 않아도 다른 기능은 그대로 쓸 수 있습니다.',
 };
 
 export const NOTIFICATION_PROMPT: PermissionPrompt = {
